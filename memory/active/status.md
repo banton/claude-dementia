@@ -29,3 +29,18 @@
 - Active Memory: 3,000 tokens
 - Reference Memory: 5,000 tokens
 - Archive: Compressed after 7 days
+
+### Update: 2025-08-08 14:09
+- Starting Phase 1 implementation of Unavoidable Documentation System - setting up database schema and file watchers
+
+### Update: 2025-08-08 14:16
+- Completed Phase 1 core implementation: database schema, file monitor, constant extractor, pre-commit hook, test suite, and documentation. System ready for initial testing.
+
+### Update: 2025-08-08 18:16
+- Created PROJECT_BIBLE.md - comprehensive implementation plan for Claude Intelligence MCP server. Simplified scope to single-file Python MCP server with SQLite, local embeddings, focusing on solo devs. Three core features: tech stack detection, semantic file search, change tracking. 3-week timeline to shippable PoC.
+
+### Update: 2025-08-08 18:26
+- Updated PROJECT_BIBLE.md with critical feedback: FTS5 hybrid search, xxhash for change detection, progressive indexing, proper model sizes (TF-IDF default, 33MB optional), smart ignores, test harness with real metrics. Refined to focus on practical performance over promises.
+
+### Update: 2025-08-08 18:32
+- PIVOTED: From 'Unavoidable Documentation' enforcement system to 'Claude Intelligence' - MCP-based project memory for Claude Code. Single Python file, SQLite+FTS5, TF-IDF default (0MB), optional embeddings (33MB). Progressive indexing, content hashing, hybrid search. For solo devs/small teams. 3-day demo, 2-week ship.
