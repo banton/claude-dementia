@@ -46,7 +46,10 @@ mkdir -p "$INSTALL_DIR"
 # Download the server
 echo ""
 echo "⬇️  Downloading Claude Intelligence..."
-curl -sSL https://raw.githubusercontent.com/banton/claude-dementia/main/claude-intelligence/mcp_server.py \
+# For development/testing, use feature branch
+# For production, change to 'main' branch
+BRANCH="${CLAUDE_INTEL_BRANCH:-feature/claude-intelligence}"
+curl -sSL "https://raw.githubusercontent.com/banton/claude-dementia/$BRANCH/claude-intelligence/mcp_server.py" \
     -o "$INSTALL_DIR/mcp_server.py"
 
 # Install optional dependency

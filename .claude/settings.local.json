@@ -7,7 +7,12 @@
       "Bash(python3:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(./memory/compress.sh:*)"
+      "Bash(./memory/compress.sh:*)",
+      "Bash(mkdir:*)",
+      "Bash(bash ../claude-intelligence/install.sh)",
+      "Bash(cat:*)",
+      "Bash(cp:*)",
+      "Bash(./test_local.sh:*)"
     ],
     "deny": []
   }
