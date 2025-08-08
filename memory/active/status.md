@@ -47,3 +47,6 @@
 
 ### Update: 2025-08-08 18:49
 - Successfully implemented Claude Intelligence core MCP server with TDD. All 18 tests passing. Features working: SQLite+FTS5 search, tech stack detection, progressive indexing, content hashing. Demo shows ~48KB storage for 5-file React project. Ready for next phase: git integration and installation script.
+
+### Update: 2025-08-08 21:24
+- Claude Intelligence v0.2.0 - Added git integration and installation script. All 23 tests passing. Ready for release with change tracking, session persistence, and one-line installer.

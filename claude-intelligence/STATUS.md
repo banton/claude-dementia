@@ -3,8 +3,8 @@
 ## What This Is
 A dead-simple MCP server that gives Claude persistent memory of projects - tech stack, file search, and change tracking.
 
-## Current Status: v0.1.0 ✅
-**Core implementation complete with full test coverage**
+## Current Status: v0.2.0 ✅
+**Git integration and installer complete**
 
 ### Working Features
 - **Tech Stack Detection**: Automatically detects Node.js, Python, React, Docker, etc.
@@ -12,6 +12,8 @@ A dead-simple MCP server that gives Claude persistent memory of projects - tech 
 - **Progressive Indexing**: Indexes current dir → src dirs → rest with feedback
 - **Content Hashing**: Accurate change detection using xxhash/md5
 - **Smart Ignores**: Respects .gitignore + sensible defaults
+- **Git Integration**: Track commits, changes, and session boundaries
+- **One-Line Install**: curl | bash installer with MCP config generation
 
 ### Performance
 - Storage: ~10KB per file
@@ -20,8 +22,8 @@ A dead-simple MCP server that gives Claude persistent memory of projects - tech 
 - Database: SQLite with FTS5
 
 ### Code Quality
-- Single file: `mcp_server.py` (460 lines)
-- Test coverage: 18 tests, all passing
+- Single file: `mcp_server.py` (515 lines)
+- Test coverage: 23 tests, all passing
 - TDD approach: Tests written first
 - Dependencies: Only xxhash (optional)
 
@@ -38,10 +40,10 @@ python3 mcp_server.py
 ```
 
 ## Next Steps (Priority Order)
-1. **Git Integration**: Track changes between sessions
-2. **Installation Script**: One-line installer
-3. **Optional Embeddings**: Add semantic search (33MB model)
-4. **MCP Protocol**: Full server implementation
+1. ✅ **Git Integration**: Track changes between sessions
+2. ✅ **Installation Script**: One-line installer
+3. **MCP Protocol**: Full server implementation
+4. **Optional Embeddings**: Add semantic search (33MB model)
 5. **Performance**: Optimize for 1000+ files
 
 ## File Structure
@@ -55,10 +57,10 @@ claude-intelligence/
 ```
 
 ## For Next Session
-The core is solid. Focus on:
-1. Git integration (`git diff`, `git log`)
-2. Simple installer (`curl | bash`)
-3. Real MCP server protocol
+v0.2.0 complete with git + installer. Focus on:
+1. Real MCP server protocol implementation
+2. Performance optimizations for large projects
+3. Optional semantic search with embeddings
 
 Branch: `feature/claude-intelligence`
 All tests passing, ready to extend.
