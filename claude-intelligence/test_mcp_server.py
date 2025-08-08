@@ -341,6 +341,108 @@ class TestPerformance(unittest.TestCase):
         self.assertLess(index_time, 3, f"Indexing took {index_time}s")
 
 
+class TestGitIntegration(unittest.TestCase):
+    """Test git change tracking integration"""
+    
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.original_dir = os.getcwd()
+        os.chdir(self.test_dir)
+        
+        # Initialize git repo
+        os.system('git init >/dev/null 2>&1')
+        os.system('git config user.email "test@test.com"')
+        os.system('git config user.name "Test"')
+        
+        # Create initial files
+        with open('initial.py', 'w') as f:
+            f.write("def initial(): pass")
+        os.system('git add . && git commit -m "initial" >/dev/null 2>&1')
+        
+    def tearDown(self):
+        os.chdir(self.original_dir)
+        shutil.rmtree(self.test_dir)
+    
+    @unittest.skipIf(ClaudeIntelligence is None, "Server not implemented yet")
+    def test_detects_git_repository(self):
+        """Should detect if in a git repository"""
+        server = ClaudeIntelligence()
+        self.assertTrue(server.is_git_repo())
+    
+    @unittest.skipIf(ClaudeIntelligence is None, "Server not implemented yet")
+    def test_gets_recent_commits(self):
+        """Should get recent commit history"""
+        # Add another commit
+        with open('new.py', 'w') as f:
+            f.write("def new(): pass")
+        os.system('git add . && git commit -m "add new file" >/dev/null 2>&1')
+        
+        server = ClaudeIntelligence()
+        commits = server.get_recent_commits(limit=5)
+        
+        self.assertEqual(len(commits), 2)
+        self.assertEqual(commits[0]['message'], 'add new file')
+        self.assertEqual(commits[1]['message'], 'initial')
+    
+    @unittest.skipIf(ClaudeIntelligence is None, "Server not implemented yet")
+    def test_gets_changed_files(self):
+        """Should get files changed since last session"""
+        server = ClaudeIntelligence()
+        list(server.index_progressive())
+        
+        # Modify a file
+        with open('initial.py', 'a') as f:
+            f.write("\n# Modified")
+        
+        # Create new file
+        with open('added.py', 'w') as f:
+            f.write("def added(): pass")
+        
+        changes = server.get_changes_since_last_index()
+        
+        self.assertIn('modified', changes)
+        self.assertIn('added', changes)
+        self.assertIn('initial.py', [f['path'] for f in changes['modified']])
+        self.assertIn('added.py', [f['path'] for f in changes['added']])
+    
+    @unittest.skipIf(ClaudeIntelligence is None, "Server not implemented yet")
+    def test_tracks_session_boundaries(self):
+        """Should track when last indexed"""
+        server = ClaudeIntelligence()
+        
+        # Should have no last session initially
+        self.assertIsNone(server.get_last_session_time())
+        
+        # Index files
+        list(server.index_progressive())
+        
+        # Should now have session time
+        last_time = server.get_last_session_time()
+        self.assertIsNotNone(last_time)
+        
+        # New server instance should remember
+        server2 = ClaudeIntelligence()
+        self.assertEqual(server2.get_last_session_time(), last_time)
+    
+    @unittest.skipIf(ClaudeIntelligence is None, "Server not implemented yet")
+    def test_recent_changes_tool(self):
+        """recent_changes MCP tool should work correctly"""
+        server = ClaudeIntelligence()
+        list(server.index_progressive())
+        
+        # Make changes
+        with open('initial.py', 'a') as f:
+            f.write("\n# Changed")
+        
+        # Run async method synchronously for testing
+        import asyncio
+        result = asyncio.run(server.recent_changes())
+        
+        self.assertIn('changes', result)
+        self.assertIn('commits', result)
+        self.assertIn('summary', result)
+
+
 class TestMCPInterface(unittest.TestCase):
     """Test MCP tool interface"""
     
@@ -354,10 +456,11 @@ class TestMCPInterface(unittest.TestCase):
         shutil.rmtree(self.test_dir)
     
     @unittest.skipIf(ClaudeIntelligence is None, "Server not implemented yet")
-    async def test_understand_project_tool(self):
+    def test_understand_project_tool(self):
         """understand_project should return correct format"""
+        import asyncio
         server = ClaudeIntelligence()
-        result = await server.understand_project()
+        result = asyncio.run(server.understand_project())
         
         # Should have required keys
         self.assertIn('stack', result)
@@ -370,15 +473,16 @@ class TestMCPInterface(unittest.TestCase):
         self.assertIsInstance(result['summary'], str)
     
     @unittest.skipIf(ClaudeIntelligence is None, "Server not implemented yet")
-    async def test_find_files_tool(self):
+    def test_find_files_tool(self):
         """find_files should return correct format"""
+        import asyncio
         with open('test.py', 'w') as f:
             f.write("def test(): pass")
             
         server = ClaudeIntelligence()
         list(server.index_progressive())
         
-        results = await server.find_files("test")
+        results = asyncio.run(server.find_files("test"))
         
         # Should return list
         self.assertIsInstance(results, list)

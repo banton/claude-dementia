@@ -11,6 +11,8 @@ import sqlite3
 import hashlib
 import time
 import re
+import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Generator
 from dataclasses import dataclass, asdict
@@ -89,6 +91,16 @@ class ClaudeIntelligence:
                 key TEXT PRIMARY KEY,
                 value TEXT,
                 updated_at REAL
+            )
+        """)
+        
+        # Create sessions table for tracking
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL,
+                files_indexed INTEGER,
+                tech_stack TEXT
             )
         """)
         
@@ -268,6 +280,9 @@ class ClaudeIntelligence:
             indexed_count += remaining_count
             yield f"Indexed remaining files ({remaining_count} files)"
         
+        # Save session info
+        self._save_session()
+        
         yield f"Indexing complete: {indexed_count} files"
     
     def is_indexed(self, file_path: str) -> bool:
@@ -404,12 +419,101 @@ class ClaudeIntelligence:
         """MCP tool: Find files by semantic search"""
         return self.search(query, k)
     
+    def is_git_repo(self) -> bool:
+        """Check if current directory is a git repository"""
+        return Path('.git').exists()
+    
+    def get_recent_commits(self, limit: int = 10) -> List[Dict[str, str]]:
+        """Get recent git commits"""
+        if not self.is_git_repo():
+            return []
+        
+        try:
+            # Get commit log
+            result = subprocess.run(
+                ['git', 'log', f'--max-count={limit}', '--pretty=format:%H|%ai|%s|%an'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            commits = []
+            for line in result.stdout.strip().split('\n'):
+                if line:
+                    hash_val, date, message, author = line.split('|', 3)
+                    commits.append({
+                        'hash': hash_val,
+                        'date': date,
+                        'message': message,
+                        'author': author
+                    })
+            
+            return commits
+        except subprocess.CalledProcessError:
+            return []
+    
+    def get_last_session_time(self) -> Optional[float]:
+        """Get timestamp of last indexing session"""
+        cursor = self.db.execute(
+            "SELECT timestamp FROM sessions ORDER BY timestamp DESC LIMIT 1"
+        )
+        row = cursor.fetchone()
+        return row['timestamp'] if row else None
+    
+    def _save_session(self):
+        """Save current session info"""
+        tech_stack = json.dumps(self.detect_tech_stack())
+        self.db.execute(
+            "INSERT INTO sessions (timestamp, files_indexed, tech_stack) VALUES (?, ?, ?)",
+            (time.time(), self.file_count, tech_stack)
+        )
+        self.db.commit()
+    
+    def get_changes_since_last_index(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Get files that changed since last index"""
+        changes = {'modified': [], 'added': [], 'deleted': []}
+        
+        # Get all current files
+        current_files = {}
+        for path in Path('.').rglob('*'):
+            if path.is_file() and not self.should_ignore(str(path)):
+                current_files[str(path)] = self.get_file_hash(str(path))
+        
+        # Compare with indexed files
+        cursor = self.db.execute("SELECT path, hash FROM files")
+        indexed_files = {row['path']: row['hash'] for row in cursor}
+        
+        # Find changes
+        for path, hash_val in current_files.items():
+            if path in indexed_files:
+                if indexed_files[path] != hash_val:
+                    changes['modified'].append({'path': path})
+            else:
+                changes['added'].append({'path': path})
+        
+        # Find deleted files
+        for path in indexed_files:
+            if path not in current_files:
+                changes['deleted'].append({'path': path})
+        
+        return changes
+    
     async def recent_changes(self, since: str = 'auto') -> Dict[str, Any]:
         """MCP tool: Get recent changes"""
-        # TODO: Implement git integration
+        changes = self.get_changes_since_last_index()
+        commits = self.get_recent_commits(5) if self.is_git_repo() else []
+        
+        # Count total changes
+        total = len(changes['modified']) + len(changes['added']) + len(changes['deleted'])
+        
+        summary = f"{total} file changes"
+        if commits:
+            summary += f", {len(commits)} recent commits"
+        
         return {
-            'commits': [],
-            'files': []
+            'changes': changes,
+            'commits': commits,
+            'summary': summary
         }
 
 
