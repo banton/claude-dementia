@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "claude-intelligence": {
+      "command": "python3",
+      "args": ["/Users/banton/.claude-intelligence/mcp_wrapper.py"],
+      "description": "Persistent memory for projects - file search, TODOs, and session tracking",
+      "alwaysAllow": [
+        "understand_project",
+        "find_files", 
+        "recent_changes",
+        "restore_session",
+        "get_todos"
+      ]
+    }
+  }
+}

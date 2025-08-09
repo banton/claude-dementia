@@ -43,14 +43,21 @@ fi
 
 mkdir -p "$INSTALL_DIR"
 
-# Download the server
+# Download the server files
 echo ""
 echo "⬇️  Downloading Claude Intelligence..."
 # For development/testing, use feature branch
 # For production, change to 'main' branch
 BRANCH="${CLAUDE_INTEL_BRANCH:-feature/claude-intelligence}"
+
 curl -sSL "https://raw.githubusercontent.com/banton/claude-dementia/$BRANCH/claude-intelligence/mcp_server.py" \
     -o "$INSTALL_DIR/mcp_server.py"
+
+curl -sSL "https://raw.githubusercontent.com/banton/claude-dementia/$BRANCH/claude-intelligence/claude_session_memory.py" \
+    -o "$INSTALL_DIR/claude_session_memory.py"
+
+curl -sSL "https://raw.githubusercontent.com/banton/claude-dementia/$BRANCH/claude-intelligence/mcp_wrapper.py" \
+    -o "$INSTALL_DIR/mcp_wrapper.py"
 
 # Install optional dependency
 echo ""
@@ -70,13 +77,22 @@ EOF
 chmod +x "$INSTALL_DIR/claude-intelligence"
 
 # Create MCP config snippet
-MCP_CONFIG="$INSTALL_DIR/mcp-config.json"
+MCP_CONFIG="$INSTALL_DIR/mcp-config-snippet.json"
 cat > "$MCP_CONFIG" << EOF
 {
-  "claude-intelligence": {
-    "command": "python3",
-    "args": ["$INSTALL_DIR/mcp_server.py"],
-    "description": "Project memory for Claude Code"
+  "mcpServers": {
+    "claude-intelligence": {
+      "command": "python3",
+      "args": ["$INSTALL_DIR/mcp_wrapper.py"],
+      "description": "Persistent memory - file search, TODOs, session tracking",
+      "alwaysAllow": [
+        "understand_project",
+        "find_files",
+        "recent_changes",
+        "restore_session",
+        "get_todos"
+      ]
+    }
   }
 }
 EOF
