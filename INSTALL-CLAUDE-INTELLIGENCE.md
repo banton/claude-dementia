@@ -16,6 +16,7 @@ git status 2>/dev/null || echo "Not a git repo"
 ```bash
 # Copy the core files
 cp /Users/banton/Sites/claude-dementia/claude-intelligence/mcp_server.py ./
+cp /Users/banton/Sites/claude-dementia/claude-intelligence/claude_session_memory.py ./
 cp /Users/banton/Sites/claude-dementia/claude-intelligence/test_mcp_server.py ./
 cp /Users/banton/Sites/claude-dementia/claude-intelligence/demo.py ./
 cp /Users/banton/Sites/claude-dementia/claude-intelligence/requirements.txt ./claude-intelligence-requirements.txt
@@ -128,30 +129,54 @@ This project has Claude Intelligence installed for persistent memory.
 
 ## On Session Start
 
-Load the project intelligence:
+Load the project intelligence and memory:
 ```python
 from mcp_server import ClaudeIntelligence
+from claude_session_memory import integrate_with_intelligence
+
+# Integrate memory features
+integrate_with_intelligence()
+
+# Initialize
 server = ClaudeIntelligence()
+
+# Restore previous session
+print(server.restore_session())
 
 # See what changed since last session
 import asyncio
 changes = asyncio.run(server.recent_changes())
 print(changes['summary'])
-
-# Understand the project
-info = asyncio.run(server.understand_project())
-print(f"Tech stack: {info['stack']}")
 ```
 
 ## During Development
 
-Search for files by meaning:
+Track your work:
 ```python
-# Find payment-related code
-results = asyncio.run(server.find_files("payment processing"))
+# Log important updates
+server.add_update("Implemented OAuth2 flow with Google")
+server.add_update("Fixed race condition in payment processing", category="fix")
 
-# Find authentication logic  
-results = asyncio.run(server.find_files("user login auth"))
+# Track TODOs
+server.add_todo("Review security headers", priority=1)
+server.add_todo("Add rate limiting to API", priority=2)
+
+# Document fixes
+server.add_fix(
+    problem="Users getting 401 errors randomly",
+    cause="JWT token timezone mismatch",
+    solution="Use UTC consistently",
+    prevention="Added timezone validation test"
+)
+
+# Record decisions
+server.add_question(
+    "Should we cache user sessions in Redis or use JWT?",
+    options=["Redis", "JWT", "Both"]
+)
+
+# Search for files by meaning
+results = asyncio.run(server.find_files("payment processing"))
 ```
 
 ## Project-Specific Notes

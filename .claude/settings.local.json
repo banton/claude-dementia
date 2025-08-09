@@ -12,7 +12,8 @@
       "Bash(bash ../claude-intelligence/install.sh)",
       "Bash(cat:*)",
       "Bash(cp:*)",
-      "Bash(./test_local.sh:*)"
+      "Bash(./test_local.sh:*)",
+      "Bash(rm:*)"
     ],
     "deny": []
   }
