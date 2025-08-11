@@ -10,9 +10,12 @@ import asyncio
 from typing import Dict, Any, Optional
 from mcp_server import ClaudeIntelligence
 from claude_session_memory import integrate_with_intelligence
+from context_locking import integrate_locking_with_intelligence
 
 # Integrate memory features
 integrate_with_intelligence()
+# Integrate locking features
+integrate_locking_with_intelligence()
 
 
 class MCPServer:
@@ -81,6 +84,40 @@ class MCPServer:
                             "name": "restore_session",
                             "description": "Get session restoration info",
                             "parameters": {}
+                        },
+                        {
+                            "name": "lock_context",
+                            "description": "Lock immutable context snapshot",
+                            "parameters": {
+                                "content": {"type": "string", "required": True},
+                                "label": {"type": "string", "required": True},
+                                "version": {"type": "string"},
+                                "persist": {"type": "boolean", "default": False}
+                            }
+                        },
+                        {
+                            "name": "recall_context",
+                            "description": "Retrieve locked context",
+                            "parameters": {
+                                "label": {"type": "string", "required": True},
+                                "version": {"type": "string", "default": "latest"}
+                            }
+                        },
+                        {
+                            "name": "list_locked_contexts",
+                            "description": "List all locked contexts",
+                            "parameters": {
+                                "session_only": {"type": "boolean", "default": True}
+                            }
+                        },
+                        {
+                            "name": "unlock_context",
+                            "description": "Remove locked context",
+                            "parameters": {
+                                "label": {"type": "string", "required": True},
+                                "version": {"type": "string"},
+                                "confirm": {"type": "boolean", "default": False}
+                            }
                         }
                     ]
                 },
@@ -123,6 +160,28 @@ class MCPServer:
             
             elif tool_name == "restore_session":
                 return self.server.restore_session()
+            
+            elif tool_name == "lock_context":
+                content = params.get("content", "")
+                label = params.get("label", "")
+                version = params.get("version")
+                persist = params.get("persist", False)
+                return await self.server.lock_context(content, label, version, persist)
+            
+            elif tool_name == "recall_context":
+                label = params.get("label", "")
+                version = params.get("version", "latest")
+                return await self.server.recall_context(label, version)
+            
+            elif tool_name == "list_locked_contexts":
+                session_only = params.get("session_only", True)
+                return await self.server.list_locked_contexts(session_only)
+            
+            elif tool_name == "unlock_context":
+                label = params.get("label", "")
+                version = params.get("version")
+                confirm = params.get("confirm", False)
+                return await self.server.unlock_context(label, version, confirm)
             
             else:
                 return {"error": f"Unknown tool: {tool_name}"}
