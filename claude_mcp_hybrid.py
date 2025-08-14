@@ -32,7 +32,19 @@ def get_database_path():
     if os.environ.get('CLAUDE_MEMORY_DB'):
         return os.environ['CLAUDE_MEMORY_DB']
     
-    # Option 2: If in a clear project directory (has git, package.json, etc), use local DB
+    # Option 2: Use the project directory from the launcher script
+    # This ensures we use the directory where Claude is actually working
+    if os.environ.get('CLAUDE_PROJECT_DIR'):
+        project_dir = os.environ['CLAUDE_PROJECT_DIR']
+        # Check if it's a project directory
+        project_markers = ['.git', 'package.json', 'requirements.txt', 'Cargo.toml', 
+                          'go.mod', 'pom.xml', 'Gemfile', '.project', '.vscode']
+        if any(os.path.exists(os.path.join(project_dir, marker)) for marker in project_markers):
+            return os.path.join(project_dir, '.claude-memory.db')
+        # Even if no markers, use project dir if explicitly set
+        return os.path.join(project_dir, '.claude-memory.db')
+    
+    # Option 3: If in a clear project directory (has git, package.json, etc), use local DB
     cwd = os.getcwd()
     project_markers = ['.git', 'package.json', 'requirements.txt', 'Cargo.toml', 
                       'go.mod', 'pom.xml', 'Gemfile', '.project', '.vscode']
@@ -70,7 +82,13 @@ def get_database_path():
 
 # Set up database path and project info
 DB_PATH = get_database_path()
-PROJECT_ROOT = os.getcwd()
+
+# Use the project directory from environment if available, otherwise current directory
+if os.environ.get('CLAUDE_PROJECT_DIR'):
+    PROJECT_ROOT = os.environ['CLAUDE_PROJECT_DIR']
+else:
+    PROJECT_ROOT = os.getcwd()
+
 PROJECT_NAME = os.path.basename(PROJECT_ROOT) or 'Claude Desktop'
 
 # Show where database is stored (for debugging)
@@ -797,8 +815,11 @@ async def project_update() -> str:
     conn = get_db()
     session_id = get_current_session_id()
     
-    # Get project root
-    project_root = Path.cwd()
+    # Get project root - use the environment variable if set, otherwise current directory
+    if os.environ.get('CLAUDE_PROJECT_DIR'):
+        project_root = Path(os.environ['CLAUDE_PROJECT_DIR'])
+    else:
+        project_root = Path.cwd()
     
     output = []
     output.append(f"🔍 Scanning project: {project_root.name}")

@@ -5,20 +5,26 @@
 # Ensure we use the correct Python version
 export PATH="/usr/local/bin:/usr/bin:$PATH"
 
-# Set the working directory to where the server files are
-# Portable way to get the script directory
+# CRITICAL: Capture the original working directory (where Claude is running)
+# This is the project directory we need to work with
+export CLAUDE_PROJECT_DIR="$(pwd)"
+
+# Get the directory where the MCP server is installed
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-cd "$SCRIPT_DIR"
+
+# Add the MCP server directory to Python path so imports work
+export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
 
 # Preserve debug environment variables
 export DEBUG="${DEBUG:-mcp:*}"
 export PYTHONUNBUFFERED=1  # Ensure output isn't buffered
-export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
 
 # Log startup (to stderr to avoid polluting stdio)
 echo "Starting Claude Dementia MCP Server..." >&2
-echo "Working directory: $SCRIPT_DIR" >&2
-echo "Database: $SCRIPT_DIR/.claude-memory.db" >&2
+echo "Project directory: $CLAUDE_PROJECT_DIR" >&2
+echo "Server location: $SCRIPT_DIR" >&2
 
-# Run the server
+# Run the server from the PROJECT directory, not the server directory
+# This ensures all file operations happen in the right place
+cd "$CLAUDE_PROJECT_DIR"
 exec python3 "$SCRIPT_DIR/claude_mcp_hybrid.py" "$@"
