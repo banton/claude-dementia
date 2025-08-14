@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "dementia": {
+      "command": "/path/to/claude-dementia/claude-dementia-server.sh",
+      "args": [],
+      "env": {}
+    }
+  }
+}

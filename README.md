@@ -1,229 +1,247 @@
-# Claude Code Memory System v3.0
+# Claude Dementia 🧠
 
-**Give Claude Code perfect memory across sessions. Install from GitHub in 30 seconds.**
+> An MCP server that gives Claude persistent memory between sessions, with intelligent project understanding and context management.
 
-## 🚀 Quick Start: Just Ask Claude Code
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+## What is Claude Dementia?
+
+Claude Dementia solves the "forgetting Claude" problem - where Claude loses context between conversations. It provides:
+
+- **Persistent Memory**: Context and progress tracked across sessions
+- **Project Intelligence**: Automatic code analysis and quality detection  
+- **Context Locking**: Save and recall exact information with versioning
+- **Smart Isolation**: Per-project databases prevent context bleeding
+
+## Key Features
+
+### 🔒 Context Locking
+Save important information with perfect recall:
+```python
+# Lock API configuration
+lock_context("API_KEY = os.environ['SECRET']", "api_config")
+
+# Later, in a new session
+recall_context("api_config")  # Returns exact content
 ```
-"Install the Claude memory system from https://github.com/banton/claude-dementia"
+
+### 🏷️ Intelligent File Tagging
+Automatically analyzes and tags your codebase:
+- **Status**: `deprecated`, `poc`, `beta`, `stable`
+- **Quality**: `needs-work`, `has-mock-data`, `has-placeholder-data`
+- **Domain**: `auth`, `payment`, `user`, `api`
+- **Layer**: `model`, `controller`, `service`, `test`
+
+### 🎭 Mock Data Detection
+Finds development artifacts Claude often creates:
+```python
+project_update()  # Scans project
+search_by_tags("quality:has-mock-data")  # Find all mock data
+search_by_tags("quality:has-dev-urls")   # Find localhost URLs
 ```
 
-Or provide these specific commands:
+### 📊 Project Insights
+Get actionable recommendations:
+```python
+file_insights("src/api/auth.py")
+# Returns:
+# • Status: stable
+# • Quality: needs-work, has-placeholder-data
+# Recommendations:
+# 🔧 Address improvement markers
+# 📝 Replace placeholder values (foo/bar/test@example)
+```
+
+## Quick Start
+
+### 1. Install for Claude Desktop/Code
+
 ```bash
-git clone https://github.com/banton/claude-dementia /tmp/claude-memory
-cp /tmp/claude-memory/CLAUDE.md ./ && cp -r /tmp/claude-memory/memory ./
-chmod +x memory/*.sh && rm -rf /tmp/claude-memory
-./memory/compress.sh
-```
-
-Claude Code will then:
-1. Clone the repository
-2. Copy the memory structure
-3. Set up the automation scripts
-4. Initialize the memory files
-5. Start using the system immediately
-
-## 📋 What Claude Code Should Do
-
-### Step 1: Clone and Install
-```bash
-# Clone the memory system
-git clone https://github.com/banton/claude-dementia /tmp/claude-memory
-cd /tmp/claude-memory
-
-# Copy essential files to project
-cp CLAUDE.md /path/to/project/
-cp -r memory /path/to/project/
-cp setup-memory-v3.sh /path/to/project/
-
-# Run setup
-cd /path/to/project
-chmod +x setup-memory-v3.sh
-./setup-memory-v3.sh
-
-# Clean up
-rm -rf /tmp/claude-memory
-rm setup-memory-v3.sh
-```
-
-### Step 2: Initialize Memory
-```bash
-# Create initial status
-cat > memory/active/status.md << EOF
-# Current Status
-
-## Project: $(basename $(pwd))
-## Started: $(date +"%Y-%m-%d")
-## Memory System: v3.0 installed
-
-### Recent Updates
-- Claude memory system installed from GitHub
-- Ready for development with persistent memory
-EOF
-
-# Verify installation
-./memory/compress.sh
-```
-
-### Step 3: Start Using
-After installation, Claude Code should always:
-```bash
-# At session start
-cat CLAUDE.md memory/active/status.md memory/active/context.md
-
-# During work
-./memory/update.sh "What was accomplished"
-
-# Before session end
-./memory/update.sh "Session complete: X done, Y next"
-```
-
-## 🤖 For Claude Code: Your New Memory System
-
-Once installed, you'll have:
-- **10,000 token budget** - Never exceed context limits
-- **Automatic compression** - Maintains information density
-- **Progressive loading** - Load only what's needed
-- **Session persistence** - Remember everything between sessions
-
-### Your Daily Workflow
-1. **Start**: Read CLAUDE.md and active memory
-2. **Work**: Update memory after each feature/fix
-3. **End**: Summarize session for next time
-
-### Memory Structure
-```
-memory/
-├── active/      # Current work (3k tokens)
-├── reference/   # Stable patterns (5k tokens)
-├── archive/     # Compressed history
-└── *.sh         # Automation scripts
-```
-
-## 💡 What This Solves
-
-Claude Code has no memory between sessions. This system provides:
-- **Perfect recall** of previous work
-- **Consistent patterns** across sessions
-- **Zero manual maintenance** via automation
-- **Sustainable growth** within token limits
-
-## 📊 Key Features
-
-### Token Budget Management
-| Memory Type | Tokens | Purpose |
-|-------------|---------|---------|
-| Active | 3,000 | Current work |
-| Reference | 5,000 | Stable knowledge |
-| Buffer | 2,000 | Overflow space |
-| **Total** | **10,000** | **Hard limit** |
-
-### Automation Scripts
-- `memory/update.sh` - Quick memory updates
-- `memory/compress.sh` - Token enforcement
-- `memory/weekly-maintenance.sh` - Auto-archival
-
-### Compression Strategy
-- Tables over paragraphs (3:1 ratio)
-- One-line summaries
-- File path references
-- Automatic truncation
-
-## 🛠 Manual Installation (Alternative)
-
-If automatic installation fails:
-
-### 1. Download Files
-```bash
-# Option A: With git
-git clone https://github.com/banton/claude-dementia
+# Clone repository
+git clone https://github.com/banton/claude-dementia.git
 cd claude-dementia
 
-# Option B: Without git
-curl -L https://github.com/banton/claude-dementia/archive/main.zip -o claude-memory.zip
-unzip claude-memory.zip
-cd claude-dementia-main
+# Install dependencies
+pip install mcp
+
+# Make scripts executable
+chmod +x claude-dementia-server.sh
 ```
 
-### 2. Copy to Project
-```bash
-cp CLAUDE.md /your/project/
-cp -r memory /your/project/
-cd /your/project
-chmod +x memory/*.sh
+### 2. Configure Claude
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "dementia": {
+      "command": "/path/to/claude-dementia/claude-dementia-server.sh"
+    }
+  }
+}
 ```
 
-### 3. Initialize
-```bash
-echo "# Project: YourProject" > memory/active/status.md
-echo "# Context: Starting with Claude memory" > memory/active/context.md
-./memory/compress.sh
+### 3. Use in Claude
+
+```python
+# Start session
+wake_up()
+# Output: Session loaded, showing TODOs, recent changes
+
+# Track work  
+memory_update("progress", "Implemented OAuth login")
+
+# Lock important context
+lock_context(config_code, "oauth_setup")
+
+# Analyze project
+project_update()  # Scans and tags all files
+what_needs_attention()  # Shows issues to fix
+
+# End session
+sleep()  # Saves summary
 ```
 
-## 📚 Documentation
+## How It Works
 
-### For Claude Code
-- `CLAUDE.md` - Your primary guide (always read first)
-- `QUICK-REFERENCE.md` - Command cheat sheet
-- `memory/active/status.md` - Current project state
+### Smart Database Location
 
-### For Humans
-- `MIGRATION-GUIDE.md` - Upgrading from v2.0
-- `COMPARISON-v2-v3.md` - Version differences
-- `claude-usage-example-v3.md` - Usage patterns
+Claude Dementia intelligently determines where to store memory:
 
-## 🔧 Customization
+1. **Project Directory** (has .git, package.json, etc.)
+   - Creates `.claude-memory.db` in project root
+   - Memory stays with project
+   
+2. **Non-Project Directory** (Desktop, random folders)
+   - Creates `~/.claude-dementia/{hash}.db`
+   - Each unique path gets its own database
 
-After installation, Claude Code can customize:
+3. **Environment Override**
+   - Set `CLAUDE_MEMORY_DB=/custom/path.db` for full control
 
-### Token Budgets
-Edit `memory/compress.sh`:
-```bash
-ACTIVE_BUDGET=2000    # Adjust as needed
-REFERENCE_BUDGET=800  # Tighter compression
+### Memory Categories
+
+Track different types of information:
+- `progress` - Work completed
+- `decision` - Technical decisions made
+- `error` - Issues encountered
+- `todo` - Tasks to complete
+- `question` - Open questions
+- `insight` - Important discoveries
+
+## Available Tools
+
+### Session Management
+- `wake_up()` - Start session with context
+- `sleep()` - End session with summary
+
+### Memory Operations
+- `memory_update(category, content, metadata)` - Add memory
+- `memory_status()` - View statistics
+- `search_semantic(query)` - Search all memory
+
+### Context Locking
+- `lock_context(content, topic, tags)` - Save snapshot
+- `recall_context(topic, version)` - Retrieve content
+- `list_topics()` - Show all locked contexts
+
+### Project Intelligence  
+- `project_update()` - Scan and tag files
+- `project_status()` - View project insights
+- `tag_path(path, tags, comment)` - Manual tagging
+- `search_by_tags(query)` - Query files by tags
+- `file_insights(path)` - Get file recommendations
+
+### Smart Queries
+- `what_changed()` - Recent updates
+- `what_needs_attention()` - Issues requiring action
+- `search_semantic(query)` - Natural language search
+
+## Example Workflows
+
+### Starting a New Feature
+```python
+wake_up()
+memory_update("todo", "Implement user authentication", '{"priority": "HIGH"}')
+project_update()  # Understand codebase
+search_by_tags("domain:auth")  # Find auth-related files
 ```
 
-### Archive Schedule
-Edit `memory/weekly-maintenance.sh`:
-```bash
-# Archive after 3 days instead of 7
--mtime +3
+### Debugging Session
+```python
+wake_up()
+what_needs_attention()  # See errors and issues
+search_semantic("database connection")  # Find related context
+memory_update("error", "Connection timeout", '{"file": "db.py"}')
 ```
 
-## 🐛 Troubleshooting
-
-### "GitHub repo not accessible"
-```bash
-# Use alternative URL
-git clone https://github.com/banton/claude-dementia.git
-
-# Or download ZIP
-curl -L https://github.com/banton/claude-dementia/archive/refs/heads/main.zip -o cm.zip
+### Code Review
+```python
+project_update()
+search_by_tags("quality:needs-work")  # Files with TODOs
+search_by_tags("quality:has-mock-data")  # Find mock data
+file_insights("src/main.py")  # Get specific recommendations
 ```
 
-### "Scripts not executable"
-```bash
-chmod +x memory/*.sh
+## Project Structure
+
+```
+claude-dementia/
+├── claude_mcp_hybrid.py      # MCP server implementation
+├── claude-dementia-server.sh  # Launch script
+├── CLAUDE.md                  # Guide for Claude
+├── INSTALL.md                 # Installation guide
+├── README.md                  # This file
+├── example-mcp-config.json    # Example configuration
+└── .gitignore                 # Excludes .claude-memory.db
 ```
 
-### "Over token budget"
-```bash
-./memory/compress.sh
-./memory/weekly-maintenance.sh
-```
+## Database Schema
 
-## 🤝 Contributing
+All data stored in `.claude-memory.db`:
+- `sessions` - Development sessions
+- `memory_entries` - Categorized memory
+- `context_locks` - Version-controlled snapshots
+- `file_tags` - File metadata and quality indicators
+- `todos` - Task management
+- `project_variables` - Project intelligence
 
-Improvements welcome! The system evolves through real-world usage.
+## Contributing
 
-## 📄 License
+Contributions welcome! Please:
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new features
+4. Submit a pull request
 
-MIT License - Free for personal and commercial use.
+## Troubleshooting
+
+### Memory not persisting between sessions
+- Check database location with `wake_up()` 
+- Ensure working directory is consistent
+
+### "Unexpected token" error in Claude
+- Server outputting non-JSON
+- Check for print statements in code
+
+### Can't find memory tools
+- Verify MCP configuration
+- Restart Claude after config changes
+
+## License
+
+MIT License - see [LICENSE](LICENSE) file
+
+## Support
+
+- **Issues**: [GitHub Issues](https://github.com/banton/claude-dementia/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/banton/claude-dementia/discussions)
+
+## Acknowledgments
+
+Built using Anthropic's [MCP (Model Context Protocol)](https://github.com/anthropics/mcp) framework.
 
 ---
 
-**For Claude Code**: After installing this system, you'll never lose context again. Every session builds on the last, within sustainable token limits.
-
-**Repository**: https://github.com/banton/claude-dementia  
-**Version**: 3.0.0  
-**Token Budget**: 10,000 (enforced)
+*Claude Dementia - Because Claude shouldn't forget what you were working on.*

@@ -1,0 +1,68 @@
+# Claude Dementia memory database
+.claude-memory.db
+.claude-memory.db-journal
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Testing
+.coverage
+.pytest_cache/
+.tox/
+htmlcov/
+*.cover
+
+# Package managers
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Distribution
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Temporary files
+*.tmp
+*.bak
+.temp/
+tmp/

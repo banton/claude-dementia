@@ -1,6 +1,24 @@
-# CLAUDE.md - Compressed Memory System Guide v3.0
+# CLAUDE.md - Compressed Memory System Guide v3.1
 
 > **You are Claude Code, working within a 10,000 token memory budget. This document + active memory files are your persistent context. Always load these first.**
+
+## 🔒 NEW: Context Locking Feature
+
+Lock important context (API specs, configs, architecture) for perfect recall:
+
+```python
+# Natural language commands:
+"lock this as api_spec"       # Locks previous code block
+"recall api_spec"              # Gets exact content back
+"show locks"                   # Lists all locked contexts
+"unlock api_spec"              # Removes lock
+
+# Emergency commands:
+"EMERGENCY STOP"               # Disables locking
+"RESET ALL LOCKS"              # Clears all locks
+```
+
+**Safety:** System prevents recursive locks and repetition loops automatically.
 
 ## 📦 Installation from GitHub
 
@@ -50,6 +68,16 @@ git status
 # Load context
 cat memory/active/context.md
 
+# Check locked contexts
+python3 -c "
+from mcp_server import ClaudeIntelligence
+import asyncio
+server = ClaudeIntelligence()
+locks = asyncio.run(server.list_locked_contexts())
+for lock in locks:
+    print(f'{lock[\"label\"]} v{lock[\"version\"]} ({lock[\"size\"]} bytes)')
+"
+
 # Ask: "What are we working on?"
 ```
 
@@ -57,6 +85,10 @@ cat memory/active/context.md
 ```bash
 # Quick updates (auto-compresses)
 ./memory/update.sh "Implemented feature X"
+
+# Lock important context when discussing complex designs
+# Example: "Here's the API spec: [code]. Lock this as api_v2"
+# Later: "recall api_v2" to get it back perfectly
 
 # Fix issues properly
 # Document in: memory/fixes/YYYY-MM-DD-issue.md
