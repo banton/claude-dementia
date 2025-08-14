@@ -101,7 +101,154 @@ def get_db():
     """Get database connection with row factory"""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    
+    # Initialize database schema if needed
+    initialize_database(conn)
+    
     return conn
+
+def initialize_database(conn):
+    """Create database tables if they don't exist"""
+    cursor = conn.cursor()
+    
+    # Create sessions table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            started_at REAL NOT NULL,
+            ended_at REAL,
+            last_active REAL,
+            summary TEXT
+        )
+    ''')
+    
+    # Create memory_entries table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS memory_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            content TEXT NOT NULL,
+            metadata TEXT,
+            timestamp REAL NOT NULL,
+            session_id TEXT,
+            FOREIGN KEY (session_id) REFERENCES sessions(id)
+        )
+    ''')
+    
+    # Create context_locks table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS context_locks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            version TEXT NOT NULL DEFAULT '1.0',
+            content TEXT NOT NULL CHECK(length(content) <= 51200),
+            content_hash TEXT NOT NULL,
+            locked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            lock_source TEXT DEFAULT 'user',
+            is_persistent BOOLEAN DEFAULT 0,
+            parent_version TEXT,
+            metadata TEXT,
+            UNIQUE(session_id, label, version),
+            CHECK(version GLOB '[0-9]*.[0-9]*')
+        )
+    ''')
+    
+    # Create file_tags table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS file_tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            comment TEXT,
+            created_at REAL,
+            created_by TEXT,
+            metadata TEXT,
+            UNIQUE(path, tag)
+        )
+    ''')
+    
+    # Create todos table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS todos (
+            id TEXT PRIMARY KEY,
+            content TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at REAL,
+            completed_at REAL,
+            priority INTEGER DEFAULT 0
+        )
+    ''')
+    
+    # Create project_variables table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS project_variables (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at REAL NOT NULL
+        )
+    ''')
+    
+    # Create session_updates table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS session_updates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp REAL NOT NULL,
+            message TEXT NOT NULL,
+            category TEXT,
+            metadata TEXT
+        )
+    ''')
+    
+    # Create memory table (for backward compatibility)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS memory (
+            id INTEGER PRIMARY KEY,
+            session_id TEXT,
+            timestamp REAL,
+            category TEXT,
+            topic TEXT,
+            importance REAL DEFAULT 0.5,
+            content TEXT,
+            summary TEXT,
+            metadata TEXT,
+            parent_id INTEGER,
+            related_ids TEXT,
+            token_count INTEGER,
+            last_accessed REAL,
+            access_count INTEGER DEFAULT 0,
+            archived BOOLEAN DEFAULT 0
+        )
+    ''')
+    
+    # Create fixes table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fixes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp REAL NOT NULL,
+            problem TEXT NOT NULL,
+            cause TEXT,
+            solution TEXT NOT NULL,
+            prevention TEXT,
+            file_path TEXT
+        )
+    ''')
+    
+    # Create decisions table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp REAL NOT NULL,
+            question TEXT NOT NULL,
+            context TEXT,
+            options TEXT,
+            decision TEXT,
+            rationale TEXT,
+            status TEXT DEFAULT 'OPEN'
+        )
+    ''')
+    
+    conn.commit()
 
 def estimate_tokens(text: str) -> int:
     """Estimate token count (rough approximation)"""
