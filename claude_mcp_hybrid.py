@@ -108,7 +108,7 @@ def get_db():
     return conn
 
 def initialize_database(conn):
-    """Create database tables if they don't exist"""
+    """Create database tables if they don't exist and migrate existing schemas"""
     cursor = conn.cursor()
     
     # Create sessions table
@@ -118,9 +118,23 @@ def initialize_database(conn):
             started_at REAL NOT NULL,
             ended_at REAL,
             last_active REAL,
-            summary TEXT
+            summary TEXT,
+            project_fingerprint TEXT,
+            project_path TEXT,
+            project_name TEXT
         )
     ''')
+    
+    # Migrate existing sessions table if needed
+    cursor.execute("PRAGMA table_info(sessions)")
+    columns = {row[1] for row in cursor.fetchall()}
+    
+    if 'project_fingerprint' not in columns:
+        cursor.execute('ALTER TABLE sessions ADD COLUMN project_fingerprint TEXT')
+    if 'project_path' not in columns:
+        cursor.execute('ALTER TABLE sessions ADD COLUMN project_path TEXT')
+    if 'project_name' not in columns:
+        cursor.execute('ALTER TABLE sessions ADD COLUMN project_name TEXT')
     
     # Create memory_entries table
     cursor.execute('''
