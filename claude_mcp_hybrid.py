@@ -255,35 +255,57 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 def get_current_session_id() -> str:
-    """Get or create current session ID"""
+    """Get or create session ID - tied to specific project context for safety"""
     conn = get_db()
     
-    # Find active session (not ended within last hour)
+    # Create a project fingerprint - this ensures sessions are project-specific
+    project_fingerprint = hashlib.md5(f"{PROJECT_ROOT}:{PROJECT_NAME}".encode()).hexdigest()[:8]
+    
+    # Find active session for THIS PROJECT
     cursor = conn.execute("""
-        SELECT id FROM sessions 
-        WHERE ended_at IS NULL 
-           OR ended_at > ?
-        ORDER BY started_at DESC
+        SELECT id, last_active, project_path, project_name 
+        FROM sessions 
+        WHERE project_fingerprint = ?
+        ORDER BY last_active DESC
         LIMIT 1
-    """, (time.time() - 3600,))
+    """, (project_fingerprint,))
     
     row = cursor.fetchone()
     if row:
-        # Update last_active
-        conn.execute("""
-            UPDATE sessions 
-            SET last_active = ?
-            WHERE id = ?
-        """, (time.time(), row['id']))
+        # Verify we're in the same project (safety check)
+        if row['project_path'] != PROJECT_ROOT:
+            # Project moved but same logical project - update path
+            conn.execute("""
+                UPDATE sessions 
+                SET project_path = ?, last_active = ?
+                WHERE id = ?
+            """, (PROJECT_ROOT, time.time(), row['id']))
+        else:
+            # Normal case - just update activity
+            conn.execute("""
+                UPDATE sessions 
+                SET last_active = ?
+                WHERE id = ?
+            """, (time.time(), row['id']))
         conn.commit()
         return row['id']
     
-    # Create new session
-    session_id = str(uuid.uuid4())[:8]
+    # Create new session for this project
+    session_id = f"{PROJECT_NAME[:4]}_{str(uuid.uuid4())[:8]}"
+    
+    # First add columns if they don't exist (migration)
+    cursor.execute("PRAGMA table_info(sessions)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if 'project_fingerprint' not in columns:
+        conn.execute("ALTER TABLE sessions ADD COLUMN project_fingerprint TEXT")
+        conn.execute("ALTER TABLE sessions ADD COLUMN project_path TEXT")
+        conn.execute("ALTER TABLE sessions ADD COLUMN project_name TEXT")
+        conn.commit()
+    
     conn.execute("""
-        INSERT INTO sessions (id, started_at, last_active)
-        VALUES (?, ?, ?)
-    """, (session_id, time.time(), time.time()))
+        INSERT INTO sessions (id, started_at, last_active, project_fingerprint, project_path, project_name)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (session_id, time.time(), time.time(), project_fingerprint, PROJECT_ROOT, PROJECT_NAME))
     conn.commit()
     
     return session_id
@@ -527,26 +549,111 @@ async def wake_up() -> str:
     session_id = get_current_session_id()
     
     output = []
+    
+    # Check for context mismatch warning
+    cursor = conn.execute("""
+        SELECT id, project_name, project_path, last_active 
+        FROM sessions 
+        WHERE id != ?
+        ORDER BY last_active DESC
+        LIMIT 1
+    """, (session_id,))
+    
+    other_session = cursor.fetchone()
+    if other_session:
+        # Check if this other session was more recent and for a different project
+        if other_session['project_path'] != PROJECT_ROOT:
+            days_ago = (time.time() - other_session['last_active']) / 86400
+            if days_ago < 1:
+                output.append("⚠️ CONTEXT WARNING:")
+                output.append(f"   Last session '{other_session['id']}' was for: {other_session['project_name']}")
+                output.append(f"   at: {other_session['project_path']}")
+                output.append(f"   You're now in: {PROJECT_NAME}")
+                output.append("   Did you mean to switch projects?")
+                output.append("")
+    
     output.append("🌅 Good morning! Loading your context...")
     output.append(f"Session: {session_id}")
-    output.append(f"Context: {PROJECT_NAME}")
+    output.append(f"Project: {PROJECT_NAME}")
     output.append(f"Location: {PROJECT_ROOT}")
     output.append(f"Memory: {DB_PATH} ({DB_LOCATION})")
     output.append("")
     
-    # Get recent updates
+    # Check for previous session handover
     cursor = conn.execute("""
-        SELECT message, timestamp FROM session_updates
+        SELECT content, metadata, timestamp FROM memory_entries
+        WHERE category = 'handover'
         ORDER BY timestamp DESC
-        LIMIT 5
+        LIMIT 1
     """)
-    updates = cursor.fetchall()
+    handover = cursor.fetchone()
     
-    if updates:
-        output.append("📝 Recent updates:")
-        for update in updates:
-            dt = datetime.fromtimestamp(update['timestamp'])
-            output.append(f"   • {dt.strftime('%m/%d %H:%M')}: {update['message']}")
+    if handover:
+        dt = datetime.fromtimestamp(handover['timestamp'])
+        days_ago = (time.time() - handover['timestamp']) / 86400
+        
+        if days_ago < 1:
+            time_str = f"{int((time.time() - handover['timestamp']) / 3600)} hours ago"
+        else:
+            time_str = f"{int(days_ago)} days ago"
+        
+        output.append(f"📜 Last session handover ({time_str}):")
+        
+        # Parse handover data
+        try:
+            handover_data = json.loads(handover['metadata'])
+            
+            # Show work completed
+            if 'work_done' in handover_data:
+                if handover_data['work_done'].get('progress'):
+                    output.append("\n✅ Previous Progress:")
+                    for item in handover_data['work_done']['progress'][:3]:
+                        output.append(f"   • {item}")
+                
+                if handover_data['work_done'].get('decisions'):
+                    output.append("\n🤔 Previous Decisions:")
+                    for decision in handover_data['work_done']['decisions'][:2]:
+                        output.append(f"   • {decision['decision']}")
+            
+            # Show next steps
+            if 'next_steps' in handover_data:
+                if handover_data['next_steps'].get('todos'):
+                    high_priority = [t for t in handover_data['next_steps']['todos'] 
+                                   if t.get('priority', 0) >= 2]
+                    if high_priority:
+                        output.append("\n🔥 High Priority TODOs:")
+                        for todo in high_priority[:3]:
+                            output.append(f"   • {todo['content']}")
+                
+                if handover_data['next_steps'].get('issues'):
+                    output.append("\n⚠️ Issues to Address:")
+                    for issue in handover_data['next_steps']['issues'][:2]:
+                        output.append(f"   • {issue}")
+            
+            # Show locked contexts
+            if 'important_context' in handover_data:
+                if handover_data['important_context'].get('locked'):
+                    output.append("\n🔒 Available Locked Contexts:")
+                    for ctx in handover_data['important_context']['locked'][:3]:
+                        output.append(f"   • {ctx['label']} (v{ctx['version']})")
+                    output.append("   → Use recall_context('topic') to retrieve")
+            
+        except json.JSONDecodeError:
+            output.append("   (Handover data corrupted)")
+    else:
+        # No handover, show recent updates instead
+        cursor = conn.execute("""
+            SELECT message, timestamp FROM session_updates
+            ORDER BY timestamp DESC
+            LIMIT 5
+        """)
+        updates = cursor.fetchall()
+        
+        if updates:
+            output.append("📝 Recent updates:")
+            for update in updates:
+                dt = datetime.fromtimestamp(update['timestamp'])
+                output.append(f"   • {dt.strftime('%m/%d %H:%M')}: {update['message']}")
     
     # Get active todos
     cursor = conn.execute("""
@@ -596,85 +703,220 @@ async def wake_up() -> str:
 @mcp.tool()
 async def sleep() -> str:
     """
-    End development session with summary.
-    Marks session as ended and provides summary.
+    Create comprehensive handover package for next session.
+    Documents everything needed to resume work seamlessly.
     """
     conn = get_db()
     session_id = get_current_session_id()
     
-    # Get session stats
+    # Get session info
     cursor = conn.execute("""
         SELECT started_at FROM sessions WHERE id = ?
     """, (session_id,))
     session = cursor.fetchone()
     
     if not session:
-        return "No active session to end"
+        return "No active session to document"
     
     duration = time.time() - session['started_at']
     hours = int(duration // 3600)
     minutes = int((duration % 3600) // 60)
     
-    # Get work done
-    cursor = conn.execute("""
-        SELECT COUNT(*) as count FROM memory_entries
-        WHERE session_id = ? AND category = 'progress'
-    """, (session_id,))
-    progress = cursor.fetchone()
-    
-    cursor = conn.execute("""
-        SELECT COUNT(*) as count FROM context_locks
-        WHERE session_id = ?
-    """, (session_id,))
-    locks = cursor.fetchone()
-    
-    cursor = conn.execute("""
-        SELECT COUNT(*) as completed FROM todos
-        WHERE status = 'completed' 
-          AND completed_at > ?
-    """, (session['started_at'],))
-    todos_done = cursor.fetchone()
-    
-    # Create summary
-    summary_parts = []
-    if progress['count'] > 0:
-        summary_parts.append(f"{progress['count']} progress updates")
-    if locks['count'] > 0:
-        summary_parts.append(f"{locks['count']} contexts locked")
-    if todos_done['completed'] > 0:
-        summary_parts.append(f"{todos_done['completed']} TODOs completed")
-    
-    summary = f"Session {session_id}: " + ", ".join(summary_parts) if summary_parts else "No specific progress tracked"
-    
-    # Mark session as ended
-    conn.execute("""
-        UPDATE sessions 
-        SET ended_at = ?, summary = ?
-        WHERE id = ?
-    """, (time.time(), summary, session_id))
-    conn.commit()
+    # Build comprehensive handover package
+    handover = {
+        'timestamp': time.time(),
+        'session_id': session_id,
+        'duration': f"{hours}h {minutes}m",
+        'current_state': {},
+        'work_done': {},
+        'next_steps': {},
+        'important_context': {}
+    }
     
     output = []
-    output.append("💤 Ending session...")
-    output.append(f"Duration: {hours}h {minutes}m")
-    output.append("")
-    output.append("📊 Session Summary:")
-    if progress['count'] > 0:
-        output.append(f"   • {progress['count']} progress updates")
-    if locks['count'] > 0:
-        output.append(f"   • {locks['count']} contexts locked")
-    if todos_done['completed'] > 0:
-        output.append(f"   • {todos_done['completed']} TODOs completed")
+    output.append("💤 Creating handover package for next session...")
+    output.append(f"Session: {session_id} | Duration: {hours}h {minutes}m")
+    output.append("=" * 50)
     
-    # Get pending work
+    # 1. WHAT WAS ACCOMPLISHED
+    output.append("\n📊 WORK COMPLETED THIS SESSION:")
+    
+    # Progress updates
     cursor = conn.execute("""
-        SELECT COUNT(*) as pending FROM todos WHERE status = 'pending'
-    """)
-    pending = cursor.fetchone()
-    if pending['pending'] > 0:
-        output.append(f"\n📌 {pending['pending']} TODOs remaining for next session")
+        SELECT content, timestamp FROM memory_entries
+        WHERE session_id = ? AND category = 'progress'
+        ORDER BY timestamp DESC
+    """, (session_id,))
+    progress_items = cursor.fetchall()
     
-    output.append("\nSee you next time! 👋")
+    if progress_items:
+        output.append("\n✅ Progress Made:")
+        for item in progress_items[:5]:  # Top 5 progress items
+            output.append(f"   • {item['content']}")
+        handover['work_done']['progress'] = [p['content'] for p in progress_items]
+    
+    # Completed TODOs
+    cursor = conn.execute("""
+        SELECT content FROM todos
+        WHERE status = 'completed' AND completed_at > ?
+        ORDER BY completed_at DESC
+    """, (session['started_at'],))
+    completed = cursor.fetchall()
+    
+    if completed:
+        output.append(f"\n✅ TODOs Completed ({len(completed)}):")
+        for todo in completed[:5]:
+            output.append(f"   • {todo['content']}")
+        handover['work_done']['completed_todos'] = [t['content'] for t in completed]
+    
+    # 2. CURRENT STATE & CONTEXT
+    output.append("\n🎯 CURRENT PROJECT STATE:")
+    
+    # Active/pending TODOs
+    cursor = conn.execute("""
+        SELECT content, priority FROM todos
+        WHERE status = 'pending'
+        ORDER BY priority DESC, created_at ASC
+    """)
+    pending_todos = cursor.fetchall()
+    
+    if pending_todos:
+        output.append(f"\n📋 Pending TODOs ({len(pending_todos)}):")
+        for todo in pending_todos[:5]:
+            priority = ['LOW', 'NORMAL', 'HIGH'][min(todo['priority'] or 0, 2)]
+            output.append(f"   • [{priority}] {todo['content']}")
+        handover['next_steps']['todos'] = [
+            {'content': t['content'], 'priority': t['priority']} 
+            for t in pending_todos
+        ]
+    
+    # Recent decisions made
+    cursor = conn.execute("""
+        SELECT decision, rationale FROM decisions
+        WHERE timestamp > ? AND status = 'DECIDED'
+        ORDER BY timestamp DESC
+        LIMIT 3
+    """, (session['started_at'],))
+    decisions = cursor.fetchall()
+    
+    if decisions:
+        output.append("\n🤔 Key Decisions Made:")
+        for decision in decisions:
+            output.append(f"   • {decision['decision']}")
+            if decision['rationale']:
+                output.append(f"     → {decision['rationale']}")
+        handover['work_done']['decisions'] = [
+            {'decision': d['decision'], 'rationale': d['rationale']} 
+            for d in decisions
+        ]
+    
+    # 3. IMPORTANT LOCKED CONTEXTS
+    output.append("\n🔒 LOCKED CONTEXTS TO REMEMBER:")
+    
+    cursor = conn.execute("""
+        SELECT label, version, MAX(locked_at) as latest
+        FROM context_locks
+        WHERE session_id = ?
+        GROUP BY label
+        ORDER BY latest DESC
+        LIMIT 5
+    """, (session_id,))
+    
+    locked_contexts = cursor.fetchall()
+    if locked_contexts:
+        for ctx in locked_contexts:
+            output.append(f"   • {ctx['label']} (v{ctx['version']})")
+        handover['important_context']['locked'] = [
+            {'label': c['label'], 'version': c['version']} 
+            for c in locked_contexts
+        ]
+        output.append("   Use recall_context('topic') to retrieve these")
+    
+    # 4. FILES BEING WORKED ON
+    cursor = conn.execute("""
+        SELECT DISTINCT path, GROUP_CONCAT(tag) as tags
+        FROM file_tags
+        WHERE created_at > ?
+        GROUP BY path
+        ORDER BY created_at DESC
+        LIMIT 5
+    """, (session['started_at'],))
+    
+    recent_files = cursor.fetchall()
+    if recent_files:
+        output.append("\n📁 Files Recently Analyzed:")
+        for file in recent_files:
+            output.append(f"   • {file['path']}")
+            if file['tags']:
+                tags = file['tags'].split(',')[:3]  # First 3 tags
+                output.append(f"     Tags: {', '.join(tags)}")
+        handover['current_state']['recent_files'] = [
+            {'path': f['path'], 'tags': f['tags']} 
+            for f in recent_files
+        ]
+    
+    # 5. ERRORS OR ISSUES TO ADDRESS
+    cursor = conn.execute("""
+        SELECT content FROM memory_entries
+        WHERE session_id = ? AND category = 'error'
+        ORDER BY timestamp DESC
+        LIMIT 3
+    """, (session_id,))
+    
+    errors = cursor.fetchall()
+    if errors:
+        output.append("\n⚠️ Issues to Address:")
+        for error in errors:
+            output.append(f"   • {error['content']}")
+        handover['next_steps']['issues'] = [e['content'] for e in errors]
+    
+    # 6. NEXT STEPS GUIDANCE
+    output.append("\n🚀 NEXT SESSION RECOMMENDATIONS:")
+    
+    # Open questions
+    cursor = conn.execute("""
+        SELECT question FROM decisions
+        WHERE status = 'OPEN'
+        ORDER BY timestamp DESC
+        LIMIT 3
+    """)
+    questions = cursor.fetchall()
+    
+    if questions:
+        output.append("\n❓ Open Questions:")
+        for q in questions:
+            output.append(f"   • {q['question']}")
+        handover['next_steps']['questions'] = [q['question'] for q in questions]
+    
+    # Suggest next actions based on state
+    if pending_todos:
+        output.append(f"\n💡 Start with high-priority TODOs")
+    if errors:
+        output.append(f"💡 Address the {len(errors)} error(s) first")
+    if not locked_contexts:
+        output.append("💡 Consider locking important decisions/code with lock_context()")
+    
+    # Store comprehensive handover in database
+    handover_json = json.dumps(handover, indent=2)
+    
+    # Update session with handover package
+    conn.execute("""
+        UPDATE sessions 
+        SET summary = ?, last_active = ?
+        WHERE id = ?
+    """, (handover_json, time.time(), session_id))
+    
+    # Create a special handover memory entry
+    conn.execute("""
+        INSERT INTO memory_entries (category, content, metadata, timestamp, session_id)
+        VALUES ('handover', ?, ?, ?, ?)
+    """, (f"Session handover: {hours}h {minutes}m of work", handover_json, time.time(), session_id))
+    
+    conn.commit()
+    
+    output.append("\n" + "=" * 50)
+    output.append("✅ Handover package saved. Use wake_up() to resume.")
+    output.append("Your context and progress are preserved!")
     
     return "\n".join(output)
 
