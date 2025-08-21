@@ -17,14 +17,6 @@ import uuid
 
 from mcp.server import FastMCP
 
-# Import active context engine
-from active_context_engine import (
-    ActiveContextEngine,
-    check_command_context,
-    get_relevant_contexts_for_text,
-    get_session_start_reminders
-)
-
 # Initialize MCP server
 mcp = FastMCP("claude-dementia")
 
@@ -693,56 +685,21 @@ async def wake_up() -> str:
             priority_label = ['LOW', 'NORMAL', 'HIGH'][min(priority, 2)]
             output.append(f"   {i}. [{priority_label}] {todo['content']}")
     
-    # Show high-priority locked contexts
-    engine = ActiveContextEngine(DB_PATH)
-    
-    # Get always_check contexts
+    # Get recent locked contexts  
     cursor = conn.execute("""
-        SELECT label, version, metadata 
+        SELECT label, COUNT(*) as count 
         FROM context_locks 
-        WHERE session_id = ? 
-        AND json_extract(metadata, '$.priority') = 'always_check'
-        ORDER BY locked_at DESC
-    """, (session_id,))
-    
-    always_check = cursor.fetchall()
-    if always_check:
-        output.append("\n⚠️ High-Priority Rules (Always Checked):")
-        for ctx in always_check:
-            metadata = json.loads(ctx['metadata']) if ctx['metadata'] else {}
-            tags = metadata.get('tags', [])
-            tag_str = f" ({', '.join(tags[:2])})" if tags else ""
-            output.append(f"   • {ctx['label']} v{ctx['version']}{tag_str}")
-    
-    # Get important contexts
-    cursor = conn.execute("""
-        SELECT label, version, metadata 
-        FROM context_locks 
-        WHERE session_id = ? 
-        AND json_extract(metadata, '$.priority') = 'important'
-        ORDER BY locked_at DESC
+        WHERE session_id = ?
+        GROUP BY label 
+        ORDER BY MAX(locked_at) DESC 
         LIMIT 3
     """, (session_id,))
     
-    important = cursor.fetchall()
-    if important:
-        output.append("\n📌 Important Contexts:")
-        for ctx in important:
-            output.append(f"   • {ctx['label']} v{ctx['version']}")
-    
-    # Show regular locked contexts count
-    cursor = conn.execute("""
-        SELECT COUNT(DISTINCT label) as count 
-        FROM context_locks 
-        WHERE session_id = ?
-    """, (session_id,))
-    
-    total = cursor.fetchone()
-    if total and total['count'] > 0:
-        shown = len(always_check or []) + len(important or [])
-        remaining = total['count'] - shown
-        if remaining > 0:
-            output.append(f"\n📚 Plus {remaining} reference contexts available")
+    topics = cursor.fetchall()
+    if topics:
+        output.append("\n🔒 Locked contexts:")
+        for row in topics:
+            output.append(f"   • {row['label']} ({row['count']} versions)")
     
     # Check for issues needing attention
     cursor = conn.execute("""
@@ -1120,34 +1077,14 @@ async def memory_status() -> str:
 # ============================================================================
 
 @mcp.tool()
-async def lock_context(content: str, topic: str, tags: Optional[str] = None, priority: Optional[str] = None) -> str:
+async def lock_context(content: str, topic: str, tags: Optional[str] = None) -> str:
     """
-    Lock context under specific topic with tags and priority.
+    Lock context under specific topic with tags.
     Creates immutable snapshot with version tracking.
-    
-    Priority levels:
-    - 'always_check': Always checked before relevant actions
-    - 'important': Shown at session start
-    - 'reference': Standard reference material (default)
     """
     update_session_activity()
     conn = get_db()
     session_id = get_current_session_id()
-    
-    # Auto-detect priority if not specified
-    if priority is None:
-        content_lower = content.lower()
-        if any(word in content_lower for word in ['always', 'never', 'must']):
-            priority = 'always_check'
-        elif any(word in content_lower for word in ['important', 'critical', 'required']):
-            priority = 'important'
-        else:
-            priority = 'reference'
-    
-    # Validate priority
-    valid_priorities = ['always_check', 'important', 'reference']
-    if priority not in valid_priorities:
-        return f"❌ Invalid priority '{priority}'. Must be one of: {', '.join(valid_priorities)}"
     
     # Generate hash
     content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
@@ -1172,28 +1109,8 @@ async def lock_context(content: str, topic: str, tags: Optional[str] = None, pri
     else:
         version = "1.0"
     
-    # Extract keywords for better matching
-    keywords = []
-    keyword_patterns = {
-        'output': r'\b(output|directory|folder|path)\b',
-        'test': r'\b(test|testing|spec)\b',
-        'config': r'\b(config|settings|configuration)\b',
-        'api': r'\b(api|endpoint|rest|graphql)\b',
-        'database': r'\b(database|db|sql|table)\b',
-        'security': r'\b(auth|token|password|secret)\b',
-    }
-    content_lower = content.lower()
-    for key, pattern in keyword_patterns.items():
-        if re.search(pattern, content_lower):
-            keywords.append(key)
-    
-    # Prepare metadata with priority and keywords
-    metadata = {
-        "tags": tags.split(',') if tags else [],
-        "priority": priority,
-        "keywords": keywords,
-        "created_at": datetime.now().isoformat()
-    }
+    # Prepare metadata
+    metadata = {"tags": tags.split(',') if tags else []}
     
     # Store lock
     try:
@@ -1204,14 +1121,7 @@ async def lock_context(content: str, topic: str, tags: Optional[str] = None, pri
         """, (session_id, topic, version, content, content_hash, time.time(), json.dumps(metadata)))
         
         conn.commit()
-        
-        priority_indicator = {
-            'always_check': ' ⚠️ [ALWAYS CHECK]',
-            'important': ' 📌 [IMPORTANT]',
-            'reference': ''
-        }.get(priority, '')
-        
-        return f"✅ Locked '{topic}' as v{version}{priority_indicator} ({len(content)} chars, hash: {content_hash[:8]})"
+        return f"✅ Locked '{topic}' as v{version} ({len(content)} chars, hash: {content_hash[:8]})"
         
     except sqlite3.IntegrityError:
         return f"❌ Version {version} of '{topic}' already exists"
@@ -1274,8 +1184,7 @@ async def list_topics() -> str:
         SELECT label, 
                GROUP_CONCAT(version) as versions,
                COUNT(*) as count,
-               MAX(locked_at) as latest,
-               metadata
+               MAX(locked_at) as latest
         FROM context_locks
         WHERE session_id = ?
         GROUP BY label
@@ -1288,49 +1197,12 @@ async def list_topics() -> str:
         for row in rows:
             versions = row['versions'].split(',')
             dt = datetime.fromtimestamp(row['latest'])
-            
-            # Get priority from most recent version
-            metadata = json.loads(row['metadata']) if row['metadata'] else {}
-            priority = metadata.get('priority', 'reference')
-            priority_indicator = {
-                'always_check': ' ⚠️',
-                'important': ' 📌',
-                'reference': ''
-            }.get(priority, '')
-            
-            output.append(f"\n• {row['label']}{priority_indicator}")
+            output.append(f"\n• {row['label']}")
             output.append(f"  Versions: v{', v'.join(versions)}")
             output.append(f"  Last updated: {dt.strftime('%Y-%m-%d %H:%M')}")
         return "\n".join(output)
     else:
         return "No locked contexts yet. Use lock_context to save important information."
-
-@mcp.tool()
-async def check_contexts(text: str) -> str:
-    """
-    Check what locked contexts might be relevant to given text.
-    Also checks for potential violations of established rules.
-    """
-    session_id = get_current_session_id()
-    
-    # Get relevant contexts
-    relevant = get_relevant_contexts_for_text(text, session_id, DB_PATH)
-    
-    # Check for violations
-    violations = check_command_context(text, session_id, DB_PATH)
-    
-    output = []
-    if relevant:
-        output.append(relevant)
-    if violations:
-        if output:
-            output.append("")  # Add spacing
-        output.append(violations)
-    
-    if not output:
-        return "No relevant locked contexts found."
-    
-    return "\n".join(output)
 
 # ============================================================================
 # ENHANCED PROJECT INTELLIGENCE WITH AUTO-TAGGING

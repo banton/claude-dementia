@@ -1,6 +1,12 @@
 # Install or Update Claude Dementia MCP Server
 
-Please help me install or update Claude Dementia - an MCP server that gives you persistent memory across sessions.
+Please help me install or update Claude Dementia - an MCP server that gives you persistent memory across sessions with active context checking.
+
+## NEW in v5.0: Active Context Engine
+- **Priority-based contexts**: `always_check`, `important`, `reference`
+- **Automatic violation detection**: Checks commands against locked rules
+- **Context relevance discovery**: Finds relevant contexts based on keywords
+- **Session start reminders**: Shows high-priority rules at wake_up
 
 ## What You Should Do
 
@@ -133,14 +139,24 @@ wake_up()
 
 ## Features You Now Have
 
-- `wake_up()` / `sleep()` - Session management
+- `wake_up()` / `sleep()` - Session management with priority context display
 - `memory_update()` - Track progress, decisions, errors
-- `lock_context()` / `recall_context()` - Perfect recall of important info
+- `lock_context(content, topic, priority="always_check")` - Lock with priority levels
+- `recall_context()` - Perfect recall of important info
+- `check_contexts("command or text")` - Check for rule violations
 - `project_update()` - Intelligent file analysis and tagging
 - `search_by_tags("quality:has-mock-data")` - Find dev artifacts
 - `what_needs_attention()` - See issues and TODOs
 
-## Key Improvements in This Version
+## Key Improvements in v5.0
+
+1. **Active Context Engine** - Automatically checks commands against locked rules
+2. **Priority Levels** - Mark contexts as `always_check`, `important`, or `reference`
+3. **Violation Detection** - Warns before you violate established rules
+4. **Smart Keyword Matching** - Finds relevant contexts based on what you're doing
+5. **Session Reminders** - Shows high-priority rules at session start
+
+## Previous Improvements
 
 1. **MCP Protocol** - No more Python script approval prompts
 2. **Smart Database Location** - Projects get local DB, Desktop uses cache

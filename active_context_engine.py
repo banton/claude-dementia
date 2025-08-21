@@ -1,0 +1,345 @@
+#!/usr/bin/env python3
+"""
+Active Context Engine for Claude Dementia
+Provides active rule enforcement and automatic context checking
+"""
+
+import re
+import json
+import sqlite3
+from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime
+import hashlib
+
+class ActiveContextEngine:
+    """
+    Active context checking and rule enforcement for locked contexts.
+    Transforms passive memory into active rule engine.
+    """
+    
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self.keyword_patterns = self._build_keyword_patterns()
+        
+    def _build_keyword_patterns(self) -> Dict[str, re.Pattern]:
+        """Build regex patterns for detecting relevant keywords"""
+        return {
+            'output': re.compile(r'\b(output|directory|folder|path|save|write)\b', re.IGNORECASE),
+            'test': re.compile(r'\b(test|testing|tests|spec|specs)\b', re.IGNORECASE),
+            'config': re.compile(r'\b(config|configuration|settings|setup)\b', re.IGNORECASE),
+            'api': re.compile(r'\b(api|endpoint|route|rest|graphql)\b', re.IGNORECASE),
+            'database': re.compile(r'\b(database|db|sql|query|table|schema)\b', re.IGNORECASE),
+            'security': re.compile(r'\b(security|auth|token|password|secret|key)\b', re.IGNORECASE),
+            'deploy': re.compile(r'\b(deploy|deployment|production|release|build)\b', re.IGNORECASE),
+        }
+    
+    def check_context_relevance(self, text: str, session_id: str) -> List[Dict[str, Any]]:
+        """
+        Check if any locked contexts are relevant to the given text.
+        Returns list of potentially relevant contexts.
+        """
+        relevant_contexts = []
+        
+        # Check which keyword patterns match
+        matched_keywords = []
+        for keyword, pattern in self.keyword_patterns.items():
+            if pattern.search(text):
+                matched_keywords.append(keyword)
+        
+        if not matched_keywords:
+            return []
+        
+        # Query database for locked contexts with matching keywords
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        
+        # Get contexts that might be relevant based on tags or content
+        placeholders = ','.join('?' * len(matched_keywords))
+        cursor = conn.execute(f"""
+            SELECT DISTINCT cl.label, cl.version, cl.content, cl.metadata, cl.locked_at
+            FROM context_locks cl
+            WHERE cl.session_id = ?
+            AND (
+                cl.metadata LIKE '%' || ? || '%'
+                OR cl.label IN ({placeholders})
+                OR EXISTS (
+                    SELECT 1 FROM json_each(
+                        CASE 
+                            WHEN json_valid(cl.metadata) 
+                            THEN json_extract(cl.metadata, '$.tags')
+                            ELSE '[]'
+                        END
+                    ) AS tag
+                    WHERE tag.value IN ({placeholders})
+                )
+            )
+            ORDER BY cl.locked_at DESC
+        """, [session_id, '%'.join(matched_keywords)] + matched_keywords + matched_keywords)
+        
+        for row in cursor:
+            # Check if content contains relevant rules
+            content_lower = row['content'].lower()
+            relevance_score = sum(1 for kw in matched_keywords if kw in content_lower)
+            
+            if relevance_score > 0:
+                metadata = json.loads(row['metadata']) if row['metadata'] else {}
+                relevant_contexts.append({
+                    'label': row['label'],
+                    'version': row['version'],
+                    'content': row['content'],
+                    'tags': metadata.get('tags', []),
+                    'priority': metadata.get('priority', 'reference'),
+                    'relevance_score': relevance_score,
+                    'matched_keywords': matched_keywords,
+                    'locked_at': row['locked_at']
+                })
+        
+        conn.close()
+        
+        # Sort by relevance score and priority
+        relevant_contexts.sort(key=lambda x: (
+            x['priority'] == 'always_check',
+            x['relevance_score']
+        ), reverse=True)
+        
+        return relevant_contexts
+    
+    def check_for_violations(self, action: str, session_id: str) -> List[Dict[str, Any]]:
+        """
+        Check if an action violates any locked contexts.
+        Returns list of violations with details.
+        """
+        violations = []
+        relevant_contexts = self.check_context_relevance(action, session_id)
+        
+        for context in relevant_contexts:
+            # Parse rules from context content
+            rules = self._extract_rules(context['content'])
+            
+            for rule in rules:
+                if self._check_rule_violation(action, rule):
+                    violations.append({
+                        'context_label': context['label'],
+                        'context_version': context['version'],
+                        'rule': rule['text'],
+                        'rule_type': rule['type'],
+                        'severity': rule.get('severity', 'warning'),
+                        'suggestion': rule.get('suggestion', 'Check locked context for guidance')
+                    })
+        
+        return violations
+    
+    def _extract_rules(self, content: str) -> List[Dict[str, Any]]:
+        """Extract actionable rules from context content"""
+        rules = []
+        
+        # Look for common rule patterns
+        patterns = [
+            (r'ALWAYS\s+(.+?)(?:\.|$)', 'mandatory'),
+            (r'NEVER\s+(.+?)(?:\.|$)', 'prohibition'),
+            (r'MUST\s+(.+?)(?:\.|$)', 'requirement'),
+            (r'SHOULD\s+(.+?)(?:\.|$)', 'recommendation'),
+            (r'use\s+["\'](.+?)["\']\s+(?:as|for)\s+(.+?)(?:\.|$)', 'specification'),
+        ]
+        
+        for pattern, rule_type in patterns:
+            matches = re.finditer(pattern, content, re.IGNORECASE | re.MULTILINE)
+            for match in matches:
+                rule_text = match.group(0).strip()
+                rules.append({
+                    'text': rule_text,
+                    'type': rule_type,
+                    'severity': 'error' if rule_type in ['mandatory', 'prohibition', 'requirement'] else 'warning'
+                })
+        
+        return rules
+    
+    def _check_rule_violation(self, action: str, rule: Dict[str, Any]) -> bool:
+        """Check if an action violates a specific rule"""
+        action_lower = action.lower()
+        rule_text_lower = rule['text'].lower()
+        
+        # Check for output folder violations
+        if 'output' in rule_text_lower and 'output' in action_lower:
+            # Check if using non-standard output paths
+            if re.search(r'--output\s+(\S+)', action):
+                match = re.search(r'--output\s+(\S+)', action)
+                output_path = match.group(1)
+                if 'output' in rule_text_lower and 'always use' in rule_text_lower:
+                    # Check if violating the "always use output" rule
+                    if output_path not in ['output', './output', 'output/']:
+                        return True
+        
+        # Check for prohibited actions
+        if rule['type'] == 'prohibition':
+            prohibited_terms = re.findall(r'\b\w+\b', rule['text'])
+            for term in prohibited_terms:
+                if term.lower() in action_lower:
+                    return True
+        
+        return False
+    
+    def get_session_context_summary(self, session_id: str, priority: Optional[str] = None) -> str:
+        """Get summary of locked contexts for session start"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        
+        query = """
+            SELECT label, version, metadata, locked_at
+            FROM context_locks
+            WHERE session_id = ?
+        """
+        params = [session_id]
+        
+        if priority:
+            query += " AND json_extract(metadata, '$.priority') = ?"
+            params.append(priority)
+        
+        query += " ORDER BY locked_at DESC"
+        
+        cursor = conn.execute(query, params)
+        contexts = cursor.fetchall()
+        conn.close()
+        
+        if not contexts:
+            return "No locked contexts found"
+        
+        summary = []
+        summary.append("📌 Locked Contexts:")
+        
+        for ctx in contexts[:10]:  # Limit to 10 most recent
+            metadata = json.loads(ctx['metadata']) if ctx['metadata'] else {}
+            priority = metadata.get('priority', 'reference')
+            tags = metadata.get('tags', [])
+            
+            dt = datetime.fromtimestamp(ctx['locked_at'])
+            
+            line = f"   • {ctx['label']} v{ctx['version']}"
+            if priority == 'always_check':
+                line = f"   ⚠️  {ctx['label']} v{ctx['version']} [ALWAYS CHECK]"
+            
+            if tags:
+                line += f" ({', '.join(tags[:3])})"
+            
+            summary.append(line)
+        
+        if len(contexts) > 10:
+            summary.append(f"   ... and {len(contexts) - 10} more")
+        
+        return "\n".join(summary)
+    
+    def add_context_with_priority(self, content: str, topic: str, 
+                                 priority: str = 'reference',
+                                 tags: Optional[List[str]] = None,
+                                 session_id: str = None) -> str:
+        """
+        Enhanced lock_context with priority levels.
+        Priority levels: 'always_check', 'important', 'reference'
+        """
+        conn = sqlite3.connect(self.db_path)
+        
+        # Generate hash
+        content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
+        
+        # Get latest version
+        cursor = conn.execute("""
+            SELECT version FROM context_locks 
+            WHERE label = ? AND session_id = ?
+            ORDER BY locked_at DESC
+            LIMIT 1
+        """, (topic, session_id))
+        
+        row = cursor.fetchone()
+        if row:
+            parts = row[0].split('.')
+            if len(parts) == 2:
+                major, minor = parts
+                version = f"{major}.{int(minor)+1}"
+            else:
+                version = "1.1"
+        else:
+            version = "1.0"
+        
+        # Prepare metadata with priority
+        metadata = {
+            "tags": tags if tags else [],
+            "priority": priority,
+            "created_at": datetime.now().isoformat()
+        }
+        
+        # Store lock
+        try:
+            import time
+            conn.execute("""
+                INSERT INTO context_locks 
+                (session_id, label, version, content, content_hash, locked_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (session_id, topic, version, content, content_hash, time.time(), json.dumps(metadata)))
+            
+            conn.commit()
+            conn.close()
+            
+            priority_indicator = " [ALWAYS CHECK]" if priority == 'always_check' else ""
+            return f"✅ Locked '{topic}' as v{version}{priority_indicator} ({len(content)} chars)"
+            
+        except Exception as e:
+            conn.close()
+            return f"❌ Failed to lock context: {str(e)}"
+
+
+# Integration functions for MCP server
+
+def check_command_context(command: str, session_id: str, db_path: str) -> Optional[str]:
+    """
+    Check if a command might violate locked contexts.
+    Returns warning message if violations found.
+    """
+    engine = ActiveContextEngine(db_path)
+    violations = engine.check_for_violations(command, session_id)
+    
+    if violations:
+        warnings = []
+        warnings.append("⚠️ Potential context violations detected:")
+        
+        for v in violations:
+            warnings.append(f"\n   • {v['context_label']}: {v['rule']}")
+            warnings.append(f"     Suggestion: {v['suggestion']}")
+        
+        warnings.append("\n   Use 'recall_context' to review the full context.")
+        return "\n".join(warnings)
+    
+    return None
+
+def get_relevant_contexts_for_text(text: str, session_id: str, db_path: str) -> Optional[str]:
+    """
+    Get relevant locked contexts for given text.
+    Returns formatted list of relevant contexts.
+    """
+    engine = ActiveContextEngine(db_path)
+    contexts = engine.check_context_relevance(text, session_id)
+    
+    if contexts:
+        output = []
+        output.append("📎 Relevant locked contexts:")
+        
+        for ctx in contexts[:5]:  # Limit to top 5
+            priority_indicator = " ⚠️" if ctx['priority'] == 'always_check' else ""
+            output.append(f"\n   • {ctx['label']} v{ctx['version']}{priority_indicator}")
+            if ctx['tags']:
+                output.append(f"     Tags: {', '.join(ctx['tags'][:3])}")
+            output.append(f"     Relevance: {ctx['relevance_score']}/10")
+        
+        if len(contexts) > 5:
+            output.append(f"\n   ... and {len(contexts) - 5} more")
+        
+        return "\n".join(output)
+    
+    return None
+
+def get_session_start_reminders(session_id: str, db_path: str) -> str:
+    """
+    Get important context reminders for session start.
+    Focuses on high-priority contexts.
+    """
+    engine = ActiveContextEngine(db_path)
+    return engine.get_session_context_summary(session_id, priority='always_check')
