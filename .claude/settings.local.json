@@ -15,7 +15,10 @@
       "Bash(git log:*)",
       "Bash(python3:*)",
       "mcp__dementia__lock_context",
-      "Bash(cp:*)"
+      "Bash(cp:*)",
+      "mcp__dementia__memory_update",
+      "mcp__dementia__project_update",
+      "Bash(chmod:*)"
     ],
     "deny": [],
     "ask": [],

@@ -2,7 +2,7 @@
 
 Please help me install or update Claude Dementia - an MCP server that gives you persistent memory across sessions with active context checking.
 
-## NEW in v5.0: Active Context Engine
+## NEW in v4.0: Active Context Engine
 - **Priority-based contexts**: `always_check`, `important`, `reference`
 - **Automatic violation detection**: Checks commands against locked rules
 - **Context relevance discovery**: Finds relevant contexts based on keywords
@@ -66,6 +66,10 @@ echo "Found installation at: $INSTALL_PATH"
 # Update to latest version
 cd "$INSTALL_PATH"
 git pull origin main
+
+# Run migration for v4.0 Active Context Engine (if upgrading from < v4.0)
+python3 migrate_v4.py
+# This adds priority levels to existing locked contexts
 
 # Or do a clean reinstall
 # rm -rf "$INSTALL_PATH"
@@ -148,7 +152,7 @@ wake_up()
 - `search_by_tags("quality:has-mock-data")` - Find dev artifacts
 - `what_needs_attention()` - See issues and TODOs
 
-## Key Improvements in v5.0
+## Key Improvements in v4.0
 
 1. **Active Context Engine** - Automatically checks commands against locked rules
 2. **Priority Levels** - Mark contexts as `always_check`, `important`, or `reference`
