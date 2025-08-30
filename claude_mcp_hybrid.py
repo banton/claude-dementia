@@ -20,6 +20,13 @@ from contextlib import contextmanager
 
 from mcp.server import FastMCP
 
+# Import enhanced scanner for better file processing
+try:
+    from enhanced_scanner import EnhancedProjectScanner
+    SCANNER_AVAILABLE = True
+except ImportError:
+    SCANNER_AVAILABLE = False
+
 # Import active context engine
 from active_context_engine import (
     ActiveContextEngine,
@@ -1412,26 +1419,80 @@ async def check_contexts(text: str) -> str:
 async def project_update() -> str:
     """
     Scan project and intelligently tag files with structured metadata.
-    Tags include: status, domain, layer, quality, dependencies, etc.
+    Self-recovering: continues from where it left off if interrupted.
+    Delivers results in phases to avoid timeout.
     """
     try:
         update_session_activity()
         conn = get_db()
         session_id = get_current_session_id()
         
-        # Get project root - use the environment variable if set, otherwise current directory
+        # Get project root
         if os.environ.get('CLAUDE_PROJECT_DIR'):
             project_root = Path(os.environ['CLAUDE_PROJECT_DIR'])
         else:
             project_root = Path.cwd()
         
-        # Resolve to absolute path to ensure we have a valid starting point
         project_root = project_root.resolve()
+        
+        # Check for existing scan session
+        cursor = conn.execute("""
+            SELECT id, status, processed_files, total_files 
+            FROM scan_sessions 
+            WHERE project_root = ? AND status != 'completed'
+            ORDER BY started_at DESC
+            LIMIT 1
+        """, (str(project_root),))
+        
+        existing = cursor.fetchone()
+        
+        if SCANNER_AVAILABLE:
+            scanner = EnhancedProjectScanner(DB_PATH)
+            
+            if existing:
+                # Resume existing scan
+                scan_id, status, processed, total = existing
+                output = [f"📂 Resuming scan (session {scan_id})"]
+                output.append(f"   Progress: {processed}/{total} files")
+                
+                # Process next batch
+                result = scanner.process_batch(scan_id, batch_size=50)
+                output.append(f"   Processed {result['processed']} more files")
+                
+                if result['status'] == 'completed':
+                    output.append(f"✅ Scan complete! All {total} files processed")
+                    # Generate summary from processed data
+                    output.append(scanner.get_summary(scan_id))
+                else:
+                    output.append(f"   ⏳ {result['pending']} files remaining")
+                    output.append(f"   Run project_update again to continue")
+                
+                return "\n".join(output)
+            else:
+                # Start new enhanced scan
+                scan_id = scanner.start_scan(str(project_root))
+                output = [f"🚀 Starting enhanced scan with markdown conversion"]
+                output.append(f"   Session: {scan_id}")
+                
+                # Process first batch
+                result = scanner.process_batch(scan_id, batch_size=50)
+                output.append(f"   Phase 1: Discovered {result['total_files']} files")
+                output.append(f"   Phase 2: Processed {result['processed']} files")
+                
+                if result['pending'] > 0:
+                    output.append(f"   ⏳ {result['pending']} files queued")
+                    output.append(f"   Run project_update again to continue")
+                else:
+                    output.append(f"✅ All files processed!")
+                    
+                return "\n".join(output)
     except Exception as e:
-        return f"❌ Error initializing project scan: {e}"
+        # Fall back to simple scan if enhanced scanner fails
+        pass
     
+    # Simple scan fallback (original code)
     output = []
-    output.append(f"🔍 Scanning project: {project_root.name}")
+    output.append(f"🔍 Scanning project: {project_root.name} (simple mode)")
     output.append(f"   Path: {project_root}")
     output.append("Analyzing files and applying intelligent tags...")
     output.append("")
