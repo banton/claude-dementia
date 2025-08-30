@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Set, Tuple
 import uuid
+from contextlib import contextmanager
 
 from mcp.server import FastMCP
 
@@ -118,22 +119,63 @@ if 'claude-dementia' in DB_PATH or '/tmp/' in DB_PATH or '/var/folders/' in DB_P
 else:
     DB_LOCATION = 'project local'
 
+@contextmanager
+def get_db_context():
+    """Context manager for database connections - ensures proper cleanup"""
+    conn = None
+    try:
+        conn = get_db()
+        yield conn
+        conn.commit()
+    except Exception:
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+class AutoClosingConnection:
+    """Wrapper that automatically closes connection when done"""
+    def __init__(self, conn):
+        self.conn = conn
+        self._closed = False
+    
+    def __getattr__(self, name):
+        return getattr(self.conn, name)
+    
+    def __del__(self):
+        if not self._closed:
+            try:
+                self.conn.close()
+                self._closed = True
+            except:
+                pass
+
 def get_db():
-    """Get database connection with row factory"""
+    """Get database connection with row factory and auto-cleanup"""
     # Ensure the directory exists
     db_dir = os.path.dirname(DB_PATH)
     if db_dir and not os.path.exists(db_dir):
         os.makedirs(db_dir, exist_ok=True)
     
-    # Connect with better error handling
+    # Connect with better error handling and concurrency support
     try:
-        conn = sqlite3.connect(DB_PATH)
+        # Use a timeout to avoid hanging on locked databases
+        conn = sqlite3.connect(DB_PATH, timeout=10.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        
+        # Enable WAL mode for better concurrency (multiple readers, one writer)
+        conn.execute("PRAGMA journal_mode=WAL")
+        
+        # Set busy timeout to wait if database is locked
+        conn.execute("PRAGMA busy_timeout=5000")  # 5 seconds
         
         # Initialize database schema if needed
         initialize_database(conn)
         
-        return conn
+        # Return auto-closing wrapper
+        return AutoClosingConnection(conn)
     except sqlite3.Error as e:
         # Provide detailed error information
         print(f"Database connection error: {e}", file=sys.stderr)
