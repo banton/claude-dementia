@@ -10,6 +10,8 @@ import asyncio
 import hashlib
 import time
 import re
+import sys
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Set, Tuple
@@ -49,8 +51,8 @@ def get_database_path():
                           'go.mod', 'pom.xml', 'Gemfile', '.project', '.vscode']
         if any(os.path.exists(os.path.join(project_dir, marker)) for marker in project_markers):
             return os.path.join(project_dir, '.claude-memory.db')
-        # Even if no markers, use project dir if explicitly set
-        return os.path.join(project_dir, '.claude-memory.db')
+        # Don't automatically use project dir if it's not a recognized project
+        # Fall through to Option 3 instead
     
     # Option 3: If in a clear project directory (has git, package.json, etc), use local DB
     cwd = os.getcwd()
@@ -89,7 +91,18 @@ def get_database_path():
     return os.path.join(cache_dir, f'{context_hash}.db')
 
 # Set up database path and project info
-DB_PATH = get_database_path()
+try:
+    DB_PATH = get_database_path()
+    # Ensure parent directory exists
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
+except Exception as e:
+    # Fallback to a safe location if there's any error
+    import tempfile
+    fallback_dir = tempfile.gettempdir()
+    DB_PATH = os.path.join(fallback_dir, 'claude-memory-fallback.db')
+    print(f"Warning: Using fallback database location due to error: {e}", file=sys.stderr)
 
 # Use the project directory from environment if available, otherwise current directory
 if os.environ.get('CLAUDE_PROJECT_DIR'):
@@ -100,20 +113,38 @@ else:
 PROJECT_NAME = os.path.basename(PROJECT_ROOT) or 'Claude Desktop'
 
 # Show where database is stored (for debugging)
-if 'claude-dementia' in DB_PATH:
+if 'claude-dementia' in DB_PATH or '/tmp/' in DB_PATH or tempfile.gettempdir() in DB_PATH:
     DB_LOCATION = 'user cache'
 else:
     DB_LOCATION = 'project local'
 
 def get_db():
     """Get database connection with row factory"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    # Ensure the directory exists
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
     
-    # Initialize database schema if needed
-    initialize_database(conn)
-    
-    return conn
+    # Connect with better error handling
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        
+        # Initialize database schema if needed
+        initialize_database(conn)
+        
+        return conn
+    except sqlite3.Error as e:
+        # Provide detailed error information
+        import sys
+        print(f"Database connection error: {e}", file=sys.stderr)
+        print(f"Database path: {DB_PATH}", file=sys.stderr)
+        print(f"Database directory: {db_dir}", file=sys.stderr)
+        print(f"Directory exists: {os.path.exists(db_dir) if db_dir else 'N/A'}", file=sys.stderr)
+        print(f"Database file exists: {os.path.exists(DB_PATH)}", file=sys.stderr)
+        if os.path.exists(DB_PATH):
+            print(f"File permissions: {oct(os.stat(DB_PATH).st_mode)}", file=sys.stderr)
+        raise
 
 def initialize_database(conn):
     """Create database tables if they don't exist and migrate existing schemas"""
@@ -1352,12 +1383,16 @@ async def project_update() -> str:
     else:
         project_root = Path.cwd()
     
+    # Resolve to absolute path to ensure we have a valid starting point
+    project_root = project_root.resolve()
+    
     output = []
     output.append(f"🔍 Scanning project: {project_root.name}")
+    output.append(f"   Path: {project_root}")
     output.append("Analyzing files and applying intelligent tags...")
     output.append("")
     
-    # Patterns to ignore
+    # Patterns to ignore (including symlinks to avoid escaping project)
     ignore_patterns = [
         '__pycache__', '.git', 'node_modules', '.venv', 'venv', 
         'dist', 'build', '.pytest_cache', '.mypy_cache', '.coverage',
@@ -1375,37 +1410,58 @@ async def project_update() -> str:
         'by_quality': {}
     }
     
-    # Scan files
+    # Scan files with safety checks
+    errors = []
     for path in project_root.rglob('*'):
-        # Skip ignored patterns
-        if any(pattern in str(path) for pattern in ignore_patterns):
-            continue
-            
-        if path.is_file():
-            stats['total_files'] += 1
-            
-            # Generate tags for this file
-            tags = get_file_tags(path, project_root)
-            
-            if tags:
-                # Apply tags to database
-                applied = apply_tags_to_file(conn, str(path.relative_to(project_root)), tags, session_id)
-                if applied > 0:
-                    stats['files_tagged'] += 1
-                    stats['tags_applied'] += applied
+        try:
+            # Skip symlinks to avoid escaping project directory
+            if path.is_symlink():
+                continue
                 
-                # Collect statistics
-                for tag in tags:
-                    if ':' in tag:
-                        category, value = tag.split(':', 1)
-                        if category == 'status':
-                            stats['by_status'][value] = stats['by_status'].get(value, 0) + 1
-                        elif category == 'domain':
-                            stats['by_domain'][value] = stats['by_domain'].get(value, 0) + 1
-                        elif category == 'layer':
-                            stats['by_layer'][value] = stats['by_layer'].get(value, 0) + 1
-                        elif category == 'quality':
-                            stats['by_quality'][value] = stats['by_quality'].get(value, 0) + 1
+            # Ensure path is within project root (defense in depth)
+            try:
+                path.relative_to(project_root)
+            except ValueError:
+                # Path is outside project root, skip it
+                continue
+            
+            # Skip ignored patterns
+            if any(pattern in str(path) for pattern in ignore_patterns):
+                continue
+                
+            if path.is_file():
+                stats['total_files'] += 1
+                
+                # Generate tags for this file
+                tags = get_file_tags(path, project_root)
+                
+                if tags:
+                    # Apply tags to database
+                    applied = apply_tags_to_file(conn, str(path.relative_to(project_root)), tags, session_id)
+                    if applied > 0:
+                        stats['files_tagged'] += 1
+                        stats['tags_applied'] += applied
+                    
+                    # Collect statistics
+                    for tag in tags:
+                        if ':' in tag:
+                            category, value = tag.split(':', 1)
+                            if category == 'status':
+                                stats['by_status'][value] = stats['by_status'].get(value, 0) + 1
+                            elif category == 'domain':
+                                stats['by_domain'][value] = stats['by_domain'].get(value, 0) + 1
+                            elif category == 'layer':
+                                stats['by_layer'][value] = stats['by_layer'].get(value, 0) + 1
+                            elif category == 'quality':
+                                stats['by_quality'][value] = stats['by_quality'].get(value, 0) + 1
+        except PermissionError as e:
+            # Track permission errors but continue scanning
+            errors.append(f"Permission denied: {path}")
+            continue
+        except Exception as e:
+            # Track other errors but continue scanning
+            errors.append(f"Error scanning {path}: {e}")
+            continue
     
     conn.commit()
     
@@ -1482,6 +1538,14 @@ async def project_update() -> str:
     """, (json.dumps(stats), time.time()))
     
     conn.commit()
+    
+    # Report any errors encountered
+    if errors:
+        output.append(f"\n⚠️ Encountered {len(errors)} errors during scanning:")
+        for error in errors[:5]:  # Show first 5 errors
+            output.append(f"   • {error}")
+        if len(errors) > 5:
+            output.append(f"   ... and {len(errors) - 5} more")
     
     output.append("\n✅ Project intelligence updated with structured tags")
     output.append("Use search_by_tags() to query files by their metadata")
