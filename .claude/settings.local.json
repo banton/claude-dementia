@@ -26,7 +26,8 @@
       "Bash(cat:*)",
       "Read(/Users/banton/Sites/linkedin/**)",
       "Bash(./memory/update.sh:*)",
-      "mcp__dementia__sleep"
+      "mcp__dementia__sleep",
+      "Bash(gh run list:*)"
     ],
     "deny": [],
     "ask": [],

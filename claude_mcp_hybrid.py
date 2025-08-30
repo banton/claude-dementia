@@ -1414,18 +1414,21 @@ async def project_update() -> str:
     Scan project and intelligently tag files with structured metadata.
     Tags include: status, domain, layer, quality, dependencies, etc.
     """
-    update_session_activity()
-    conn = get_db()
-    session_id = get_current_session_id()
-    
-    # Get project root - use the environment variable if set, otherwise current directory
-    if os.environ.get('CLAUDE_PROJECT_DIR'):
-        project_root = Path(os.environ['CLAUDE_PROJECT_DIR'])
-    else:
-        project_root = Path.cwd()
-    
-    # Resolve to absolute path to ensure we have a valid starting point
-    project_root = project_root.resolve()
+    try:
+        update_session_activity()
+        conn = get_db()
+        session_id = get_current_session_id()
+        
+        # Get project root - use the environment variable if set, otherwise current directory
+        if os.environ.get('CLAUDE_PROJECT_DIR'):
+            project_root = Path(os.environ['CLAUDE_PROJECT_DIR'])
+        else:
+            project_root = Path.cwd()
+        
+        # Resolve to absolute path to ensure we have a valid starting point
+        project_root = project_root.resolve()
+    except Exception as e:
+        return f"❌ Error initializing project scan: {e}"
     
     output = []
     output.append(f"🔍 Scanning project: {project_root.name}")
@@ -1451,9 +1454,16 @@ async def project_update() -> str:
         'by_quality': {}
     }
     
-    # Scan files with safety checks
+    # Scan files with safety checks and limits
     errors = []
+    max_files = 500  # Limit to prevent timeout
+    file_count = 0
+    
     for path in project_root.rglob('*'):
+        if file_count >= max_files:
+            output.append(f"\n⚠️ Scan limited to {max_files} files to prevent timeout")
+            break
+        file_count += 1
         try:
             # Skip symlinks to avoid escaping project directory
             if path.is_symlink():
@@ -1591,6 +1601,7 @@ async def project_update() -> str:
     output.append("\n✅ Project intelligence updated with structured tags")
     output.append("Use search_by_tags() to query files by their metadata")
     
+    # Connection will auto-close due to AutoClosingConnection wrapper
     return "\n".join(output)
 
 @mcp.tool()
