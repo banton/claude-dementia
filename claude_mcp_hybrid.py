@@ -99,10 +99,10 @@ try:
         os.makedirs(db_dir, exist_ok=True)
 except Exception as e:
     # Fallback to a safe location if there's any error
-    import tempfile
     fallback_dir = tempfile.gettempdir()
     DB_PATH = os.path.join(fallback_dir, 'claude-memory-fallback.db')
-    print(f"Warning: Using fallback database location due to error: {e}", file=sys.stderr)
+    # Don't print during module initialization - it can break MCP
+    # print(f"Warning: Using fallback database location due to error: {e}", file=sys.stderr)
 
 # Use the project directory from environment if available, otherwise current directory
 if os.environ.get('CLAUDE_PROJECT_DIR'):
@@ -113,7 +113,7 @@ else:
 PROJECT_NAME = os.path.basename(PROJECT_ROOT) or 'Claude Desktop'
 
 # Show where database is stored (for debugging)
-if 'claude-dementia' in DB_PATH or '/tmp/' in DB_PATH or tempfile.gettempdir() in DB_PATH:
+if 'claude-dementia' in DB_PATH or '/tmp/' in DB_PATH or '/var/folders/' in DB_PATH:
     DB_LOCATION = 'user cache'
 else:
     DB_LOCATION = 'project local'
@@ -136,7 +136,6 @@ def get_db():
         return conn
     except sqlite3.Error as e:
         # Provide detailed error information
-        import sys
         print(f"Database connection error: {e}", file=sys.stderr)
         print(f"Database path: {DB_PATH}", file=sys.stderr)
         print(f"Database directory: {db_dir}", file=sys.stderr)

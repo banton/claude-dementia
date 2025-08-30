@@ -19,10 +19,11 @@ export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
 export DEBUG="${DEBUG:-mcp:*}"
 export PYTHONUNBUFFERED=1  # Ensure output isn't buffered
 
-# Log startup (to stderr to avoid polluting stdio)
-echo "Starting Claude Dementia MCP Server..." >&2
-echo "Project directory: $CLAUDE_PROJECT_DIR" >&2
-echo "Server location: $SCRIPT_DIR" >&2
+# Don't log to stderr - it might interfere with MCP communication
+# Debug output can be enabled by uncommenting these lines
+# echo "Starting Claude Dementia MCP Server..." >&2
+# echo "Project directory: $CLAUDE_PROJECT_DIR" >&2
+# echo "Server location: $SCRIPT_DIR" >&2
 
 # Run the server from the PROJECT directory, not the server directory
 # This ensures all file operations happen in the right place
