@@ -1,6 +1,12 @@
-# Claude Dementia - Installation Guide
+# Claude Dementia v4.0.0-rc1 - Installation Guide
 
 Claude Dementia is an MCP server that gives Claude persistent memory across sessions, with intelligent project understanding and context management.
+
+## Requirements
+
+- Python 3.8 or higher
+- pip package manager
+- Claude Desktop or Claude Code with MCP support
 
 ## Installation for Claude Code
 
@@ -182,6 +188,23 @@ Check database location with `wake_up()` - shows where memory is stored.
 
 ### Can't find tools
 Ensure MCP server is configured correctly and Claude was restarted.
+
+### "Unable to open database file" error
+- v4.0.0-rc1 fixes automatic database path detection
+- For project directories: creates `.claude-memory.db` in project root
+- For non-project directories: uses `~/.claude-dementia/{hash}.db`
+
+### "Permission denied" errors during scanning
+- v4.0.0-rc1 adds boundary protection to prevent scanning outside project
+- Symlinks are automatically skipped to prevent escaping project directory
+
+### "Database is locked" error
+- v4.0.0-rc1 uses SQLite WAL mode for better concurrency
+- Auto-closing connections prevent lock retention
+
+### project_update times out
+- v4.0.0-rc1 limits scanning to 500 files to prevent timeout
+- Large projects are handled gracefully
 
 ## Support
 

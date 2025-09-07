@@ -20,12 +20,7 @@ from contextlib import contextmanager
 
 from mcp.server import FastMCP
 
-# Import enhanced scanner for better file processing
-try:
-    from enhanced_scanner import EnhancedProjectScanner
-    SCANNER_AVAILABLE = True
-except ImportError:
-    SCANNER_AVAILABLE = False
+# Enhanced scanner removed for v4.0.0-rc1 stable release
 
 # Import active context engine
 from active_context_engine import (
@@ -1435,77 +1430,22 @@ async def project_update() -> str:
         
         project_root = project_root.resolve()
         
-        # Check for existing scan session
-        cursor = conn.execute("""
-            SELECT id, status, processed_files, total_files 
-            FROM scan_sessions 
-            WHERE project_root = ? AND status != 'completed'
-            ORDER BY started_at DESC
-            LIMIT 1
-        """, (str(project_root),))
+        # Standard project scanning (v4.0.0-rc1 stable)
+        output = []
+        output.append(f"🔍 Scanning project: {project_root.name}")
+        output.append(f"   Path: {project_root}")
+        output.append("Analyzing files and applying intelligent tags...")
+        output.append("")
         
-        existing = cursor.fetchone()
-        
-        if SCANNER_AVAILABLE:
-            scanner = EnhancedProjectScanner(DB_PATH)
-            
-            if existing:
-                # Resume existing scan
-                scan_id, status, processed, total = existing
-                output = [f"📂 Resuming scan (session {scan_id})"]
-                output.append(f"   Progress: {processed}/{total} files")
-                
-                # Process next batch
-                result = scanner.process_batch(scan_id, batch_size=50)
-                output.append(f"   Processed {result['processed']} more files")
-                
-                if result['status'] == 'completed':
-                    output.append(f"✅ Scan complete! All {total} files processed")
-                    # Generate summary from processed data
-                    output.append(scanner.get_summary(scan_id))
-                else:
-                    output.append(f"   ⏳ {result['pending']} files remaining")
-                    output.append(f"   Run project_update again to continue")
-                
-                return "\n".join(output)
-            else:
-                # Start new enhanced scan
-                scan_id = scanner.start_scan(str(project_root))
-                output = [f"🚀 Starting enhanced scan with markdown conversion"]
-                output.append(f"   Session: {scan_id}")
-                
-                # Process first batch
-                result = scanner.process_batch(scan_id, batch_size=50)
-                output.append(f"   Phase 1: Discovered {result['total_files']} files")
-                output.append(f"   Phase 2: Processed {result['processed']} files")
-                
-                if result['pending'] > 0:
-                    output.append(f"   ⏳ {result['pending']} files queued")
-                    output.append(f"   Run project_update again to continue")
-                else:
-                    output.append(f"✅ All files processed!")
-                    
-                return "\n".join(output)
-    except Exception as e:
-        # Fall back to simple scan if enhanced scanner fails
-        pass
-    
-    # Simple scan fallback (original code)
-    output = []
-    output.append(f"🔍 Scanning project: {project_root.name} (simple mode)")
-    output.append(f"   Path: {project_root}")
-    output.append("Analyzing files and applying intelligent tags...")
-    output.append("")
-    
-    # Patterns to ignore (including symlinks to avoid escaping project)
-    ignore_patterns = [
+        # Patterns to ignore (including symlinks to avoid escaping project)
+        ignore_patterns = [
         '__pycache__', '.git', 'node_modules', '.venv', 'venv', 
         'dist', 'build', '.pytest_cache', '.mypy_cache', '.coverage',
         '*.pyc', '*.pyo', '.DS_Store', 'Thumbs.db'
-    ]
-    
-    # Statistics
-    stats = {
+        ]
+        
+        # Statistics
+        stats = {
         'total_files': 0,
         'files_tagged': 0,
         'tags_applied': 0,
@@ -1513,157 +1453,159 @@ async def project_update() -> str:
         'by_domain': {},
         'by_layer': {},
         'by_quality': {}
-    }
-    
-    # Scan files with safety checks and limits
-    errors = []
-    max_files = 500  # Limit to prevent timeout
-    file_count = 0
-    
-    for path in project_root.rglob('*'):
-        if file_count >= max_files:
-            output.append(f"\n⚠️ Scan limited to {max_files} files to prevent timeout")
-            break
-        file_count += 1
-        try:
-            # Skip symlinks to avoid escaping project directory
-            if path.is_symlink():
-                continue
-                
-            # Ensure path is within project root (defense in depth)
+        }
+        
+        # Scan files with safety checks and limits
+        errors = []
+        max_files = 500  # Limit to prevent timeout
+        file_count = 0
+        
+        for path in project_root.rglob('*'):
+            if file_count >= max_files:
+                output.append(f"\n⚠️ Scan limited to {max_files} files to prevent timeout")
+                break
+            file_count += 1
             try:
-                path.relative_to(project_root)
-            except ValueError:
-                # Path is outside project root, skip it
-                continue
-            
-            # Skip ignored patterns
-            if any(pattern in str(path) for pattern in ignore_patterns):
-                continue
-                
-            if path.is_file():
-                stats['total_files'] += 1
-                
-                # Generate tags for this file
-                tags = get_file_tags(path, project_root)
-                
-                if tags:
-                    # Apply tags to database
-                    applied = apply_tags_to_file(conn, str(path.relative_to(project_root)), tags, session_id)
-                    if applied > 0:
-                        stats['files_tagged'] += 1
-                        stats['tags_applied'] += applied
+                # Skip symlinks to avoid escaping project directory
+                if path.is_symlink():
+                    continue
                     
-                    # Collect statistics
-                    for tag in tags:
-                        if ':' in tag:
-                            category, value = tag.split(':', 1)
-                            if category == 'status':
-                                stats['by_status'][value] = stats['by_status'].get(value, 0) + 1
-                            elif category == 'domain':
-                                stats['by_domain'][value] = stats['by_domain'].get(value, 0) + 1
-                            elif category == 'layer':
-                                stats['by_layer'][value] = stats['by_layer'].get(value, 0) + 1
-                            elif category == 'quality':
-                                stats['by_quality'][value] = stats['by_quality'].get(value, 0) + 1
-        except PermissionError as e:
-            # Track permission errors but continue scanning
-            errors.append(f"Permission denied: {path}")
-            continue
-        except Exception as e:
-            # Track other errors but continue scanning
-            errors.append(f"Error scanning {path}: {e}")
-            continue
+                # Ensure path is within project root (defense in depth)
+                try:
+                    path.relative_to(project_root)
+                except ValueError:
+                    # Path is outside project root, skip it
+                    continue
+                
+                # Skip ignored patterns
+                if any(pattern in str(path) for pattern in ignore_patterns):
+                    continue
+                    
+                if path.is_file():
+                    stats['total_files'] += 1
+                    
+                    # Generate tags for this file
+                    tags = get_file_tags(path, project_root)
+                    
+                    if tags:
+                        # Apply tags to database
+                        applied = apply_tags_to_file(conn, str(path.relative_to(project_root)), tags, session_id)
+                        if applied > 0:
+                            stats['files_tagged'] += 1
+                            stats['tags_applied'] += applied
+                        
+                        # Collect statistics
+                        for tag in tags:
+                            if ':' in tag:
+                                category, value = tag.split(':', 1)
+                                if category == 'status':
+                                    stats['by_status'][value] = stats['by_status'].get(value, 0) + 1
+                                elif category == 'domain':
+                                    stats['by_domain'][value] = stats['by_domain'].get(value, 0) + 1
+                                elif category == 'layer':
+                                    stats['by_layer'][value] = stats['by_layer'].get(value, 0) + 1
+                                elif category == 'quality':
+                                    stats['by_quality'][value] = stats['by_quality'].get(value, 0) + 1
+            except PermissionError as e:
+                # Track permission errors but continue scanning
+                errors.append(f"Permission denied: {path}")
+                continue
+            except Exception as e:
+                # Track other errors but continue scanning
+                errors.append(f"Error scanning {path}: {e}")
+                continue
+        
+        conn.commit()
+        
+        # Generate report
+        output.append(f"📊 Analysis Complete:")
+        output.append(f"   • Files scanned: {stats['total_files']}")
+        output.append(f"   • Files tagged: {stats['files_tagged']}")
+        output.append(f"   • Tags applied: {stats['tags_applied']}")
     
-    conn.commit()
-    
-    # Generate report
-    output.append(f"📊 Analysis Complete:")
-    output.append(f"   • Files scanned: {stats['total_files']}")
-    output.append(f"   • Files tagged: {stats['files_tagged']}")
-    output.append(f"   • Tags applied: {stats['tags_applied']}")
-    
-    if stats['by_status']:
-        output.append("\n📈 Maturity Status:")
-        for status, count in sorted(stats['by_status'].items(), key=lambda x: x[1], reverse=True):
-            output.append(f"   • {status}: {count} files")
-    
-    if stats['by_domain']:
-        output.append("\n🎯 Domains Detected:")
-        for domain, count in sorted(stats['by_domain'].items(), key=lambda x: x[1], reverse=True)[:5]:
-            output.append(f"   • {domain}: {count} files")
-    
-    if stats['by_layer']:
-        output.append("\n🏗️ Architecture Layers:")
-        for layer, count in sorted(stats['by_layer'].items(), key=lambda x: x[1], reverse=True)[:5]:
-            output.append(f"   • {layer}: {count} files")
-    
-    if stats['by_quality']:
-        output.append("\n✨ Quality Indicators:")
-        for quality, count in sorted(stats['by_quality'].items(), key=lambda x: x[1], reverse=True):
-            output.append(f"   • {quality}: {count} files")
-    
-    # Insights
-    insights = []
-    
-    # Check for deprecated files
-    if 'deprecated' in stats['by_status']:
-        insights.append(f"⚠️ {stats['by_status']['deprecated']} deprecated files found")
-    
-    # Check for files needing work
-    if 'needs-work' in stats['by_quality']:
-        insights.append(f"🔧 {stats['by_quality']['needs-work']} files marked for improvement")
-    if 'has-workarounds' in stats['by_quality']:
-        insights.append(f"⚡ {stats['by_quality']['has-workarounds']} files contain temporary workarounds")
-    if 'technical-debt' in stats['by_quality']:
-        insights.append(f"💳 {stats['by_quality']['technical-debt']} files have technical debt")
-    
-    # Check for mock/dev artifacts - CRITICAL
-    if 'has-mock-data' in stats['by_quality']:
-        insights.append(f"🎭 {stats['by_quality']['has-mock-data']} files contain mock/sample data")
-    if 'has-placeholder-data' in stats['by_quality']:
-        insights.append(f"📝 {stats['by_quality']['has-placeholder-data']} files have placeholder values (foo/bar/test@example)")
-    if 'has-dev-urls' in stats['by_quality']:
-        insights.append(f"🔗 {stats['by_quality']['has-dev-urls']} files reference localhost/dev URLs")
-    if 'has-hardcoded-values' in stats['by_quality']:
-        insights.append(f"🔢 {stats['by_quality']['has-hardcoded-values']} files have hardcoded values")
-    
-    # Check for undocumented files
-    documented = stats['by_quality'].get('documented', 0)
-    if documented < stats['total_files'] * 0.3:  # Less than 30% documented
-        insights.append("📚 Low documentation coverage detected")
-    
-    # Check for test coverage
-    test_files = stats['by_layer'].get('test', 0)
-    if test_files < stats['total_files'] * 0.1:  # Less than 10% test files
-        insights.append("🧪 Low test file ratio")
-    
-    if insights:
-        output.append("\n💡 Insights:")
-        for insight in insights:
-            output.append(f"   {insight}")
-    
-    # Store project intelligence
-    conn.execute("""
-        INSERT OR REPLACE INTO project_variables (key, value, updated_at)
-        VALUES ('file_analysis', ?, ?)
-    """, (json.dumps(stats), time.time()))
-    
-    conn.commit()
-    
-    # Report any errors encountered
-    if errors:
-        output.append(f"\n⚠️ Encountered {len(errors)} errors during scanning:")
-        for error in errors[:5]:  # Show first 5 errors
-            output.append(f"   • {error}")
-        if len(errors) > 5:
-            output.append(f"   ... and {len(errors) - 5} more")
-    
-    output.append("\n✅ Project intelligence updated with structured tags")
-    output.append("Use search_by_tags() to query files by their metadata")
-    
-    # Connection will auto-close due to AutoClosingConnection wrapper
-    return "\n".join(output)
+        if stats['by_status']:
+            output.append("\n📈 Maturity Status:")
+            for status, count in sorted(stats['by_status'].items(), key=lambda x: x[1], reverse=True):
+                output.append(f"   • {status}: {count} files")
+        
+        if stats['by_domain']:
+            output.append("\n🎯 Domains Detected:")
+            for domain, count in sorted(stats['by_domain'].items(), key=lambda x: x[1], reverse=True)[:5]:
+                output.append(f"   • {domain}: {count} files")
+        
+        if stats['by_layer']:
+            output.append("\n🏗️ Architecture Layers:")
+            for layer, count in sorted(stats['by_layer'].items(), key=lambda x: x[1], reverse=True)[:5]:
+                output.append(f"   • {layer}: {count} files")
+        
+        if stats['by_quality']:
+            output.append("\n✨ Quality Indicators:")
+            for quality, count in sorted(stats['by_quality'].items(), key=lambda x: x[1], reverse=True):
+                output.append(f"   • {quality}: {count} files")
+        
+        # Insights
+        insights = []
+        
+        # Check for deprecated files
+        if 'deprecated' in stats['by_status']:
+            insights.append(f"⚠️ {stats['by_status']['deprecated']} deprecated files found")
+        
+        # Check for files needing work
+        if 'needs-work' in stats['by_quality']:
+            insights.append(f"🔧 {stats['by_quality']['needs-work']} files marked for improvement")
+        if 'has-workarounds' in stats['by_quality']:
+            insights.append(f"⚡ {stats['by_quality']['has-workarounds']} files contain temporary workarounds")
+        if 'technical-debt' in stats['by_quality']:
+            insights.append(f"💳 {stats['by_quality']['technical-debt']} files have technical debt")
+        
+        # Check for mock/dev artifacts - CRITICAL
+        if 'has-mock-data' in stats['by_quality']:
+            insights.append(f"🎭 {stats['by_quality']['has-mock-data']} files contain mock/sample data")
+        if 'has-placeholder-data' in stats['by_quality']:
+            insights.append(f"📝 {stats['by_quality']['has-placeholder-data']} files have placeholder values (foo/bar/test@example)")
+        if 'has-dev-urls' in stats['by_quality']:
+            insights.append(f"🔗 {stats['by_quality']['has-dev-urls']} files reference localhost/dev URLs")
+        if 'has-hardcoded-values' in stats['by_quality']:
+            insights.append(f"🔢 {stats['by_quality']['has-hardcoded-values']} files have hardcoded values")
+        
+        # Check for undocumented files
+        documented = stats['by_quality'].get('documented', 0)
+        if documented < stats['total_files'] * 0.3:  # Less than 30% documented
+            insights.append("📚 Low documentation coverage detected")
+        
+        # Check for test coverage
+        test_files = stats['by_layer'].get('test', 0)
+        if test_files < stats['total_files'] * 0.1:  # Less than 10% test files
+            insights.append("🧪 Low test file ratio")
+        
+        if insights:
+            output.append("\n💡 Insights:")
+            for insight in insights:
+                output.append(f"   {insight}")
+        
+        # Store project intelligence
+        conn.execute("""
+            INSERT OR REPLACE INTO project_variables (key, value, updated_at)
+            VALUES ('file_analysis', ?, ?)
+        """, (json.dumps(stats), time.time()))
+        
+        conn.commit()
+        
+        # Report any errors encountered
+        if errors:
+            output.append(f"\n⚠️ Encountered {len(errors)} errors during scanning:")
+            for error in errors[:5]:  # Show first 5 errors
+                output.append(f"   • {error}")
+            if len(errors) > 5:
+                output.append(f"   ... and {len(errors) - 5} more")
+        
+        output.append("\n✅ Project intelligence updated with structured tags")
+        output.append("Use search_by_tags() to query files by their metadata")
+        
+        # Connection will auto-close due to AutoClosingConnection wrapper
+        return "\n".join(output)
+    except Exception as e:
+        return f"Error scanning project: {e}"
 
 @mcp.tool()
 async def project_status() -> str:

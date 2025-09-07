@@ -5,7 +5,7 @@ All notable changes to Claude Dementia will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.0.0] - 2024-08-14
+## [4.0.0-rc1] - 2025-09-07
 
 ### Added
 - MCP (Model Context Protocol) server implementation
@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON output for proper MCP communication
 - Project context bleeding between different codebases
 - Database location for Claude Desktop vs Claude Code
+- Database connectivity issues for non-project directories
+- Permission errors when scanning files outside project boundaries
+- Database locking issues with SQLite WAL mode and auto-closing connections
+- MCP server startup regression from debug output
+- Project_update timeout protection with 500-file limit
 
 ### Removed
 - File-based markdown memory system

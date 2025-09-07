@@ -27,7 +27,12 @@
       "Read(/Users/banton/Sites/linkedin/**)",
       "Bash(./memory/update.sh:*)",
       "mcp__dementia__sleep",
-      "Bash(gh run list:*)"
+      "Bash(gh run list:*)",
+      "Bash(grep:*)",
+      "Bash(pip show:*)",
+      "Bash(sed:*)",
+      "Read(//**)",
+      "Read(//**)"
     ],
     "deny": [],
     "ask": [],

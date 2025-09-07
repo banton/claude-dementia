@@ -1,8 +1,9 @@
-# Claude Dementia 🧠
+# Claude Dementia 🧠 v4.0.0-rc1
 
 > An MCP server that gives Claude persistent memory between sessions, with intelligent project understanding and context management.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Version](https://img.shields.io/badge/version-4.0.0--rc1-blue)](https://github.com/banton/claude-dementia/releases)
 
 ## What is Claude Dementia?
 
@@ -52,6 +53,12 @@ file_insights("src/api/auth.py")
 # 📝 Replace placeholder values (foo/bar/test@example)
 ```
 
+## Requirements
+
+- Python 3.8 or higher
+- Claude Desktop or Claude Code with MCP support
+- pip package manager
+
 ## Quick Start
 
 ### 1. Install for Claude Desktop/Code
@@ -64,7 +71,7 @@ cd claude-dementia
 # Install dependencies
 pip install mcp
 
-# Make scripts executable
+# Make scripts executable (macOS/Linux)
 chmod +x claude-dementia-server.sh
 ```
 
