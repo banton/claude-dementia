@@ -30,6 +30,9 @@ from active_context_engine import (
     get_session_start_reminders
 )
 
+# Import RLM preview generation
+from migrate_v4_1_rlm import generate_preview, extract_key_concepts
+
 # Initialize MCP server
 mcp = FastMCP("claude-dementia")
 
@@ -1268,14 +1271,21 @@ async def lock_context(content: str, topic: str, tags: Optional[str] = None, pri
         "keywords": keywords,
         "created_at": datetime.now().isoformat()
     }
-    
+
+    # Generate preview and key concepts for RLM optimization
+    preview = generate_preview(content, max_length=500)
+    tag_list = tags.split(',') if tags else []
+    key_concepts = extract_key_concepts(content, tag_list)
+
     # Store lock
     try:
         conn.execute("""
-            INSERT INTO context_locks 
-            (session_id, label, version, content, content_hash, locked_at, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (session_id, topic, version, content, content_hash, time.time(), json.dumps(metadata)))
+            INSERT INTO context_locks
+            (session_id, label, version, content, content_hash, locked_at, metadata,
+             preview, key_concepts, last_accessed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (session_id, topic, version, content, content_hash, time.time(), json.dumps(metadata),
+              preview, json.dumps(key_concepts), time.time()))
         
         conn.commit()
         
