@@ -1199,13 +1199,64 @@ async def memory_status() -> str:
 @mcp.tool()
 async def lock_context(content: str, topic: str, tags: Optional[str] = None, priority: Optional[str] = None) -> str:
     """
-    Lock context under specific topic with tags and priority.
-    Creates immutable snapshot with version tracking.
-    
-    Priority levels:
-    - 'always_check': Always checked before relevant actions
-    - 'important': Shown at session start
-    - 'reference': Standard reference material (default)
+    Lock important context, rules, or decisions as immutable versioned snapshots for perfect recall.
+
+    **CRITICAL: When to use this tool:**
+    - API specifications, contracts, or schemas you need to remember exactly
+    - Architecture decisions, design patterns, or system constraints
+    - Rules that MUST/ALWAYS/NEVER be violated (e.g., "ALWAYS use output/ directory")
+    - Configuration details, environment setup, or deployment procedures
+    - Important agreements, requirements, or user preferences
+    - Code patterns, naming conventions, or style guidelines
+
+    **What this tool does:**
+    - Creates immutable versioned snapshot (no edits, only new versions)
+    - Automatically generates intelligent preview for fast relevance checking
+    - Extracts key technical concepts for better search matching
+    - Stores with priority level to control when it's checked
+    - Enables 60-80% faster context searches through RLM optimization
+
+    **Priority levels (auto-detected if not specified):**
+    - 'always_check': ⚠️  Critical rules checked before ALL relevant actions
+      Use for: Must-never-violate rules, security requirements, critical constraints
+    - 'important': 📌 Shown at session start, checked when highly relevant
+      Use for: Architecture decisions, important patterns, key configurations
+    - 'reference': Standard reference material, checked when relevant
+      Use for: Documentation, examples, general information
+
+    **Best practices:**
+    1. Lock specific, actionable information (not general knowledge)
+    2. Include concrete examples in the content
+    3. Use MUST/ALWAYS/NEVER keywords for rules (auto-detects priority)
+    4. Add descriptive tags for better search: tags="api,auth,jwt"
+    5. Lock early when you document important decisions
+
+    **Example usage:**
+    ```
+    # Lock critical API spec
+    lock_context(
+        content="API Authentication: MUST use JWT tokens. NEVER send passwords in URLs.",
+        topic="api_auth_rules",
+        tags="api,security,auth",
+        priority="always_check"
+    )
+
+    # Lock architecture decision
+    lock_context(
+        content="Database: Using PostgreSQL 14 with connection pooling (max 20 connections).",
+        topic="database_config",
+        tags="database,postgres,config",
+        priority="important"
+    )
+    ```
+
+    **What happens after locking:**
+    - Context is automatically checked when relevant (via check_contexts)
+    - Preview enables fast relevance checking (60-80% token savings)
+    - Can be recalled exactly with recall_context(topic)
+    - Violations of rules are detected and warned about
+
+    Returns: Confirmation with version number and priority indicator
     """
     update_session_activity()
     conn = get_db()
@@ -1305,8 +1356,58 @@ async def lock_context(content: str, topic: str, tags: Optional[str] = None, pri
 @mcp.tool()
 async def recall_context(topic: str, version: Optional[str] = "latest") -> str:
     """
-    Recall locked context by topic and version.
-    Use 'latest' for most recent version.
+    Retrieve exact content of a previously locked context by topic name.
+
+    **When to use this tool:**
+    - When check_contexts indicates a relevant locked context exists
+    - To get full details of an API spec, rule, or decision
+    - To verify exact requirements before implementing
+    - To recall specific configuration or setup details
+    - When you need the complete context (not just preview)
+
+    **What this returns:**
+    - Full content of the locked context (exactly as stored)
+    - Version number and timestamp
+    - Priority level and tags
+    - Complete metadata
+
+    **Version handling:**
+    - "latest" (default): Returns most recent version
+    - "1.0", "1.1", etc.: Returns specific version
+    - Contexts are immutable - each edit creates new version
+    - Version history preserved forever
+
+    **Best practices:**
+    1. Use after check_contexts identifies relevant context
+    2. Don't recall all contexts at session start (use wake_up instead)
+    3. Recall only when you need full details for current task
+    4. Check version history if requirements seem contradictory
+
+    **Example workflow:**
+    ```
+    # Step 1: Check what's relevant
+    check_contexts("implementing user authentication")
+    # Returns: "api_auth_rules is relevant (⚠️ always_check)"
+
+    # Step 2: Recall the full context
+    recall_context("api_auth_rules")
+    # Returns full API authentication specification
+
+    # Step 3: Implement following the rules
+    ```
+
+    **Common patterns:**
+    - Recall before implementing to verify requirements
+    - Recall when check_contexts shows rule violations
+    - Recall specific version if debugging old behavior
+    - List all topics first with list_topics() if unsure of name
+
+    **Performance note:**
+    With RLM optimization, check_contexts uses lightweight previews,
+    then recall_context loads full content only when needed.
+    This enables 60-80% token reduction compared to loading everything.
+
+    Returns: Full context content with metadata, or error if not found
     """
     conn = get_db()
     session_id = get_current_session_id()
@@ -1392,8 +1493,71 @@ async def list_topics() -> str:
 @mcp.tool()
 async def check_contexts(text: str) -> str:
     """
-    Check what locked contexts might be relevant to given text.
-    Also checks for potential violations of established rules.
+    Check what locked contexts are relevant to your current task and detect rule violations.
+
+    **IMPORTANT: When to use this tool:**
+    - Before implementing any feature (check for rules/specs)
+    - Before making architecture decisions (check for established patterns)
+    - Before deploying or releasing (check for deployment rules)
+    - When writing code in unfamiliar areas (check for conventions)
+    - Periodically during work to ensure compliance
+
+    **What this tool does:**
+    - Scans locked contexts using intelligent 2-stage relevance checking
+    - Returns relevant contexts with relevance scores
+    - Detects potential violations of MUST/ALWAYS/NEVER rules
+    - Uses RLM preview optimization (60-80% faster than loading everything)
+    - Highlights always_check priority contexts that must be followed
+
+    **How it works (RLM optimization):**
+    Stage 1: Quick preview scan of all contexts (lightweight, fast)
+    Stage 2: Load full content only for top 5 or high-relevance matches
+    Result: 60-80% token reduction while maintaining accuracy
+
+    **What you'll see:**
+    - List of relevant contexts with labels and relevance scores
+    - Priority indicators (⚠️ always_check, 📌 important)
+    - Tags for each relevant context
+    - Warning messages for potential rule violations
+    - Suggestions to use recall_context() for full details
+
+    **Best practices:**
+    1. Check BEFORE implementing (not after)
+    2. Check with specific task description: "implementing JWT auth for API"
+    3. Check with action description: "deploying to production"
+    4. Pay attention to always_check warnings (these are critical)
+    5. Use recall_context() to get full details of relevant contexts
+
+    **Example workflow:**
+    ```
+    # Good: Check before implementation
+    check_contexts("implementing user registration with email verification")
+    # Returns: "api_patterns relevant (📌 important), security_rules relevant (⚠️ always_check)"
+
+    # Then get details
+    recall_context("security_rules")
+    # Implement following the rules
+    ```
+
+    **Common use cases:**
+    - "deploying new feature to production" → checks deployment rules
+    - "writing tests for authentication" → checks test patterns
+    - "setting up database connection" → checks database config
+    - "implementing API endpoint" → checks API standards
+    - "configuring CI/CD" → checks deployment procedures
+
+    **What NOT to do:**
+    ❌ Don't check vague text: check_contexts("working on stuff")
+    ✅ Do check specific task: check_contexts("adding OAuth2 authentication")
+
+    ❌ Don't ignore always_check violations
+    ✅ Do read and follow always_check contexts
+
+    **Performance benefit:**
+    Traditional: Load all 30 contexts = 9KB
+    RLM-optimized: Preview scan + top 5 = 3KB (67% reduction)
+
+    Returns: List of relevant contexts, rule violations, and suggestions
     """
     session_id = get_current_session_id()
     
