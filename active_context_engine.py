@@ -7,9 +7,13 @@ Provides active rule enforcement and automatic context checking
 import re
 import json
 import sqlite3
+import logging
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import hashlib
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 class ActiveContextEngine:
     """
@@ -92,7 +96,13 @@ class ActiveContextEngine:
         for row in cursor:
             score = self._calculate_relevance_score(text, row)
 
-            metadata = json.loads(row['metadata']) if row['metadata'] else {}
+            metadata = {}
+            if row['metadata']:
+                try:
+                    metadata = json.loads(row['metadata'])
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"Failed to parse metadata for context '{row['label']}': {e}")
+
             candidates.append({
                 'label': row['label'],
                 'version': row['version'],
@@ -123,7 +133,8 @@ class ActiveContextEngine:
                 full_content = self._load_full_content(
                     candidate['label'],
                     candidate['version'],
-                    session_id
+                    session_id,
+                    conn  # Reuse existing connection
                 )
                 candidate['content'] = full_content
             else:
@@ -238,9 +249,15 @@ class ActiveContextEngine:
         
         summary = []
         summary.append("📌 Locked Contexts:")
-        
+
         for ctx in contexts[:10]:  # Limit to 10 most recent
-            metadata = json.loads(ctx['metadata']) if ctx['metadata'] else {}
+            metadata = {}
+            if ctx['metadata']:
+                try:
+                    metadata = json.loads(ctx['metadata'])
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"Failed to parse metadata for context '{ctx['label']}': {e}")
+
             priority = metadata.get('priority', 'reference')
             tags = metadata.get('tags', [])
             
@@ -363,8 +380,8 @@ class ActiveContextEngine:
                 concept_matches = sum(1 for concept in concepts
                                     if any(kw in concept.lower() for kw in keywords))
                 score += min(30, concept_matches * 10)
-            except (json.JSONDecodeError, TypeError):
-                pass
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"Failed to parse key_concepts for context '{context_row['label']}': {e}")
 
         # Recency (15 points) - contexts accessed recently are more relevant
         last_accessed = context_row['last_accessed']
@@ -388,16 +405,14 @@ class ActiveContextEngine:
                     score += 10
                 else:  # reference
                     score += 5
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"Failed to parse metadata for context '{context_row['label']}': {e}")
                 score += 5  # Default reference score
 
         return score / 100  # Normalize to 0-1
 
-    def _load_full_content(self, label: str, version: str, session_id: str) -> str:
-        """Load full content for a specific context"""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-
+    def _load_full_content(self, label: str, version: str, session_id: str, conn: sqlite3.Connection) -> str:
+        """Load full content for a specific context using existing connection"""
         cursor = conn.execute("""
             SELECT content
             FROM context_locks
@@ -405,8 +420,6 @@ class ActiveContextEngine:
         """, (session_id, label, version))
 
         row = cursor.fetchone()
-        conn.close()
-
         return row['content'] if row else ''
 
 

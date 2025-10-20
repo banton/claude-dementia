@@ -323,14 +323,17 @@ def test_load_full_content():
         engine = ActiveContextEngine(db_path)
 
         # Test 1: Load existing context
-        content = engine._load_full_content('api_authentication', '1.0', 'test_session')
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        content = engine._load_full_content('api_authentication', '1.0', 'test_session', conn)
         assert len(content) > 0, "Should load content"
         assert 'JWT' in content, "Content should contain expected text"
         print("   ✅ Test 1: Loads existing context")
 
         # Test 2: Non-existent context returns empty
-        content = engine._load_full_content('nonexistent', '1.0', 'test_session')
+        content = engine._load_full_content('nonexistent', '1.0', 'test_session', conn)
         assert content == '', "Non-existent context should return empty string"
+        conn.close()
         print("   ✅ Test 2: Non-existent context returns empty")
 
         print("   ✅ All _load_full_content tests passed!")

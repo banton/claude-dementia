@@ -163,11 +163,15 @@ def migrate_database(db_path: str, verbose: bool = True) -> dict:
     conn.row_factory = sqlite3.Row
 
     try:
+        # Begin transaction for rollback capability
+        conn.execute("BEGIN TRANSACTION")
+
         # Check if already migrated FIRST, before any changes
         already_migrated = check_migration_status(conn)
 
         if already_migrated:
             stats['already_migrated'] = True
+            conn.rollback()  # No changes made, rollback transaction
             if verbose:
                 print("✅ Database already migrated to v4.1")
             return stats
@@ -242,6 +246,7 @@ def migrate_database(db_path: str, verbose: bool = True) -> dict:
         # Create indices for performance
         indices_sql = [
             'CREATE INDEX IF NOT EXISTS idx_context_preview ON context_locks(session_id, label, preview)',
+            'CREATE INDEX IF NOT EXISTS idx_context_key_concepts ON context_locks(session_id, key_concepts)',
             'CREATE INDEX IF NOT EXISTS idx_context_access ON context_locks(session_id, last_accessed DESC)',
             'CREATE INDEX IF NOT EXISTS idx_relationships ON context_relationships(session_id, from_label)',
             'CREATE INDEX IF NOT EXISTS idx_access_log ON context_access_log(session_id, label, timestamp DESC)',
@@ -253,8 +258,6 @@ def migrate_database(db_path: str, verbose: bool = True) -> dict:
                 conn.execute(sql)
             except sqlite3.OperationalError as e:
                 stats['errors'].append(f"Failed to create index: {e}")
-
-        conn.commit()
 
         # Generate previews for existing contexts
         if verbose:
