@@ -1842,7 +1842,11 @@ async def _detect_project_type(path: str) -> str:
         for py_file in py_files:
             try:
                 content = py_file.read_text(encoding='utf-8', errors='ignore')
-                if "@mcp.tool()" in content or "from fastmcp import" in content:
+                # Check for MCP server patterns
+                if ("@mcp.tool()" in content or
+                    "from fastmcp import" in content or
+                    "from mcp.server import" in content or
+                    "from mcp import" in content):
                     return "mcp_server"
             except:
                 continue
