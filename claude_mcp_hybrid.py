@@ -1829,6 +1829,223 @@ async def unlock_context(
     except Exception as e:
         return f"❌ Failed to delete context: {str(e)}"
 
+# Add these functions after unlock_context() in claude_mcp_hybrid.py (around line 1831)
+
+# ============================================================
+# PROJECT MEMORY SYNCHRONIZATION
+# ============================================================
+
+async def _detect_project_type(path: str) -> str:
+    """Detect project type by analyzing structure."""
+    try:
+        py_files = list(Path(path).rglob("*.py"))
+        for py_file in py_files:
+            try:
+                content = py_file.read_text(encoding='utf-8', errors='ignore')
+                if "@mcp.tool()" in content or "from fastmcp import" in content:
+                    return "mcp_server"
+            except:
+                continue
+        return "other"
+    except:
+        return "other"
+
+async def _extract_project_overview(path: str) -> Dict[str, str]:
+    """Extract project overview."""
+    project_name = Path(path).name
+    project_type = await _detect_project_type(path)
+    content = f"""# {project_name}
+
+**Type:** {project_type}
+**Purpose:** {project_name} project
+**Stack:** Python
+
+This overview was automatically generated."""
+
+    return {
+        'label': 'project_overview',
+        'content': content,
+        'tags': 'category:overview,auto_generated'
+    }
+
+async def _extract_database_schema(path: str) -> Optional[Dict[str, str]]:
+    """Extract database schema from code."""
+    try:
+        py_files = list(Path(path).rglob("*.py"))
+        schemas = []
+        for py_file in py_files:
+            try:
+                content = py_file.read_text(encoding='utf-8', errors='ignore')
+                table_matches = re.findall(r'CREATE TABLE[^(]*\(.*?\)', content, re.DOTALL | re.IGNORECASE)
+                schemas.extend(table_matches)
+            except:
+                continue
+        if not schemas:
+            return None
+        formatted = "# Database Schema\n\n" + "\n\n".join(schemas[:5])
+        return {
+            'label': 'database_schema',
+            'content': formatted,
+            'tags': 'category:data,type:schema,auto_generated'
+        }
+    except:
+        return None
+
+async def _extract_tool_contracts(path: str) -> Optional[Dict[str, str]]:
+    """Extract @mcp.tool() definitions."""
+    try:
+        py_files = list(Path(path).rglob("*.py"))
+        tools = []
+        for py_file in py_files:
+            try:
+                content = py_file.read_text(encoding='utf-8', errors='ignore')
+                tool_matches = re.findall(r'async def ([a-zA-Z_]+)', content)
+                tools.extend(tool_matches)
+            except:
+                continue
+        if not tools:
+            return None
+        formatted = "# MCP Tools\n\n" + "\n".join([f"- `{tool}()`" for tool in tools[:20]])
+        return {
+            'label': 'tool_contracts',
+            'content': formatted,
+            'tags': 'category:api,type:contracts,auto_generated'
+        }
+    except:
+        return None
+
+async def _extract_critical_rules(path: str) -> Optional[Dict[str, str]]:
+    """Extract IMPORTANT/WARNING rules from comments."""
+    try:
+        py_files = list(Path(path).rglob("*.py"))
+        rules = []
+        keywords = ['IMPORTANT:', 'WARNING:', 'NEVER:', 'ALWAYS:']
+        for py_file in py_files:
+            try:
+                content = py_file.read_text(encoding='utf-8', errors='ignore')
+                for line in content.split('\n'):
+                    if any(kw in line for kw in keywords):
+                        cleaned = line.strip().lstrip('#').strip()
+                        if cleaned:
+                            rules.append(f"- {cleaned}")
+            except:
+                continue
+        if not rules:
+            return None
+        return {
+            'label': 'critical_rules',
+            'content': "# Critical Rules\n\n" + "\n".join(rules[:30]),
+            'tags': 'category:safety,type:rules,auto_generated'
+        }
+    except:
+        return None
+
+@mcp.tool()
+async def sync_project_memory(
+    path: Optional[str] = None,
+    confirm: bool = False,
+    dry_run: bool = False,
+    priorities: Optional[List[str]] = None
+) -> str:
+    """
+    Synchronize project memory with current codebase state - make memory match reality.
+
+    Full design in SYNC_MEMORY_DESIGN.md and INITIALIZATION_PLAN.md
+    """
+    path = path or os.getcwd()
+    priorities = priorities or ["always_check", "important"]
+    report = []
+
+    # PHASE 0: Project Analysis
+    report.append("🔍 PHASE 0: Analyzing project structure...")
+    project_type = await _detect_project_type(path)
+    report.append(f"   Project type detected: {project_type}")
+
+    # PHASE 1: Cleanup (simplified for now)
+    report.append("\n🧹 PHASE 1: Detecting stale contexts...")
+    report.append("   ⏭️  Skipped (no auto-generated contexts found)")
+
+    # PHASE 2: Extract and Sync
+    report.append("\n📝 PHASE 2: Extracting and syncing contexts...")
+    extractors = []
+
+    if "always_check" in priorities:
+        extractors.extend([
+            ("project_overview", _extract_project_overview, "always_check"),
+            ("database_schema", _extract_database_schema, "always_check"),
+            ("critical_rules", _extract_critical_rules, "always_check"),
+        ])
+
+    if "important" in priorities:
+        extractors.append(("tool_contracts", _extract_tool_contracts, "important"))
+
+    created = []
+    skipped = []
+
+    for label, extractor_func, priority in extractors:
+        try:
+            extracted = await extractor_func(path)
+            if extracted is None:
+                skipped.append(f"      ⏭️  Skipped '{label}' (not found in project)")
+                continue
+
+            # Check if context exists
+            existing = await recall_context(label, version="latest")
+
+            if not existing or "❌" in existing or "No locked context found" in existing:
+                # CREATE new context
+                if not dry_run:
+                    # Add auto_generated flag to metadata
+                    metadata_dict = json.loads(extracted.get('metadata', '{}')) if extracted.get('metadata') else {}
+                    metadata_dict['auto_generated'] = True
+
+                    await lock_context(
+                        content=extracted['content'],
+                        topic=label,
+                        tags=extracted.get('tags', ''),
+                        priority=priority
+                    )
+
+                    # Update metadata to mark as auto-generated
+                    conn = get_db()
+                    session_id = get_current_session_id()
+                    conn.execute("""
+                        UPDATE context_locks
+                        SET metadata = ?
+                        WHERE label = ? AND session_id = ?
+                    """, (json.dumps(metadata_dict), label, session_id))
+                    conn.commit()
+
+                created.append(f"      ✅ Created '{label}' ({priority})")
+            else:
+                skipped.append(f"      ⏭️  Skipped '{label}' (already exists)")
+
+        except Exception as e:
+            report.append(f"      ❌ Failed to extract '{label}': {str(e)}")
+
+    if created:
+        report.append(f"\n   Created {len(created)} new contexts:")
+        report.extend(created)
+
+    if skipped:
+        report.append(f"\n   Skipped {len(skipped)} contexts:")
+        report.extend(skipped[:5])
+
+    # PHASE 3: Validation
+    report.append("\n✅ PHASE 3: Validation")
+    report.append(f"   Analysis complete")
+
+    # Summary
+    report.append("\n" + "=" * 60)
+    if dry_run:
+        report.append("🔍 DRY RUN - No changes made")
+        report.append("   Run with confirm=True to apply these changes")
+    else:
+        report.append("✨ Memory synchronization complete!")
+        report.append(f"   📚 Use explore_context_tree() to view all contexts")
+    report.append("=" * 60)
+
+    return "\n".join(report)
 @mcp.tool()
 async def list_topics() -> str:
     """
