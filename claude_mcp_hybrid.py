@@ -301,6 +301,23 @@ def initialize_database(conn):
 
             conn.commit()
 
+    # Create context_archives table for safe deletion
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS context_archives (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            original_id INTEGER NOT NULL,
+            session_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            version TEXT NOT NULL,
+            content TEXT NOT NULL,
+            preview TEXT,
+            key_concepts TEXT,
+            metadata TEXT,
+            deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            delete_reason TEXT
+        )
+    ''')
+
     # Create file_tags table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS file_tags (
@@ -1498,6 +1515,319 @@ async def recall_context(topic: str, version: Optional[str] = "latest") -> str:
         return "\n".join(output)
     else:
         return f"❌ No locked context found for '{topic}' (version: {version})"
+
+@mcp.tool()
+async def update_context(
+    topic: str,
+    content: str,
+    version: str = "latest",
+    tags: Optional[str] = None,
+    priority: Optional[str] = None,
+    reason: Optional[str] = None
+) -> str:
+    """
+    Update an existing locked context with new content, creating a new version.
+
+    **When to use this tool:**
+    - Fix typos or errors in locked contexts
+    - Update API specs with new endpoints or changes
+    - Revise rules or decisions with new information
+    - Add missing details to existing contexts
+    - Correct outdated information
+
+    **How it works:**
+    - Creates a new version (v1.0 → v1.1) while preserving old versions
+    - Regenerates preview and key_concepts for RLM optimization
+    - Tracks update history in metadata (parent version, reason)
+    - Inherits tags/priority from previous version if not specified
+
+    **Versioning:**
+    - Increments minor version: v1.2 → v1.3
+    - Preserves all history (old versions stay in database)
+    - Can recall any version: recall_context(topic, version="1.0")
+
+    **Best practices:**
+    1. Include update reason for tracking changes
+    2. Update tags/priority only if they've changed
+    3. Use version="latest" to update most recent (default)
+    4. Review old version before updating (use recall_context)
+
+    **Example workflow:**
+    ```
+    # Check current version
+    recall_context("api_spec")
+
+    # Update with fixes
+    update_context(
+        topic="api_spec",
+        content="Fixed API spec with correct endpoints",
+        reason="Fixed endpoint URLs"
+    )
+    # Result: v1.0 → v1.1 (v1.0 preserved)
+    ```
+
+    **What you'll see:**
+    - Confirmation of new version created
+    - Old and new version numbers
+    - Update reason (if provided)
+    - Version history preserved
+
+    Returns: Confirmation with version change (e.g., "✅ Updated 'api_spec' v1.0 → v1.1")
+    """
+    update_session_activity()
+    conn = get_db()
+    session_id = get_current_session_id()
+
+    # 1. Find existing context
+    if version == "latest":
+        cursor = conn.execute("""
+            SELECT * FROM context_locks
+            WHERE label = ? AND session_id = ?
+            ORDER BY version DESC
+            LIMIT 1
+        """, (topic, session_id))
+    else:
+        cursor = conn.execute("""
+            SELECT * FROM context_locks
+            WHERE label = ? AND version = ? AND session_id = ?
+        """, (topic, version, session_id))
+
+    current = cursor.fetchone()
+
+    if not current:
+        return f"❌ Context '{topic}' not found. Use lock_context() to create a new context."
+
+    # 2. Parse current version and increment
+    current_version = current['version']
+    parts = current_version.split('.')
+    if len(parts) == 2:
+        major, minor = parts
+        new_version = f"{major}.{int(minor) + 1}"
+    else:
+        new_version = "1.1"
+
+    # 3. Inherit metadata from current version if not specified
+    current_metadata = json.loads(current['metadata']) if current['metadata'] else {}
+
+    if tags is None:
+        tags_list = current_metadata.get('tags', [])
+    else:
+        tags_list = [t.strip() for t in tags.split(',')]
+
+    if priority is None:
+        priority = current_metadata.get('priority', 'reference')
+    else:
+        # Validate priority
+        valid_priorities = ['always_check', 'important', 'reference']
+        if priority not in valid_priorities:
+            return f"❌ Invalid priority '{priority}'. Must be one of: {', '.join(valid_priorities)}"
+
+    # 4. Generate new hash, preview, and key_concepts
+    content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
+    preview = generate_preview(content, max_length=500)
+    key_concepts = extract_key_concepts(content, tags_list)
+
+    # 5. Prepare metadata with update tracking
+    metadata = {
+        "tags": tags_list,
+        "priority": priority,
+        "updated_from": current_version,
+        "updated_at": datetime.now().isoformat(),
+        "created_at": current_metadata.get('created_at', datetime.now().isoformat())
+    }
+
+    if reason:
+        metadata["update_reason"] = reason
+
+    # 6. Insert new version
+    try:
+        conn.execute("""
+            INSERT INTO context_locks
+            (session_id, label, version, content, content_hash, locked_at, metadata,
+             preview, key_concepts, last_accessed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (session_id, topic, new_version, content, content_hash, time.time(),
+              json.dumps(metadata), preview, json.dumps(key_concepts), time.time()))
+
+        conn.commit()
+
+        priority_indicator = {
+            'always_check': ' ⚠️ [ALWAYS CHECK]',
+            'important': ' 📌 [IMPORTANT]',
+            'reference': ''
+        }.get(priority, '')
+
+        result = f"✅ Updated '{topic}' v{current_version} → v{new_version}{priority_indicator}"
+
+        if reason:
+            result += f"\n   Reason: {reason}"
+
+        result += f"\n   Old version preserved (use recall_context('{topic}', version='{current_version}') to access)"
+
+        return result
+
+    except sqlite3.IntegrityError:
+        return f"❌ Version {new_version} of '{topic}' already exists"
+    except Exception as e:
+        return f"❌ Failed to update context: {str(e)}"
+
+@mcp.tool()
+async def unlock_context(
+    topic: str,
+    version: str = "all",
+    force: bool = False,
+    archive: bool = True
+) -> str:
+    """
+    Remove locked context(s) that are no longer relevant.
+
+    **When to use this tool:**
+    - Remove outdated deployment processes or configurations
+    - Delete deprecated API specs or documentation
+    - Clean up test/experimental locks
+    - Remove duplicate or incorrect contexts
+    - Maintain a clean, relevant context tree
+
+    **How it works:**
+    - Archives context before deletion (recoverable)
+    - Requires force=True for critical (always_check) contexts
+    - Can delete all versions, specific version, or latest only
+    - Shows what will be deleted before confirmation
+
+    **Version options:**
+    - `version="all"`: Delete all versions of topic (default)
+    - `version="1.0"`: Delete only specific version
+    - `version="latest"`: Delete only most recent version
+
+    **Safety features:**
+    - ⚠️ Critical contexts require `force=True` to delete
+    - Archives deleted contexts by default (set `archive=False` to skip)
+    - Shows count of what will be deleted
+    - Prevents accidental bulk deletion
+
+    **Best practices:**
+    1. Review context before deleting (use recall_context)
+    2. Archive is enabled by default for safety
+    3. Be careful with `force=True` on critical contexts
+    4. Delete specific versions to preserve history
+
+    **Example workflows:**
+    ```
+    # Remove all versions of outdated context
+    unlock_context("old_api_v1", version="all")
+
+    # Remove only latest version (keep history)
+    unlock_context("api_spec", version="latest")
+
+    # Remove specific version
+    unlock_context("deployment_process", version="2.0")
+
+    # Force delete critical context (use with caution!)
+    unlock_context("critical_rule", version="all", force=True)
+    ```
+
+    **What you'll see:**
+    - Count of versions deleted
+    - Archive location (if archived)
+    - Warning if critical context
+
+    **Recovery:**
+    - Archived contexts can be manually recovered from context_archives table
+    - Use SQL or future unarchive_context() tool
+
+    Returns: Confirmation with count of deleted contexts
+    """
+    update_session_activity()
+    conn = get_db()
+    session_id = get_current_session_id()
+
+    # 1. Find contexts to delete
+    if version == "all":
+        cursor = conn.execute("""
+            SELECT * FROM context_locks
+            WHERE label = ? AND session_id = ?
+        """, (topic, session_id))
+    elif version == "latest":
+        cursor = conn.execute("""
+            SELECT * FROM context_locks
+            WHERE label = ? AND session_id = ?
+            ORDER BY version DESC
+            LIMIT 1
+        """, (topic, session_id))
+    else:
+        cursor = conn.execute("""
+            SELECT * FROM context_locks
+            WHERE label = ? AND version = ? AND session_id = ?
+        """, (topic, version, session_id))
+
+    contexts = cursor.fetchall()
+
+    if not contexts:
+        return f"❌ Context '{topic}' (version: {version}) not found"
+
+    # 2. Check for critical contexts
+    has_critical = False
+    for ctx in contexts:
+        metadata = json.loads(ctx['metadata']) if ctx['metadata'] else {}
+        if metadata.get('priority') == 'always_check':
+            has_critical = True
+            break
+
+    if has_critical and not force:
+        return f"⚠️  Cannot delete critical (always_check) context '{topic}' without force=True\n" \
+               f"   This context contains important rules. Use force=True if you're sure."
+
+    # 3. Archive before deletion
+    if archive:
+        for ctx in contexts:
+            try:
+                conn.execute("""
+                    INSERT INTO context_archives
+                    (original_id, session_id, label, version, content, preview, key_concepts,
+                     metadata, deleted_at, delete_reason)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (ctx['id'], ctx['session_id'], ctx['label'], ctx['version'],
+                      ctx['content'], ctx['preview'], ctx['key_concepts'],
+                      ctx['metadata'], time.time(), f"Deleted {version} version(s)"))
+            except Exception as e:
+                return f"❌ Failed to archive context: {str(e)}"
+
+    # 4. Delete contexts
+    try:
+        if version == "all":
+            conn.execute("""
+                DELETE FROM context_locks
+                WHERE label = ? AND session_id = ?
+            """, (topic, session_id))
+        elif version == "latest":
+            # Delete the latest version (already fetched in contexts)
+            conn.execute("""
+                DELETE FROM context_locks
+                WHERE id = ?
+            """, (contexts[0]['id'],))
+        else:
+            conn.execute("""
+                DELETE FROM context_locks
+                WHERE label = ? AND version = ? AND session_id = ?
+            """, (topic, version, session_id))
+
+        conn.commit()
+
+        count = len(contexts)
+        version_str = f"{count} version(s)" if version == "all" else f"version {version}"
+
+        result = f"✅ Deleted {version_str} of '{topic}'"
+
+        if archive:
+            result += f"\n   💾 Archived for recovery (query context_archives table)"
+
+        if has_critical:
+            result += f"\n   ⚠️  Critical context deleted (force=True was used)"
+
+        return result
+
+    except Exception as e:
+        return f"❌ Failed to delete context: {str(e)}"
 
 @mcp.tool()
 async def list_topics() -> str:
