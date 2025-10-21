@@ -256,6 +256,51 @@ def initialize_database(conn):
         )
     ''')
     
+    # Migrate context_locks to v4.1 RLM schema if needed
+    cursor.execute("PRAGMA table_info(context_locks)")
+    columns = {row[1] for row in cursor.fetchall()}
+
+    if 'preview' not in columns:
+        cursor.execute('ALTER TABLE context_locks ADD COLUMN preview TEXT')
+    if 'key_concepts' not in columns:
+        cursor.execute('ALTER TABLE context_locks ADD COLUMN key_concepts TEXT')
+    if 'related_contexts' not in columns:
+        cursor.execute('ALTER TABLE context_locks ADD COLUMN related_contexts TEXT')
+    if 'last_accessed' not in columns:
+        cursor.execute('ALTER TABLE context_locks ADD COLUMN last_accessed TIMESTAMP')
+    if 'access_count' not in columns:
+        cursor.execute('ALTER TABLE context_locks ADD COLUMN access_count INTEGER DEFAULT 0')
+
+    # If we just added RLM columns, generate previews for existing contexts
+    if 'preview' not in columns:
+        cursor.execute("SELECT COUNT(*) FROM context_locks WHERE preview IS NULL")
+        needs_preview = cursor.fetchone()[0]
+
+        if needs_preview > 0:
+            # Import preview generation
+            from migrate_v4_1_rlm import generate_preview, extract_key_concepts
+
+            # Generate previews for existing contexts
+            cursor.execute("SELECT id, content, metadata FROM context_locks WHERE preview IS NULL")
+            rows = cursor.fetchall()
+
+            for row in rows:
+                row_id = row[0]
+                content = row[1]
+                metadata = json.loads(row[2]) if row[2] else {}
+                tags = metadata.get('tags', [])
+
+                preview = generate_preview(content, max_length=500)
+                key_concepts = extract_key_concepts(content, tags)
+
+                cursor.execute("""
+                    UPDATE context_locks
+                    SET preview = ?, key_concepts = ?, last_accessed = ?
+                    WHERE id = ?
+                """, (preview, json.dumps(key_concepts), time.time(), row_id))
+
+            conn.commit()
+
     # Create file_tags table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS file_tags (
