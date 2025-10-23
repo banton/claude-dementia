@@ -2518,6 +2518,286 @@ async def inspect_database(
 
 
 @mcp.tool()
+async def execute_sql(
+    sql: str,
+    params: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    dry_run: bool = True,
+    confirm: bool = False,
+    max_affected: Optional[int] = None
+) -> str:
+    """
+    Execute write operations (INSERT, UPDATE, DELETE) on SQLite databases with comprehensive safety.
+
+    This tool enables full SQL write capabilities while maintaining multiple layers of protection
+    against accidental data loss or corruption. All operations are wrapped in transactions and
+    can be previewed before execution.
+
+    **SAFETY FEATURES:**
+    - Dry-run by default: Shows preview without making changes (dry_run=True)
+    - Confirmation required: Must explicitly set confirm=True to execute
+    - Automatic transactions: All changes wrapped in BEGIN/COMMIT with auto-rollback on error
+    - Parameterized queries: Use ? placeholders to prevent SQL injection
+    - Row limits: Optional max_affected parameter limits scope of changes
+    - Dangerous operation detection: Warns about UPDATE/DELETE without WHERE clause
+    - Workspace validation: Only operates on databases in current workspace
+
+    **SUPPORTED OPERATIONS:**
+    - INSERT: Add new records
+    - UPDATE: Modify existing records
+    - DELETE: Remove records
+    - Any single-statement write operation
+
+    **COMMON USE CASES:**
+
+    1. Fix corrupted context metadata:
+       execute_sql(
+           "UPDATE context_locks SET metadata = ? WHERE metadata IS NULL",
+           params=['{"priority": "reference"}'],
+           dry_run=False,
+           confirm=True
+       )
+
+    2. Clean up old data:
+       execute_sql(
+           "DELETE FROM context_archives WHERE deleted_at < ?",
+           params=[timestamp_90_days_ago],
+           max_affected=100,
+           dry_run=False,
+           confirm=True
+       )
+
+    3. Bulk insert tags:
+       execute_sql(
+           "INSERT INTO file_tags (path, tag) VALUES (?, ?)",
+           params=["src/main.py", "reviewed"],
+           dry_run=False,
+           confirm=True
+       )
+
+    4. Custom database operations:
+       execute_sql(
+           "INSERT INTO users (name, email) VALUES (?, ?)",
+           params=["Alice", "alice@example.com"],
+           db_path="./data/app.db",
+           dry_run=False,
+           confirm=True
+       )
+
+    **WORKFLOW:**
+
+    Step 1 - Preview with dry-run (default):
+    ```python
+    result = execute_sql(
+        "UPDATE context_locks SET priority = ? WHERE label LIKE ?",
+        params=["important", "api_%"]
+    )
+    # Shows: "🔍 DRY RUN - Would affect 3 rows..."
+    ```
+
+    Step 2 - Execute after confirming:
+    ```python
+    result = execute_sql(
+        "UPDATE context_locks SET priority = ? WHERE label LIKE ?",
+        params=["important", "api_%"],
+        dry_run=False,
+        confirm=True
+    )
+    # Shows: "✅ Success! Updated 3 rows in 1.25ms"
+    ```
+
+    Args:
+        sql: SQL statement to execute (INSERT, UPDATE, DELETE)
+        params: Optional list of parameters for ? placeholders
+        db_path: Optional path to SQLite database (default: dementia memory database)
+        dry_run: If True, preview changes without executing (default: True)
+        confirm: Must be True to execute (safety check, default: False)
+        max_affected: Optional limit on number of rows that can be affected
+
+    Returns:
+        Detailed report of operation result including affected rows and execution time
+
+    Raises:
+        Error message if operation fails, parameters invalid, or safety checks fail
+    """
+    import time
+    import os
+    import re
+
+    try:
+        # Parse SQL operation type
+        sql_upper = sql.strip().upper()
+        operation = None
+        for op in ['INSERT', 'UPDATE', 'DELETE']:
+            if sql_upper.startswith(op):
+                operation = op
+                break
+
+        if not operation:
+            return f"❌ Error: Only INSERT, UPDATE, and DELETE operations are supported.\n\nReceived: {sql[:50]}...\n\nFor SELECT queries, use query_database() instead."
+
+        # Dangerous operation detection: UPDATE/DELETE without WHERE
+        if operation in ['UPDATE', 'DELETE']:
+            # Simple check: look for WHERE keyword
+            if 'WHERE' not in sql_upper:
+                return f"❌ WARNING: {operation} without WHERE clause affects ALL rows!\n\nThis is potentially dangerous. If you really want to do this, add a WHERE clause like:\n  WHERE 1=1  (to explicitly confirm bulk operation)\n\nOr use a specific condition to limit scope."
+
+        # Connect to database
+        if db_path:
+            # Validate path is in workspace
+            abs_db_path = os.path.abspath(db_path)
+            workspace = os.getcwd()
+
+            if not abs_db_path.startswith(workspace):
+                return f"❌ Error: Database must be in current workspace.\n\nProvided: {db_path}\nWorkspace: {workspace}"
+
+            if not os.path.exists(abs_db_path):
+                return f"❌ Error: Database file not found: {db_path}"
+
+            conn = sqlite3.connect(abs_db_path)
+        else:
+            # Use default dementia database
+            conn = get_db()
+
+        conn.row_factory = sqlite3.Row
+
+        # DRY RUN MODE
+        if dry_run:
+            output = ["🔍 DRY RUN - No changes will be made", "=" * 60, ""]
+            output.append(f"Operation: {operation}")
+            output.append(f"SQL: {sql}")
+            if params:
+                output.append(f"Params: {params}")
+            output.append("")
+
+            # Generate preview query based on operation
+            if operation == 'INSERT':
+                output.append("Would insert 1 new row with the provided values.")
+                output.append("")
+                output.append("To execute: Set dry_run=False and confirm=True")
+
+            elif operation == 'UPDATE':
+                # Convert UPDATE to SELECT to show affected rows
+                # This is a simple heuristic - extract table and WHERE clause
+                match = re.search(r'UPDATE\s+(\w+)\s+SET.*?(WHERE.*)', sql_upper, re.IGNORECASE | re.DOTALL)
+                if match:
+                    table = match.group(1)
+                    where_clause = match.group(2)
+
+                    # Get actual table name from original SQL (preserve case)
+                    table_match = re.search(r'UPDATE\s+(\w+)', sql, re.IGNORECASE)
+                    if table_match:
+                        table = table_match.group(1)
+
+                    preview_sql = f"SELECT * FROM {table} {where_clause}"
+
+                    try:
+                        if params:
+                            cursor = conn.execute(preview_sql, params)
+                        else:
+                            cursor = conn.execute(preview_sql)
+
+                        rows = cursor.fetchall()
+                        output.append(f"Would affect {len(rows)} rows:")
+
+                        if rows:
+                            output.append("")
+                            # Show first few rows as preview
+                            for i, row in enumerate(rows[:5]):
+                                output.append(f"  Row {i+1}: {dict(row)}")
+                            if len(rows) > 5:
+                                output.append(f"  ... and {len(rows) - 5} more rows")
+
+                    except Exception as e:
+                        output.append(f"Preview query failed: {str(e)}")
+                else:
+                    output.append("Could not generate preview (complex UPDATE syntax)")
+
+            elif operation == 'DELETE':
+                # Convert DELETE to SELECT to show affected rows
+                match = re.search(r'DELETE\s+FROM\s+(\w+)(.*)', sql, re.IGNORECASE | re.DOTALL)
+                if match:
+                    table = match.group(1)
+                    where_part = match.group(2).strip()
+
+                    preview_sql = f"SELECT * FROM {table} {where_part}"
+
+                    try:
+                        if params:
+                            cursor = conn.execute(preview_sql, params)
+                        else:
+                            cursor = conn.execute(preview_sql)
+
+                        rows = cursor.fetchall()
+                        output.append(f"Would delete {len(rows)} rows:")
+
+                        if rows:
+                            output.append("")
+                            for i, row in enumerate(rows[:5]):
+                                output.append(f"  Row {i+1}: {dict(row)}")
+                            if len(rows) > 5:
+                                output.append(f"  ... and {len(rows) - 5} more rows")
+                    except Exception as e:
+                        output.append(f"Preview query failed: {str(e)}")
+                else:
+                    output.append("Could not generate preview (complex DELETE syntax)")
+
+            output.append("")
+            output.append("=" * 60)
+            output.append("To execute: Set dry_run=False and confirm=True")
+
+            return "\n".join(output)
+
+        # EXECUTE MODE
+        if not confirm:
+            return f"❌ Error: Confirmation required to execute.\n\nThis operation will modify the database.\n\nTo proceed, set confirm=True:\n  execute_sql(..., dry_run=False, confirm=True)"
+
+        # Start transaction and execute
+        start_time = time.time()
+
+        try:
+            conn.execute("BEGIN TRANSACTION")
+
+            if params:
+                cursor = conn.execute(sql, params)
+            else:
+                cursor = conn.execute(sql)
+
+            affected_rows = cursor.rowcount
+            execution_time = (time.time() - start_time) * 1000  # Convert to ms
+
+            # Check max_affected limit
+            if max_affected is not None and affected_rows > max_affected:
+                conn.execute("ROLLBACK")
+                return f"❌ Error: Operation would affect {affected_rows} rows, exceeding limit of {max_affected}.\n\nTransaction rolled back. No changes made.\n\nTo proceed, increase max_affected or refine your WHERE clause."
+
+            # Commit transaction
+            conn.execute("COMMIT")
+
+            # Success report
+            output = ["✅ SUCCESS!", "=" * 60, ""]
+            output.append(f"Operation: {operation}")
+            output.append(f"Affected rows: {affected_rows}")
+            output.append(f"Execution time: {execution_time:.2f}ms")
+            output.append("")
+            output.append("=" * 60)
+
+            return "\n".join(output)
+
+        except Exception as e:
+            # Rollback on error
+            try:
+                conn.execute("ROLLBACK")
+            except:
+                pass
+
+            return f"❌ Error: Operation failed and was rolled back.\n\nError: {str(e)}\n\nNo changes were made to the database."
+
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
+
+
+@mcp.tool()
 async def list_topics() -> str:
     """
     List all locked context topics with versions.
