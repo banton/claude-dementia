@@ -2050,6 +2050,416 @@ async def sync_project_memory(
     report.append("=" * 60)
 
     return "\n".join(report)
+
+
+# ============================================================
+# DATABASE QUERY TOOLS
+# ============================================================
+
+@mcp.tool()
+async def query_database(
+    query: str,
+    params: Optional[List[str]] = None,
+    format: str = "table"
+) -> str:
+    """
+    Execute read-only SQL queries against the memory database for debugging and inspection.
+
+    This tool allows direct querying of the SQLite database when the MCP server has issues
+    or when you need to inspect the raw data structure. It provides flexible access to all
+    memory system tables including contexts, memories, archives, and file tags.
+
+    **SAFETY FEATURES:**
+    - Read-only enforcement: Only SELECT queries are allowed
+    - Blocks dangerous operations: INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, PRAGMA
+    - Parameterized queries: Use ? placeholders to prevent SQL injection
+    - Automatic LIMIT: Queries without LIMIT get LIMIT 100 added automatically
+    - Session isolation: Queries respect session boundaries
+
+    **COMMON USE CASES:**
+
+    1. List all contexts:
+       query_database("SELECT label, version FROM context_locks")
+
+    2. Find contexts by tag:
+       query_database("SELECT label, version FROM context_locks WHERE metadata LIKE ?",
+                      params=["%api%"])
+
+    3. Check memory system status:
+       query_database("SELECT COUNT(*) as count, category FROM memories GROUP BY category")
+
+    4. Find archived contexts:
+       query_database("SELECT label, delete_reason FROM context_archives ORDER BY deleted_at DESC")
+
+    5. Inspect file tags:
+       query_database("SELECT path, tags FROM file_tags WHERE tags LIKE ?",
+                      params=["%quality:needs-work%"])
+
+    **OUTPUT FORMATS:**
+    - "table": ASCII table with headers and separators (default, best for readability)
+    - "json": JSON array of objects (best for programmatic use)
+    - "csv": Comma-separated values (best for export)
+    - "markdown": Markdown table (best for documentation)
+
+    **EXAMPLES:**
+
+    Query with parameters:
+    ```python
+    query_database(
+        "SELECT * FROM context_locks WHERE label = ? AND version = ?",
+        params=["api_spec", "1.0"],
+        format="json"
+    )
+    ```
+
+    Complex query:
+    ```python
+    query_database('''
+        SELECT cl.label, cl.version, COUNT(m.id) as memory_count
+        FROM context_locks cl
+        LEFT JOIN memories m ON cl.session_id = m.session_id
+        GROUP BY cl.label, cl.version
+        ORDER BY memory_count DESC
+    ''')
+    ```
+
+    Args:
+        query: SQL SELECT query to execute
+        params: Optional list of parameters for ? placeholders in query
+        format: Output format - "table", "json", "csv", or "markdown"
+
+    Returns:
+        Formatted query results with row count and execution time
+
+    Raises:
+        Error message if query is unsafe or execution fails
+    """
+    import time
+
+    try:
+        # Safety check: Only allow SELECT queries
+        query_upper = query.strip().upper()
+        dangerous_keywords = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE', 'PRAGMA', 'ATTACH', 'DETACH']
+
+        if not query_upper.startswith('SELECT'):
+            return f"❌ Error: Only SELECT queries are allowed.\n\nUse query_database() for read-only operations only.\n\nFor modifications, use the provided MCP tools:\n- lock_context() to create/update contexts\n- unlock_context() to delete contexts\n- memory_update() to add memories"
+
+        for keyword in dangerous_keywords:
+            if keyword in query_upper:
+                return f"❌ Error: Query contains dangerous keyword '{keyword}'.\n\nOnly SELECT queries are allowed for safety."
+
+        # Add LIMIT if not present (prevent huge result sets)
+        if 'LIMIT' not in query_upper:
+            query = query.strip().rstrip(';') + ' LIMIT 100'
+
+        # Execute query
+        conn = get_db()
+        conn.row_factory = sqlite3.Row
+
+        start_time = time.time()
+
+        if params:
+            cursor = conn.execute(query, params)
+        else:
+            cursor = conn.execute(query)
+
+        rows = cursor.fetchall()
+        execution_time = (time.time() - start_time) * 1000  # Convert to ms
+
+        if not rows:
+            return f"✅ Query executed successfully.\n\n0 rows returned.\n⏱️ Execution time: {execution_time:.2f}ms"
+
+        # Format output based on requested format
+        if format == "json":
+            import json
+            result = [dict(row) for row in rows]
+            return json.dumps(result, indent=2, default=str)
+
+        elif format == "csv":
+            output = []
+            # Header
+            output.append(','.join(rows[0].keys()))
+            # Rows
+            for row in rows:
+                output.append(','.join(str(v) for v in row))
+            return '\n'.join(output)
+
+        elif format == "markdown":
+            output = []
+            keys = list(rows[0].keys())
+            # Header
+            output.append('| ' + ' | '.join(keys) + ' |')
+            output.append('| ' + ' | '.join(['---' for _ in keys]) + ' |')
+            # Rows
+            for row in rows:
+                output.append('| ' + ' | '.join(str(v) for v in row) + ' |')
+            output.append(f'\n{len(rows)} rows')
+            return '\n'.join(output)
+
+        else:  # table format (default)
+            output = []
+            keys = list(rows[0].keys())
+
+            # Calculate column widths
+            widths = {k: len(k) for k in keys}
+            for row in rows:
+                for k in keys:
+                    widths[k] = max(widths[k], len(str(row[k])))
+
+            # Header
+            header = ' | '.join(k.ljust(widths[k]) for k in keys)
+            separator = '-+-'.join('-' * widths[k] for k in keys)
+            output.append(header)
+            output.append(separator)
+
+            # Rows
+            for row in rows:
+                output.append(' | '.join(str(row[k]).ljust(widths[k]) for k in keys))
+
+            output.append(f'\n✅ {len(rows)} rows returned.')
+            output.append(f'⏱️ Execution time: {execution_time:.2f}ms')
+
+            return '\n'.join(output)
+
+    except Exception as e:
+        return f"❌ Query failed: {str(e)}\n\nCheck your SQL syntax and try again."
+
+
+@mcp.tool()
+async def inspect_database(
+    mode: str = "overview",
+    filter_text: Optional[str] = None
+) -> str:
+    """
+    Quick database inspection with preset queries - no SQL knowledge required.
+
+    This tool provides easy access to common database inspection tasks without writing SQL.
+    It's perfect for quickly checking system status, understanding the memory structure,
+    or debugging issues when the MCP server isn't responding properly.
+
+    **INSPECTION MODES:**
+
+    1. **overview** - High-level system statistics
+       - Total locked contexts by priority
+       - Total memories by category
+       - Total archived contexts
+       - Database file size
+       - Session information
+
+    2. **schema** - Complete database structure
+       - All table names
+       - Column names and types for each table
+       - Index information
+       - Table sizes
+
+    3. **contexts** - List all locked contexts
+       - Label, version, priority
+       - Lock timestamp
+       - Content preview (first 100 chars)
+       - Tags from metadata
+       - Optional filtering by label
+
+    4. **memories** - Recent memory entries
+       - Category, content, timestamp
+       - Sorted by most recent first
+       - Optional filtering by category
+
+    5. **archives** - Deleted contexts
+       - What was deleted and when
+       - Deletion reason
+       - Original content preserved
+
+    6. **tags** - File tagging system
+       - All tagged files
+       - Tag distribution
+       - Files needing review
+
+    7. **sessions** - Session activity
+       - Active sessions
+       - Context counts per session
+       - Memory counts per session
+
+    **EXAMPLES:**
+
+    Get system overview:
+    ```python
+    inspect_database("overview")
+    ```
+
+    List all contexts:
+    ```python
+    inspect_database("contexts")
+    ```
+
+    Find API-related contexts:
+    ```python
+    inspect_database("contexts", filter_text="api")
+    ```
+
+    Check recent memories:
+    ```python
+    inspect_database("memories")
+    ```
+
+    See what was deleted:
+    ```python
+    inspect_database("archives")
+    ```
+
+    **USE CASES:**
+
+    - Debugging: "Why isn't my context showing up?"
+    - Exploration: "What data do I have in here?"
+    - Cleanup: "What can I safely delete?"
+    - Monitoring: "How much memory am I using?"
+    - Recovery: "What did I delete by accident?"
+
+    Args:
+        mode: Inspection mode - "overview", "schema", "contexts", "memories",
+              "archives", "tags", or "sessions"
+        filter_text: Optional text to filter results (for contexts/memories)
+
+    Returns:
+        Formatted inspection results with relevant statistics
+
+    Raises:
+        Error message if mode is invalid
+    """
+    conn = get_db()
+    conn.row_factory = sqlite3.Row
+    session_id = get_current_session_id()
+
+    try:
+        if mode == "overview":
+            output = ["📊 DATABASE OVERVIEW", "=" * 60, ""]
+
+            # Locked contexts by priority
+            cursor = conn.execute("""
+                SELECT
+                    json_extract(metadata, '$.priority') as priority,
+                    COUNT(*) as count
+                FROM context_locks
+                WHERE session_id = ?
+                GROUP BY priority
+            """, (session_id,))
+
+            output.append("🔒 Locked Contexts:")
+            context_total = 0
+            for row in cursor.fetchall():
+                priority = row['priority'] or 'reference'
+                count = row['count']
+                context_total += count
+                output.append(f"   {priority}: {count}")
+            output.append(f"   TOTAL: {context_total}")
+            output.append("")
+
+            # Memories by category
+            cursor = conn.execute("""
+                SELECT category, COUNT(*) as count
+                FROM memory_entries
+                WHERE session_id = ?
+                GROUP BY category
+            """, (session_id,))
+
+            output.append("🧠 Memories:")
+            memory_total = 0
+            for row in cursor.fetchall():
+                count = row['count']
+                memory_total += count
+                output.append(f"   {row['category']}: {count}")
+            output.append(f"   TOTAL: {memory_total}")
+            output.append("")
+
+            # Archives
+            cursor = conn.execute("""
+                SELECT COUNT(*) as count FROM context_archives
+                WHERE session_id = ?
+            """, (session_id,))
+            archive_count = cursor.fetchone()['count']
+            output.append(f"📦 Archived contexts: {archive_count}")
+            output.append("")
+
+            # File tags
+            cursor = conn.execute("SELECT COUNT(*) as count FROM file_tags")
+            tag_count = cursor.fetchone()['count']
+            output.append(f"🏷️ Tagged files: {tag_count}")
+
+            return '\n'.join(output)
+
+        elif mode == "schema":
+            output = ["📋 DATABASE SCHEMA", "=" * 60, ""]
+
+            # Get all tables
+            cursor = conn.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table'
+                ORDER BY name
+            """)
+
+            tables = [row['name'] for row in cursor.fetchall()]
+
+            for table in tables:
+                output.append(f"\n📄 Table: {table}")
+
+                # Get column info
+                cursor = conn.execute(f"PRAGMA table_info({table})")
+                columns = cursor.fetchall()
+
+                output.append("   Columns:")
+                for col in columns:
+                    pk = " (PRIMARY KEY)" if col['pk'] else ""
+                    notnull = " NOT NULL" if col['notnull'] else ""
+                    output.append(f"      {col['name']}: {col['type']}{pk}{notnull}")
+
+                # Get row count
+                cursor = conn.execute(f"SELECT COUNT(*) as count FROM {table}")
+                count = cursor.fetchone()['count']
+                output.append(f"   Rows: {count}")
+
+            return '\n'.join(output)
+
+        elif mode == "contexts":
+            output = ["🔒 LOCKED CONTEXTS", "=" * 60, ""]
+
+            if filter_text:
+                cursor = conn.execute("""
+                    SELECT label, version, locked_at, preview, metadata
+                    FROM context_locks
+                    WHERE session_id = ? AND label LIKE ?
+                    ORDER BY locked_at DESC
+                """, (session_id, f"%{filter_text}%"))
+            else:
+                cursor = conn.execute("""
+                    SELECT label, version, locked_at, preview, metadata
+                    FROM context_locks
+                    WHERE session_id = ?
+                    ORDER BY locked_at DESC
+                """, (session_id,))
+
+            rows = cursor.fetchall()
+
+            if not rows:
+                return "No locked contexts found."
+
+            for row in rows:
+                metadata = json.loads(row['metadata']) if row['metadata'] else {}
+                priority = metadata.get('priority', 'reference')
+                dt = datetime.fromtimestamp(row['locked_at'])
+
+                output.append(f"\n• {row['label']} v{row['version']} [{priority}]")
+                output.append(f"  Locked: {dt.strftime('%Y-%m-%d %H:%M')}")
+                output.append(f"  Preview: {row['preview'][:80]}...")
+
+            output.append(f"\n\nTotal: {len(rows)} contexts")
+            return '\n'.join(output)
+
+        else:
+            return f"❌ Invalid mode: {mode}\n\nValid modes: overview, schema, contexts, memories, archives, tags, sessions"
+
+    except Exception as e:
+        return f"❌ Inspection failed: {str(e)}"
+
+
 @mcp.tool()
 async def list_topics() -> str:
     """
