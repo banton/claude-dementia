@@ -2060,40 +2060,38 @@ async def sync_project_memory(
 async def query_database(
     query: str,
     params: Optional[List[str]] = None,
-    format: str = "table"
+    format: str = "table",
+    db_path: Optional[str] = None
 ) -> str:
     """
-    Execute read-only SQL queries against the memory database for debugging and inspection.
+    Execute read-only SQL queries against ANY SQLite database for debugging and inspection.
 
-    This tool allows direct querying of the SQLite database when the MCP server has issues
-    or when you need to inspect the raw data structure. It provides flexible access to all
-    memory system tables including contexts, memories, archives, and file tags.
+    This tool allows direct querying of any SQLite database in your workspace. Works with
+    the dementia memory database (default) or any .db/.sqlite file you specify.
 
     **SAFETY FEATURES:**
     - Read-only enforcement: Only SELECT queries are allowed
     - Blocks dangerous operations: INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, PRAGMA
     - Parameterized queries: Use ? placeholders to prevent SQL injection
     - Automatic LIMIT: Queries without LIMIT get LIMIT 100 added automatically
-    - Session isolation: Queries respect session boundaries
+    - Path validation: Only accesses databases in current working directory
 
     **COMMON USE CASES:**
 
-    1. List all contexts:
+    1. Query dementia memory database (default):
        query_database("SELECT label, version FROM context_locks")
 
-    2. Find contexts by tag:
-       query_database("SELECT label, version FROM context_locks WHERE metadata LIKE ?",
-                      params=["%api%"])
+    2. Query any SQLite database in workspace:
+       query_database("SELECT * FROM users", db_path="./data/app.db")
 
-    3. Check memory system status:
-       query_database("SELECT COUNT(*) as count, category FROM memories GROUP BY category")
+    3. Query with parameters:
+       query_database("SELECT * FROM logs WHERE level = ?", params=["ERROR"], db_path="./logs.db")
 
-    4. Find archived contexts:
-       query_database("SELECT label, delete_reason FROM context_archives ORDER BY deleted_at DESC")
+    4. List all tables in a database:
+       query_database("SELECT name FROM sqlite_master WHERE type='table'", db_path="./mydb.sqlite")
 
-    5. Inspect file tags:
-       query_database("SELECT path, tags FROM file_tags WHERE tags LIKE ?",
-                      params=["%quality:needs-work%"])
+    5. Check row counts:
+       query_database("SELECT COUNT(*) as count FROM my_table", db_path="./data.db")
 
     **OUTPUT FORMATS:**
     - "table": ASCII table with headers and separators (default, best for readability)
@@ -2127,6 +2125,7 @@ async def query_database(
         query: SQL SELECT query to execute
         params: Optional list of parameters for ? placeholders in query
         format: Output format - "table", "json", "csv", or "markdown"
+        db_path: Optional path to SQLite database file (default: dementia memory database)
 
     Returns:
         Formatted query results with row count and execution time
@@ -2135,6 +2134,8 @@ async def query_database(
         Error message if query is unsafe or execution fails
     """
     import time
+    import os
+    from pathlib import Path
 
     try:
         # Safety check: Only allow SELECT queries
@@ -2152,9 +2153,24 @@ async def query_database(
         if 'LIMIT' not in query_upper:
             query = query.strip().rstrip(';') + ' LIMIT 100'
 
-        # Execute query
-        conn = get_db()
-        conn.row_factory = sqlite3.Row
+        # Connect to database
+        if db_path:
+            # Validate path is in workspace
+            abs_db_path = os.path.abspath(db_path)
+            workspace = os.getcwd()
+
+            if not abs_db_path.startswith(workspace):
+                return f"❌ Error: Database must be in current workspace.\n\nProvided: {db_path}\nWorkspace: {workspace}"
+
+            if not os.path.exists(abs_db_path):
+                return f"❌ Error: Database file not found: {db_path}"
+
+            conn = sqlite3.connect(abs_db_path)
+            conn.row_factory = sqlite3.Row
+        else:
+            # Use default dementia database
+            conn = get_db()
+            conn.row_factory = sqlite3.Row
 
         start_time = time.time()
 
@@ -2228,36 +2244,36 @@ async def query_database(
 @mcp.tool()
 async def inspect_database(
     mode: str = "overview",
-    filter_text: Optional[str] = None
+    filter_text: Optional[str] = None,
+    db_path: Optional[str] = None
 ) -> str:
     """
-    Quick database inspection with preset queries - no SQL knowledge required.
+    Quick inspection of ANY SQLite database with preset queries - no SQL knowledge required.
 
-    This tool provides easy access to common database inspection tasks without writing SQL.
-    It's perfect for quickly checking system status, understanding the memory structure,
-    or debugging issues when the MCP server isn't responding properly.
+    This tool provides easy access to common database inspection tasks for any SQLite database
+    in your workspace. Works with the dementia memory database (default) or any .db/.sqlite file.
 
     **INSPECTION MODES:**
 
-    1. **overview** - High-level system statistics
+    1. **overview** - High-level statistics (dementia DB only)
        - Total locked contexts by priority
        - Total memories by category
        - Total archived contexts
-       - Database file size
        - Session information
 
-    2. **schema** - Complete database structure
+    2. **schema** - Complete database structure (works with ANY database)
        - All table names
        - Column names and types for each table
-       - Index information
-       - Table sizes
+       - Row counts per table
 
-    3. **contexts** - List all locked contexts
+    3. **contexts** - List locked contexts (dementia DB only)
        - Label, version, priority
        - Lock timestamp
-       - Content preview (first 100 chars)
-       - Tags from metadata
+       - Content preview
        - Optional filtering by label
+
+    4. **tables** - Just list table names (works with ANY database)
+       - Quick overview of database structure
 
     4. **memories** - Recent memory entries
        - Category, content, timestamp
@@ -2281,43 +2297,34 @@ async def inspect_database(
 
     **EXAMPLES:**
 
-    Get system overview:
+    Inspect dementia memory database (default):
     ```python
     inspect_database("overview")
-    ```
-
-    List all contexts:
-    ```python
     inspect_database("contexts")
     ```
 
-    Find API-related contexts:
+    Inspect any SQLite database:
+    ```python
+    inspect_database("schema", db_path="./data/app.db")
+    inspect_database("tables", db_path="./logs.sqlite")
+    ```
+
+    Find specific data:
     ```python
     inspect_database("contexts", filter_text="api")
-    ```
-
-    Check recent memories:
-    ```python
-    inspect_database("memories")
-    ```
-
-    See what was deleted:
-    ```python
-    inspect_database("archives")
     ```
 
     **USE CASES:**
 
     - Debugging: "Why isn't my context showing up?"
-    - Exploration: "What data do I have in here?"
-    - Cleanup: "What can I safely delete?"
-    - Monitoring: "How much memory am I using?"
-    - Recovery: "What did I delete by accident?"
+    - Exploration: "What tables are in this database?"
+    - Inspection: "What's the structure of this .db file?"
+    - Monitoring: "How much data is in each table?"
 
     Args:
-        mode: Inspection mode - "overview", "schema", "contexts", "memories",
-              "archives", "tags", or "sessions"
-        filter_text: Optional text to filter results (for contexts/memories)
+        mode: Inspection mode - "overview", "schema", "contexts", "tables"
+        filter_text: Optional text to filter results (for contexts mode)
+        db_path: Optional path to SQLite database file (default: dementia memory database)
 
     Returns:
         Formatted inspection results with relevant statistics
@@ -2325,12 +2332,58 @@ async def inspect_database(
     Raises:
         Error message if mode is invalid
     """
-    conn = get_db()
-    conn.row_factory = sqlite3.Row
-    session_id = get_current_session_id()
+    import os
+
+    # Connect to database
+    if db_path:
+        # Validate path is in workspace
+        abs_db_path = os.path.abspath(db_path)
+        workspace = os.getcwd()
+
+        if not abs_db_path.startswith(workspace):
+            return f"❌ Error: Database must be in current workspace.\n\nProvided: {db_path}\nWorkspace: {workspace}"
+
+        if not os.path.exists(abs_db_path):
+            return f"❌ Error: Database file not found: {db_path}"
+
+        conn = sqlite3.connect(abs_db_path)
+        conn.row_factory = sqlite3.Row
+        session_id = None  # Custom DB won't have session_id
+    else:
+        # Use default dementia database
+        conn = get_db()
+        conn.row_factory = sqlite3.Row
+        session_id = get_current_session_id()
 
     try:
-        if mode == "overview":
+        if mode == "tables":
+            # Quick table list (works with any database)
+            output = ["📋 DATABASE TABLES", "=" * 60, ""]
+
+            cursor = conn.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table'
+                ORDER BY name
+            """)
+
+            tables = [row['name'] for row in cursor.fetchall()]
+
+            if tables:
+                for table in tables:
+                    # Get row count
+                    cursor = conn.execute(f"SELECT COUNT(*) as count FROM {table}")
+                    count = cursor.fetchone()['count']
+                    output.append(f"   {table}: {count} rows")
+            else:
+                output.append("   No tables found")
+
+            return '\n'.join(output)
+
+        elif mode == "overview":
+            # Dementia DB specific
+            if not session_id:
+                return "❌ 'overview' mode only works with dementia database (default).\n\nUse 'schema' or 'tables' mode for other databases."
+
             output = ["📊 DATABASE OVERVIEW", "=" * 60, ""]
 
             # Locked contexts by priority
@@ -2419,6 +2472,10 @@ async def inspect_database(
             return '\n'.join(output)
 
         elif mode == "contexts":
+            # Dementia DB specific
+            if not session_id:
+                return "❌ 'contexts' mode only works with dementia database (default).\n\nUse 'schema' or 'tables' mode for other databases."
+
             output = ["🔒 LOCKED CONTEXTS", "=" * 60, ""]
 
             if filter_text:
@@ -2454,7 +2511,7 @@ async def inspect_database(
             return '\n'.join(output)
 
         else:
-            return f"❌ Invalid mode: {mode}\n\nValid modes: overview, schema, contexts, memories, archives, tags, sessions"
+            return f"❌ Invalid mode: {mode}\n\nValid modes: tables, schema, overview, contexts\n\nNote: 'overview' and 'contexts' only work with dementia database (default)"
 
     except Exception as e:
         return f"❌ Inspection failed: {str(e)}"
