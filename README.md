@@ -1,9 +1,9 @@
-# Claude Dementia 🧠 v4.0.0-rc1
+# Claude Dementia 🧠 v4.1.0
 
-> An MCP server that gives Claude persistent memory between sessions, with intelligent project understanding and context management.
+> An MCP server that gives Claude persistent memory between sessions, with powerful search, batch operations, and analytics.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-4.0.0--rc1-blue)](https://github.com/banton/claude-dementia/releases)
+[![Version](https://img.shields.io/badge/version-4.1.0-blue)](https://github.com/banton/claude-dementia/releases)
 
 ## What is Claude Dementia?
 
@@ -19,39 +19,52 @@ Claude Dementia solves the "forgetting Claude" problem - where Claude loses cont
 ### 🔒 Context Locking
 Save important information with perfect recall:
 ```python
-# Lock API configuration
+# Lock single context
 lock_context("API_KEY = os.environ['SECRET']", "api_config")
+
+# Lock multiple contexts (efficient!)
+batch_lock_contexts([
+    {"topic": "api_v2", "content": "...", "tags": "api,auth"},
+    {"topic": "database_schema", "content": "...", "priority": "always_check"}
+])
 
 # Later, in a new session
 recall_context("api_config")  # Returns exact content
+
+# Or recall multiple at once
+batch_recall_contexts(["api_config", "database_schema"])
 ```
 
-### 🏷️ Intelligent File Tagging
-Automatically analyzes and tags your codebase:
-- **Status**: `deprecated`, `poc`, `beta`, `stable`
-- **Quality**: `needs-work`, `has-mock-data`, `has-placeholder-data`
-- **Domain**: `auth`, `payment`, `user`, `api`
-- **Layer**: `model`, `controller`, `service`, `test`
-
-### 🎭 Mock Data Detection
-Finds development artifacts Claude often creates:
+### 🔍 Full-Text Search
+Find contexts by content, not just name:
 ```python
-project_update()  # Scans project
-search_by_tags("quality:has-mock-data")  # Find all mock data
-search_by_tags("quality:has-dev-urls")   # Find localhost URLs
+# Simple search
+search_contexts("authentication")
+
+# Search with filters
+search_contexts("JWT", priority="important", tags="api,security")
+
+# Results include relevance scores
 ```
 
-### 📊 Project Insights
-Get actionable recommendations:
+### 📊 Memory Analytics
+Understand your memory usage:
 ```python
-file_insights("src/api/auth.py")
+memory_analytics()
 # Returns:
-# • Status: stable
-# • Quality: needs-work, has-placeholder-data
-# Recommendations:
-# 🔧 Address improvement markers
-# 📝 Replace placeholder values (foo/bar/test@example)
+# - Overview (total contexts, size, age)
+# - Most/least accessed contexts
+# - Stale contexts (not accessed in 30+ days)
+# - Size distribution by priority
+# - Recommendations for cleanup
 ```
+
+### ⚡ Cloud-Ready Performance
+Optimized for cloud deployment:
+- **Batch operations** reduce API round-trips
+- **Structured JSON** output (token-efficient)
+- **Access tracking** for usage insights
+- **Staleness detection** for automatic maintenance
 
 ## Requirements
 
@@ -92,22 +105,27 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ### 3. Use in Claude
 
 ```python
-# Start session
+# Start session (automatic context loading)
 wake_up()
-# Output: Session loaded, showing TODOs, recent changes
-
-# Track work  
-memory_update("progress", "Implemented OAuth login")
+# Output: JSON with session info, git status, contexts, staleness warnings
 
 # Lock important context
-lock_context(config_code, "oauth_setup")
+lock_context(config_code, "oauth_setup", priority="important")
 
-# Analyze project
-project_update()  # Scans and tags all files
-what_needs_attention()  # Shows issues to fix
+# Or lock multiple contexts at once (efficient!)
+batch_lock_contexts([
+    {"topic": "oauth_setup", "content": config_code},
+    {"topic": "api_routes", "content": routes_code}
+])
+
+# Search for related contexts
+search_contexts("authentication", tags="api")
+
+# Check memory health
+memory_analytics()
 
 # End session
-sleep()  # Saves summary
+sleep()  # Saves summary for next session
 ```
 
 ## How It Works
@@ -137,58 +155,81 @@ Track different types of information:
 - `question` - Open questions
 - `insight` - Important discoveries
 
-## Available Tools
+## Available Tools (16)
 
-### Session Management
-- `wake_up()` - Start session with context
-- `sleep()` - End session with summary
+### Session Management (2)
+- `wake_up()` - Initialize session, load context, check staleness
+- `sleep()` - End session with handover summary
 
-### Memory Operations
-- `memory_update(category, content, metadata)` - Add memory
-- `memory_status()` - View statistics
-- `search_semantic(query)` - Search all memory
+### Context Management (5)
+- `lock_context(content, topic, tags, priority)` - Save immutable context
+- `recall_context(topic, version)` - Retrieve context (tracks access)
+- `unlock_context(topic, version)` - Remove context lock
+- `check_contexts(text)` - Check relevance to current work
+- `explore_context_tree(flat=False)` - Browse contexts (tree or flat list)
 
-### Context Locking
-- `lock_context(content, topic, tags)` - Save snapshot
-- `recall_context(topic, version)` - Retrieve content
-- `list_topics()` - Show all locked contexts
+### Batch Operations (2) - NEW in v4.1
+- `batch_lock_contexts(contexts)` - Lock multiple contexts at once
+- `batch_recall_contexts(topics)` - Recall multiple contexts at once
 
-### Project Intelligence  
-- `project_update()` - Scan and tag files
-- `project_status()` - View project insights
-- `tag_path(path, tags, comment)` - Manual tagging
-- `search_by_tags(query)` - Query files by tags
-- `file_insights(path)` - Get file recommendations
+### Search & Analytics (2) - NEW in v4.1
+- `search_contexts(query, priority, tags, limit)` - Full-text search with filters
+- `memory_analytics()` - Usage insights and recommendations
 
-### Smart Queries
-- `what_changed()` - Recent updates
-- `what_needs_attention()` - Issues requiring action
-- `search_semantic(query)` - Natural language search
+### Memory Operations (2)
+- `memory_status()` - Memory system statistics
+- `sync_project_memory()` - Sync file metadata to memory
+
+### Database Tools (3)
+- `query_database(sql)` - Safe read-only SQL queries
+- `inspect_database()` - View schema and tables
+- `execute_sql(sql)` - Execute write operations (admin only)
 
 ## Example Workflows
 
 ### Starting a New Feature
 ```python
+# Initialize session
 wake_up()
-memory_update("todo", "Implement user authentication", '{"priority": "HIGH"}')
-project_update()  # Understand codebase
-search_by_tags("domain:auth")  # Find auth-related files
+
+# Lock multiple related contexts efficiently
+batch_lock_contexts([
+    {"topic": "auth_requirements", "content": "...", "priority": "important"},
+    {"topic": "api_endpoints", "content": "...", "tags": "api,auth"}
+])
+
+# Search for existing auth code
+search_contexts("authentication", tags="api")
 ```
 
 ### Debugging Session
 ```python
+# Start with context
 wake_up()
-what_needs_attention()  # See errors and issues
-search_semantic("database connection")  # Find related context
-memory_update("error", "Connection timeout", '{"file": "db.py"}')
+
+# Search for related contexts
+search_contexts("database connection", priority="important")
+
+# Recall multiple contexts at once
+batch_recall_contexts(["database_config", "error_handling"])
+
+# Lock new findings
+lock_context("Fixed connection pool issue...", "db_fix", priority="important")
 ```
 
-### Code Review
+### Memory Maintenance
 ```python
-project_update()
-search_by_tags("quality:needs-work")  # Files with TODOs
-search_by_tags("quality:has-mock-data")  # Find mock data
-file_insights("src/main.py")  # Get specific recommendations
+# Check memory health
+analytics = memory_analytics()
+
+# Find stale contexts
+# analytics shows contexts not accessed in 30+ days
+
+# Search for specific contexts
+search_contexts("experimental", tags="poc,deprecated")
+
+# Clean up unnecessary contexts
+unlock_context("old_experiment")
 ```
 
 ## Project Structure
@@ -248,6 +289,22 @@ MIT License - see [LICENSE](LICENSE) file
 ## Acknowledgments
 
 Built using Anthropic's [MCP (Model Context Protocol)](https://github.com/anthropics/mcp) framework.
+
+---
+
+## Recent Updates
+
+### v4.1.0 - Phase 2A Tool Enhancements (January 2025)
+
+Major update with new capabilities:
+- ✅ **4 new tools**: batch operations, full-text search, analytics
+- ✅ **Tool consolidation**: 24 → 16 tools (removed 12 redundant)
+- ✅ **Enhanced**: `explore_context_tree()` with flat mode
+- ✅ **Access tracking**: Last accessed, access count
+- ✅ **Staleness detection**: Automatic context maintenance
+- ✅ **Cloud-ready**: Optimized for PostgreSQL migration
+
+**📖 See [PHASE_2A_TOOLS.md](PHASE_2A_TOOLS.md) for complete documentation and migration guide.**
 
 ---
 
