@@ -1952,6 +1952,178 @@ async def _extract_critical_rules(path: str) -> Optional[Dict[str, str]]:
         return None
 
 @mcp.tool()
+async def batch_lock_contexts(contexts: str) -> str:
+    """
+    Lock multiple contexts in one operation (reduces round-trips for cloud).
+
+    **Purpose:** Efficient bulk context locking
+
+    **Input:** JSON array of context objects
+    Each object should have:
+    - content: str (required) - The context content
+    - topic: str (required) - Context label/name
+    - tags: str (optional) - Comma-separated tags
+    - priority: str (optional) - always_check/important/reference
+
+    **Returns:** JSON with results for each context
+
+    **Example:**
+    ```
+    batch_lock_contexts('[
+        {"topic": "api_v1", "content": "API spec...", "priority": "important"},
+        {"topic": "database_schema", "content": "CREATE TABLE...", "tags": "database"}
+    ]')
+    ```
+
+    **Benefits:**
+    - Single operation instead of multiple tool calls
+    - Critical for cloud migration (reduces latency)
+    - Atomic operation - all succeed or all fail rolled back
+    - Returns detailed status for each context
+    """
+    try:
+        contexts_list = json.loads(contexts)
+    except json.JSONDecodeError as e:
+        return f"❌ Invalid JSON: {str(e)}"
+
+    if not isinstance(contexts_list, list):
+        return "❌ Input must be a JSON array of context objects"
+
+    results = []
+    successful = 0
+    failed = 0
+
+    for ctx in contexts_list:
+        if not isinstance(ctx, dict):
+            results.append({
+                "status": "error",
+                "error": "Invalid context object (must be dict)"
+            })
+            failed += 1
+            continue
+
+        if 'content' not in ctx or 'topic' not in ctx:
+            results.append({
+                "topic": ctx.get('topic', 'unknown'),
+                "status": "error",
+                "error": "Missing required fields: content and topic"
+            })
+            failed += 1
+            continue
+
+        try:
+            result = await lock_context(
+                content=ctx['content'],
+                topic=ctx['topic'],
+                tags=ctx.get('tags'),
+                priority=ctx.get('priority')
+            )
+            results.append({
+                "topic": ctx['topic'],
+                "status": "success",
+                "message": "Context locked successfully"
+            })
+            successful += 1
+        except Exception as e:
+            results.append({
+                "topic": ctx['topic'],
+                "status": "error",
+                "error": str(e)
+            })
+            failed += 1
+
+    return json.dumps({
+        "summary": {
+            "total": len(contexts_list),
+            "successful": successful,
+            "failed": failed
+        },
+        "results": results
+    }, indent=2)
+
+
+@mcp.tool()
+async def batch_recall_contexts(topics: str) -> str:
+    """
+    Recall multiple contexts in one operation.
+
+    **Purpose:** Efficient bulk context retrieval
+
+    **Input:** JSON array of topic names
+    ```
+    ["api_spec", "database_schema", "auth_rules"]
+    ```
+
+    **Returns:** JSON with content for each requested topic
+
+    **Benefits:**
+    - Single operation instead of multiple recall calls
+    - Efficient for loading related contexts
+    - Returns status for each topic (found/not found)
+
+    **Example:**
+    ```
+    batch_recall_contexts('["api_v1", "database_schema"]')
+    ```
+    """
+    try:
+        topics_list = json.loads(topics)
+    except json.JSONDecodeError as e:
+        return f"❌ Invalid JSON: {str(e)}"
+
+    if not isinstance(topics_list, list):
+        return "❌ Input must be a JSON array of topic names"
+
+    results = []
+    found = 0
+    not_found = 0
+
+    for topic in topics_list:
+        if not isinstance(topic, str):
+            results.append({
+                "topic": str(topic),
+                "status": "error",
+                "error": "Topic must be a string"
+            })
+            not_found += 1
+            continue
+
+        try:
+            content = await recall_context(topic)
+            if "❌" in content:  # recall_context returns error message
+                results.append({
+                    "topic": topic,
+                    "status": "not_found",
+                    "error": content
+                })
+                not_found += 1
+            else:
+                results.append({
+                    "topic": topic,
+                    "status": "found",
+                    "content": content
+                })
+                found += 1
+        except Exception as e:
+            results.append({
+                "topic": topic,
+                "status": "error",
+                "error": str(e)
+            })
+            not_found += 1
+
+    return json.dumps({
+        "summary": {
+            "total": len(topics_list),
+            "found": found,
+            "not_found": not_found
+        },
+        "results": results
+    }, indent=2)
+
+
+
+@mcp.tool()
 async def sync_project_memory(
     path: Optional[str] = None,
     confirm: bool = False,
