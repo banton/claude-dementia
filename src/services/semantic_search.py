@@ -38,17 +38,22 @@ class SemanticSearch:
 
         return True
 
-    def batch_add_embeddings(self, contexts: List[Dict]) -> Dict[str, int]:
+    def batch_add_embeddings(self, contexts: List[Dict]) -> Dict:
         """
         Generate and store embeddings for multiple contexts.
 
         Args:
             contexts: List of dicts with 'id' and 'content' keys
 
-        Returns: Dict with 'success', 'failed', 'skipped' counts
+        Returns: Dict with 'success', 'failed', 'skipped' counts and 'errors' list
         """
         if not self.enabled:
-            return {"success": 0, "failed": 0, "skipped": len(contexts)}
+            return {
+                "success": 0,
+                "failed": 0,
+                "skipped": len(contexts),
+                "errors": ["Embedding service not enabled"]
+            }
 
         # Generate all embeddings in batch
         texts = [ctx['content'] for ctx in contexts]
@@ -56,6 +61,7 @@ class SemanticSearch:
 
         success = 0
         failed = 0
+        errors = []
 
         for ctx, embedding in zip(contexts, embeddings):
             if embedding:
@@ -69,14 +75,23 @@ class SemanticSearch:
                     success += 1
                 except Exception as e:
                     import sys
-                    print(f"Failed to store embedding for context {ctx['id']}: {e}", file=sys.stderr)
+                    error_msg = f"Context {ctx['id']}: Failed to store embedding - {str(e)}"
+                    print(error_msg, file=sys.stderr)
+                    errors.append(error_msg)
                     failed += 1
             else:
+                error_msg = f"Context {ctx['id']}: Failed to generate embedding (check Ollama service)"
+                errors.append(error_msg)
                 failed += 1
 
         self.conn.commit()
 
-        return {"success": success, "failed": failed, "skipped": 0}
+        return {
+            "success": success,
+            "failed": failed,
+            "skipped": 0,
+            "errors": errors[:10] if errors else []  # Limit to first 10 errors
+        }
 
     def search_similar(
         self,

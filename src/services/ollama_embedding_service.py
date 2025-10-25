@@ -43,6 +43,8 @@ class OllamaEmbeddingService:
         Returns None if service not enabled or on error.
         """
         if not self.enabled:
+            import sys
+            print(f"Embedding generation skipped: Service not enabled (Ollama not running or {self.model} not installed)", file=sys.stderr)
             return None
 
         try:
@@ -74,9 +76,21 @@ class OllamaEmbeddingService:
                 )
 
             return embedding
+        except requests.exceptions.ConnectionError as e:
+            import sys
+            print(f"Ollama connection failed: Is Ollama running at {self.base_url}?", file=sys.stderr)
+            return None
+        except requests.exceptions.Timeout as e:
+            import sys
+            print(f"Ollama request timeout (30s): Model may be loading or system overloaded", file=sys.stderr)
+            return None
+        except requests.exceptions.HTTPError as e:
+            import sys
+            print(f"Ollama HTTP error: {e.response.status_code} - {e.response.text[:200]}", file=sys.stderr)
+            return None
         except Exception as e:
             import sys
-            print(f"Ollama embedding generation failed: {e}", file=sys.stderr)
+            print(f"Ollama embedding generation failed: {type(e).__name__}: {str(e)}", file=sys.stderr)
             return None
 
     def batch_generate_embeddings(

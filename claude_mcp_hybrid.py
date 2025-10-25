@@ -5168,8 +5168,11 @@ async def generate_embeddings(
     # Build user-friendly summary
     mode = "specific contexts" if context_ids else ("all contexts (regenerate)" if regenerate else "contexts without embeddings")
 
+    # Add error indicator to summary if failures occurred
+    status_emoji = "✓" if result['failed'] == 0 else "⚠️"
+
     summary_text = f"""
-🔄 Embedding Generation Task
+🔄 Embedding Generation Task {status_emoji}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 Mode: {mode}
 Processed: {len(contexts)} contexts
@@ -5180,16 +5183,28 @@ Performance: ~30ms per embedding
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 """.strip()
 
-    return json.dumps({
+    response = {
         "summary": summary_text,
-        "message": "Embedding generation complete",
+        "message": "Embedding generation complete" if result['failed'] == 0 else "Embedding generation completed with errors",
         "total_processed": len(contexts),
         "success": result['success'],
         "failed": result['failed'],
         "model": embedding_service.model,
         "performance": "~30ms per embedding",
         "cost": "FREE (local)"
-    }, indent=2)
+    }
+
+    # Include error details if any failures occurred
+    if result.get('errors'):
+        response["errors"] = result['errors']
+        response["troubleshooting"] = {
+            "check_ollama": "Run: curl http://localhost:11434/api/tags",
+            "verify_model": f"Run: ollama list | grep {embedding_service.model}",
+            "pull_model": f"Run: ollama pull {embedding_service.model}",
+            "check_logs": "Check stderr output for detailed error messages"
+        }
+
+    return json.dumps(response, indent=2)
 
 
 @mcp.tool()
@@ -5465,6 +5480,122 @@ LLM: {llm_status}
 
     status["summary"] = summary_text
     return json.dumps(status, indent=2)
+
+
+@mcp.tool()
+async def diagnose_ollama() -> str:
+    """
+    Run diagnostics on Ollama connection and model availability.
+
+    **Token Efficiency: MINIMAL** (~500 tokens)
+
+    This tool helps troubleshoot embedding/LLM failures by checking:
+    - Is Ollama running?
+    - Are required models installed?
+    - Can we connect to the API?
+    - What models are available?
+
+    Use this when generate_embeddings() or ai_summarize_context() fail.
+    """
+    import requests
+    from src.config import config
+
+    diagnostics = {
+        "timestamp": time.time(),
+        "ollama_url": config.ollama_base_url,
+        "required_models": {
+            "embedding": config.embedding_model,
+            "llm": config.llm_model
+        },
+        "tests": {}
+    }
+
+    # Test 1: Can we reach Ollama?
+    try:
+        response = requests.get(f"{config.ollama_base_url}/api/tags", timeout=5)
+        diagnostics["tests"]["connection"] = {
+            "status": "✓ SUCCESS",
+            "code": response.status_code,
+            "reachable": True
+        }
+
+        if response.status_code == 200:
+            models_data = response.json()
+            installed_models = [m['name'] for m in models_data.get('models', [])]
+            diagnostics["tests"]["installed_models"] = {
+                "status": "✓ SUCCESS",
+                "models": installed_models,
+                "count": len(installed_models)
+            }
+
+            # Test 2: Check if required models are installed
+            embedding_installed = any(m.startswith(config.embedding_model) for m in installed_models)
+            llm_installed = any(m.startswith(config.llm_model) for m in installed_models)
+
+            diagnostics["tests"]["required_models"] = {
+                "embedding": {
+                    "model": config.embedding_model,
+                    "installed": embedding_installed,
+                    "status": "✓ FOUND" if embedding_installed else "✗ MISSING"
+                },
+                "llm": {
+                    "model": config.llm_model,
+                    "installed": llm_installed,
+                    "status": "✓ FOUND" if llm_installed else "✗ MISSING"
+                }
+            }
+        else:
+            diagnostics["tests"]["error"] = f"HTTP {response.status_code}: {response.text[:200]}"
+
+    except requests.exceptions.ConnectionError:
+        diagnostics["tests"]["connection"] = {
+            "status": "✗ FAILED",
+            "reachable": False,
+            "error": f"Cannot connect to {config.ollama_base_url}",
+            "fix": "Start Ollama: 'ollama serve' or check if running"
+        }
+    except requests.exceptions.Timeout:
+        diagnostics["tests"]["connection"] = {
+            "status": "✗ TIMEOUT",
+            "reachable": False,
+            "error": "Request timed out after 5s",
+            "fix": "Ollama may be overloaded or not responding"
+        }
+    except Exception as e:
+        diagnostics["tests"]["connection"] = {
+            "status": "✗ ERROR",
+            "reachable": False,
+            "error": f"{type(e).__name__}: {str(e)}"
+        }
+
+    # Build summary
+    conn_ok = diagnostics["tests"].get("connection", {}).get("reachable", False)
+    emb_ok = diagnostics["tests"].get("required_models", {}).get("embedding", {}).get("installed", False)
+    llm_ok = diagnostics["tests"].get("required_models", {}).get("llm", {}).get("installed", False)
+
+    summary_lines = [
+        "🔍 Ollama Diagnostics",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Connection: {'✓ OK' if conn_ok else '✗ FAILED'}",
+        f"Embedding Model ({config.embedding_model}): {'✓ Installed' if emb_ok else '✗ Missing'}",
+        f"LLM Model ({config.llm_model}): {'✓ Installed' if llm_ok else '✗ Missing'}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    ]
+
+    diagnostics["summary"] = "\n".join(summary_lines)
+
+    # Add recommended fixes
+    if not conn_ok:
+        diagnostics["fix"] = "Start Ollama with: ollama serve"
+    elif not emb_ok or not llm_ok:
+        fixes = []
+        if not emb_ok:
+            fixes.append(f"ollama pull {config.embedding_model}")
+        if not llm_ok:
+            fixes.append(f"ollama pull {config.llm_model}")
+        diagnostics["fix"] = " && ".join(fixes)
+
+    return json.dumps(diagnostics, indent=2)
 
 
 @mcp.tool()
