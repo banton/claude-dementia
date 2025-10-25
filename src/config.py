@@ -10,6 +10,7 @@ class APIConfig:
         # API Keys (optional with local models)
         self.openai_api_key: Optional[str] = os.getenv('OPENAI_API_KEY')
         self.openrouter_api_key: Optional[str] = os.getenv('OPENROUTER_API_KEY')
+        self.voyageai_api_key: Optional[str] = os.getenv('VOYAGEAI_API_KEY')
 
         # Embedding Configuration
         self.embedding_provider: str = os.getenv('EMBEDDING_PROVIDER', 'ollama')
@@ -35,6 +36,8 @@ class APIConfig:
             return True  # Will check Ollama availability at runtime
         elif self.embedding_provider == 'openai':
             return bool(self.openai_api_key)
+        elif self.embedding_provider == 'voyage_ai':
+            return bool(self.voyageai_api_key)
         return False
 
     def _check_ai_summarization_available(self) -> bool:
@@ -61,6 +64,12 @@ class APIConfig:
             },
             'ollama': {
                 'base_url': self.ollama_base_url
+            },
+            'voyage_ai': {
+                'has_api_key': bool(self.voyageai_api_key)
+            },
+            'openrouter': {
+                'has_api_key': bool(self.openrouter_api_key)
             },
             'features': {
                 'semantic_search': self.enable_semantic_search,
