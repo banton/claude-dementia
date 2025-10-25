@@ -5831,11 +5831,12 @@ async def test_single_embedding(text: str = "Test embedding") -> str:
 async def scan_and_analyze_directory(
     directory: str,
     pattern: str = "*.md",
+    recursive: bool = True,
     store_in_table: Optional[str] = None,
     max_files: int = 1000
 ) -> str:
     """
-    Recursively scan directory and analyze text files with metadata extraction.
+    Scan directory and analyze text files with metadata extraction.
 
     **Token Efficiency: SUMMARY** (~2-5KB depending on file count)
 
@@ -5843,6 +5844,7 @@ async def scan_and_analyze_directory(
         directory: Directory path to scan (absolute or relative)
         pattern: File pattern to match (default: "*.md")
                  Examples: "*.txt", "*.md", "*.py", "*"
+        recursive: Scan subdirectories recursively (default: True)
         store_in_table: Optional workspace table name to store results
         max_files: Maximum files to process (default: 1000, prevents runaway)
 
@@ -5852,10 +5854,19 @@ async def scan_and_analyze_directory(
     enabling complex file analysis workflows.
 
     Example:
+        # Recursive scan (all subdirectories)
         scan_and_analyze_directory(
             directory="/path/to/manuscripts",
             pattern="*.md",
+            recursive=True,
             store_in_table="manuscript_analysis"
+        )
+
+        # Non-recursive scan (top-level only)
+        scan_and_analyze_directory(
+            directory="/path/to/docs",
+            pattern="*.txt",
+            recursive=False
         )
     """
     import os
@@ -5879,8 +5890,13 @@ async def scan_and_analyze_directory(
             }, indent=2)
 
         # Find matching files
-        pattern_path = str(dir_path / "**" / pattern)
-        matching_files = glob.glob(pattern_path, recursive=True)
+        if recursive:
+            pattern_path = str(dir_path / "**" / pattern)
+            matching_files = glob.glob(pattern_path, recursive=True)
+        else:
+            pattern_path = str(dir_path / pattern)
+            matching_files = glob.glob(pattern_path, recursive=False)
+
         matching_files = [f for f in matching_files if os.path.isfile(f)]
 
         if len(matching_files) > max_files:
