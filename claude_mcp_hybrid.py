@@ -4523,6 +4523,145 @@ async def explore_context_tree(flat: bool = False) -> str:
 # ============================================================================
 
 @mcp.tool()
+async def context_dashboard() -> str:
+    """
+    Get comprehensive overview of all contexts with statistics and insights.
+
+    **Token Efficiency: SUMMARY** (~2-3KB)
+
+    Returns dashboard showing:
+    - Contexts by priority (counts + sizes)
+    - Top 10 most/least accessed
+    - Embedding coverage %
+    - Total storage used
+    - Stale contexts (30+ days without access)
+    - Version statistics
+
+    Perfect for getting a bird's-eye view of your context library.
+    """
+    conn = get_db()
+    session_id = get_current_session_id()
+
+    # Get comprehensive statistics
+    stats_query = """
+        SELECT
+            json_extract(metadata, '$.priority') as priority,
+            COUNT(*) as count,
+            SUM(LENGTH(content)) as total_size,
+            AVG(LENGTH(content)) as avg_size
+        FROM context_locks
+        WHERE session_id = ?
+        GROUP BY priority
+    """
+
+    cursor = conn.execute(stats_query, (session_id,))
+    priority_stats = {}
+    total_contexts = 0
+    total_size = 0
+
+    for row in cursor.fetchall():
+        priority = row['priority'] or 'reference'
+        priority_stats[priority] = {
+            'count': row['count'],
+            'total_size': row['total_size'],
+            'avg_size': int(row['avg_size'])
+        }
+        total_contexts += row['count']
+        total_size += row['total_size']
+
+    # Get access patterns
+    most_accessed = conn.execute("""
+        SELECT label, access_count, last_accessed
+        FROM context_locks
+        WHERE session_id = ?
+        ORDER BY access_count DESC
+        LIMIT 5
+    """, (session_id,)).fetchall()
+
+    least_accessed = conn.execute("""
+        SELECT label, access_count, last_accessed
+        FROM context_locks
+        WHERE session_id = ?
+          AND access_count > 0
+        ORDER BY access_count ASC
+        LIMIT 5
+    """, (session_id,)).fetchall()
+
+    # Find stale contexts (30+ days)
+    import time
+    thirty_days_ago = time.time() - (30 * 24 * 3600)
+    stale_contexts = conn.execute("""
+        SELECT label, last_accessed, access_count
+        FROM context_locks
+        WHERE session_id = ?
+          AND (last_accessed < ? OR last_accessed IS NULL)
+        ORDER BY last_accessed ASC
+        LIMIT 5
+    """, (session_id, thirty_days_ago)).fetchall()
+
+    # Get version statistics
+    version_stats = conn.execute("""
+        SELECT
+            label,
+            COUNT(*) as version_count,
+            MAX(version) as latest_version
+        FROM context_locks
+        WHERE session_id = ?
+        GROUP BY label
+        HAVING version_count > 1
+        ORDER BY version_count DESC
+        LIMIT 5
+    """, (session_id,)).fetchall()
+
+    # Build summary
+    summary_text = f"""
+📊 Context Library Dashboard
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Total Contexts: {total_contexts}
+Total Storage: {total_size:,} bytes ({total_size/1024/1024:.2f} MB)
+
+By Priority:
+  always_check: {priority_stats.get('always_check', {}).get('count', 0)} contexts
+  important: {priority_stats.get('important', {}).get('count', 0)} contexts
+  reference: {priority_stats.get('reference', {}).get('count', 0)} contexts
+
+Stale Contexts: {len(stale_contexts)} (30+ days)
+Versioned Contexts: {len(version_stats)}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+""".strip()
+
+    response = {
+        "summary": summary_text,
+        "statistics": {
+            "total_contexts": total_contexts,
+            "total_size_bytes": total_size,
+            "by_priority": priority_stats
+        },
+        "most_accessed": [
+            {"label": row['label'], "access_count": row['access_count']}
+            for row in most_accessed
+        ],
+        "least_accessed": [
+            {"label": row['label'], "access_count": row['access_count']}
+            for row in least_accessed
+        ],
+        "stale_contexts": [
+            {"label": row['label'], "days_since_access": int((time.time() - (row['last_accessed'] or 0)) / 86400)}
+            for row in stale_contexts
+        ],
+        "versioned_contexts": [
+            {"label": row['label'], "versions": row['version_count'], "latest": row['latest_version']}
+            for row in version_stats
+        ]
+    }
+
+    if total_contexts == 0:
+        response["message"] = "No contexts found. Use lock_context() to create your first context."
+
+    return json.dumps(response, indent=2)
+
+
+@mcp.tool()
 async def scan_project_files(
     full_scan: bool = False,
     max_files: int = 10000,
@@ -5686,6 +5825,209 @@ async def test_single_embedding(text: str = "Test embedding") -> str:
     result["summary"] = "\n".join(summary_lines)
 
     return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def scan_and_analyze_directory(
+    directory: str,
+    pattern: str = "*.md",
+    store_in_table: Optional[str] = None,
+    max_files: int = 1000
+) -> str:
+    """
+    Recursively scan directory and analyze text files with metadata extraction.
+
+    **Token Efficiency: SUMMARY** (~2-5KB depending on file count)
+
+    Args:
+        directory: Directory path to scan (absolute or relative)
+        pattern: File pattern to match (default: "*.md")
+                 Examples: "*.txt", "*.md", "*.py", "*"
+        store_in_table: Optional workspace table name to store results
+        max_files: Maximum files to process (default: 1000, prevents runaway)
+
+    Returns: Summary statistics and per-file breakdown
+
+    This tool bridges the gap between filesystem access and database storage,
+    enabling complex file analysis workflows.
+
+    Example:
+        scan_and_analyze_directory(
+            directory="/path/to/manuscripts",
+            pattern="*.md",
+            store_in_table="manuscript_analysis"
+        )
+    """
+    import os
+    import glob
+    from pathlib import Path
+    from datetime import datetime
+
+    try:
+        # Expand and validate directory
+        dir_path = Path(directory).expanduser().resolve()
+        if not dir_path.exists():
+            return json.dumps({
+                "error": "Directory not found",
+                "path": str(dir_path)
+            }, indent=2)
+
+        if not dir_path.is_dir():
+            return json.dumps({
+                "error": "Path is not a directory",
+                "path": str(dir_path)
+            }, indent=2)
+
+        # Find matching files
+        pattern_path = str(dir_path / "**" / pattern)
+        matching_files = glob.glob(pattern_path, recursive=True)
+        matching_files = [f for f in matching_files if os.path.isfile(f)]
+
+        if len(matching_files) > max_files:
+            return json.dumps({
+                "error": "Too many files found",
+                "found": len(matching_files),
+                "max_allowed": max_files,
+                "suggestion": "Use more specific pattern or increase max_files"
+            }, indent=2)
+
+        if not matching_files:
+            return json.dumps({
+                "message": "No files found",
+                "directory": str(dir_path),
+                "pattern": pattern
+            }, indent=2)
+
+        # Analyze each file
+        results = []
+        total_size = 0
+        total_lines = 0
+        total_words = 0
+        total_chars = 0
+
+        for file_path in matching_files[:max_files]:
+            try:
+                stat = os.stat(file_path)
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+
+                lines = content.count('\n') + 1
+                words = len(content.split())
+                chars = len(content)
+
+                rel_path = os.path.relpath(file_path, dir_path)
+
+                results.append({
+                    "file": rel_path,
+                    "size_bytes": stat.st_size,
+                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    "lines": lines,
+                    "words": words,
+                    "chars": chars
+                })
+
+                total_size += stat.st_size
+                total_lines += lines
+                total_words += words
+                total_chars += chars
+
+            except Exception as e:
+                results.append({
+                    "file": os.path.relpath(file_path, dir_path),
+                    "error": f"{type(e).__name__}: {str(e)[:100]}"
+                })
+
+        # Store in workspace table if requested
+        if store_in_table:
+            conn = get_db()
+
+            # Create table if doesn't exist
+            conn.execute(f"""
+                CREATE TABLE IF NOT EXISTS {store_in_table} (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file TEXT,
+                    size_bytes INTEGER,
+                    modified TEXT,
+                    lines INTEGER,
+                    words INTEGER,
+                    chars INTEGER,
+                    error TEXT,
+                    scanned_at REAL DEFAULT (unixepoch())
+                )
+            """)
+
+            # Insert results
+            for result in results:
+                conn.execute(f"""
+                    INSERT INTO {store_in_table}
+                    (file, size_bytes, modified, lines, words, chars, error)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    result.get("file"),
+                    result.get("size_bytes"),
+                    result.get("modified"),
+                    result.get("lines"),
+                    result.get("words"),
+                    result.get("chars"),
+                    result.get("error")
+                ))
+
+            conn.commit()
+
+        # Build summary
+        summary_text = f"""
+📁 Directory Scan Results
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Directory: {dir_path.name}/
+Pattern: {pattern}
+Files Found: {len(results)}
+
+Totals:
+  Size: {total_size:,} bytes ({total_size/1024/1024:.2f} MB)
+  Lines: {total_lines:,}
+  Words: {total_words:,}
+  Characters: {total_chars:,}
+
+Average per file:
+  Size: {total_size//len(results) if results else 0:,} bytes
+  Lines: {total_lines//len(results) if results else 0:,}
+  Words: {total_words//len(results) if results else 0:,}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+""".strip()
+
+        response = {
+            "summary": summary_text,
+            "directory": str(dir_path),
+            "pattern": pattern,
+            "files_processed": len(results),
+            "statistics": {
+                "total_size_bytes": total_size,
+                "total_lines": total_lines,
+                "total_words": total_words,
+                "total_chars": total_chars,
+                "avg_size_bytes": total_size // len(results) if results else 0,
+                "avg_lines": total_lines // len(results) if results else 0,
+                "avg_words": total_words // len(results) if results else 0
+            },
+            "files": results[:20]  # Show first 20 in response
+        }
+
+        if len(results) > 20:
+            response["note"] = f"Showing first 20 of {len(results)} files. See full results in workspace table."
+
+        if store_in_table:
+            response["stored_in"] = store_in_table
+            response["query_example"] = f"query_database(\"SELECT * FROM {store_in_table} ORDER BY words DESC LIMIT 10\")"
+
+        return json.dumps(response, indent=2)
+
+    except Exception as e:
+        import traceback
+        return json.dumps({
+            "error": "Scan failed",
+            "exception": f"{type(e).__name__}: {str(e)}",
+            "traceback": traceback.format_exc()
+        }, indent=2)
 
 
 @mcp.tool()
