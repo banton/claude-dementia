@@ -1177,6 +1177,99 @@ async def wake_up() -> str:
     # Get git status
     git_info = get_git_status()
 
+    # Run file model scan (incremental, only project directories)
+    file_model_data = None
+    if is_project_directory(PROJECT_ROOT):
+        try:
+            # Load stored model
+            stored_model = load_stored_file_model(conn, session_id)
+
+            # Quick incremental scan (respects .gitignore, max 10k files)
+            scan_start = time.time()
+            all_files = walk_project_files(PROJECT_ROOT, respect_gitignore=True, max_files=10000)
+
+            # Detect changes
+            changed_files = []
+            deleted_files = []
+            analyzed_files = []
+
+            # Check for deleted files
+            stored_paths = set(stored_model.keys())
+            current_paths = set(all_files)
+            deleted_paths = stored_paths - current_paths
+
+            for deleted_path in deleted_paths:
+                mark_file_deleted(conn, session_id, deleted_path)
+                deleted_files.append(deleted_path)
+
+            # Check for new/changed files
+            for file_path in all_files:
+                stored_meta = stored_model.get(file_path)
+                changed, new_hash, hash_method = detect_file_change(file_path, stored_meta)
+
+                if changed:
+                    # Analyze file
+                    file_type, language, is_standard, standard_type = detect_file_type(file_path)
+                    warnings = check_standard_file_warnings(file_path, file_type, standard_type, PROJECT_ROOT)
+                    semantics = analyze_file_semantics(file_path, file_type, language)
+
+                    # Build metadata
+                    file_stat = os.stat(file_path)
+                    metadata = {
+                        'file_path': file_path,
+                        'file_size': file_stat.st_size,
+                        'content_hash': new_hash,
+                        'modified_time': file_stat.st_mtime,
+                        'hash_method': hash_method,
+                        'file_type': file_type,
+                        'language': language,
+                        'is_standard': is_standard,
+                        'standard_type': standard_type,
+                        'warnings': warnings,
+                        **semantics
+                    }
+
+                    # Store in database
+                    store_file_metadata(conn, session_id, file_path, metadata, 0)
+
+                    # Track changes
+                    if stored_meta:
+                        record_file_change(conn, session_id, file_path, 'modified', stored_meta.get('content_hash'), new_hash)
+                        changed_files.append(file_path)
+                    else:
+                        record_file_change(conn, session_id, file_path, 'added', None, new_hash)
+                        changed_files.append(file_path)
+
+                    analyzed_files.append(metadata)
+
+            scan_time_ms = (time.time() - scan_start) * 1000
+
+            # Build file model summary
+            file_model_data = {
+                "enabled": True,
+                "scan_type": "incremental",
+                "scan_time_ms": round(scan_time_ms, 2),
+                "total_files": len(all_files),
+                "changes": {
+                    "added": len([f for f in changed_files if f not in stored_model]),
+                    "modified": len([f for f in changed_files if f in stored_model]),
+                    "deleted": len(deleted_files)
+                },
+                "warnings": [w for meta in analyzed_files for w in meta.get('warnings', [])][:10]  # First 10 warnings
+            }
+
+        except Exception as e:
+            # If scan fails, don't block wake_up
+            file_model_data = {
+                "enabled": False,
+                "error": str(e)
+            }
+    else:
+        file_model_data = {
+            "enabled": False,
+            "reason": "non_project_directory"
+        }
+
     # Build session info
     db_size_mb = os.path.getsize(DB_PATH) / (1024 * 1024) if os.path.exists(DB_PATH) else 0
 
@@ -1194,6 +1287,7 @@ async def wake_up() -> str:
             "available": False,
             "reason": "not_a_git_repo_or_no_access"
         },
+        "file_model": file_model_data,
         "contexts": {
             "total_count": 0,
             "by_priority": {
@@ -1433,7 +1527,7 @@ async def sleep() -> str:
         ORDER BY created_at DESC
         LIMIT 5
     """, (session['started_at'],))
-    
+
     recent_files = cursor.fetchall()
     if recent_files:
         output.append("\n📁 Files Recently Analyzed:")
@@ -1443,10 +1537,56 @@ async def sleep() -> str:
                 tags = file['tags'].split(',')[:3]  # First 3 tags
                 output.append(f"     Tags: {', '.join(tags)}")
         handover['current_state']['recent_files'] = [
-            {'path': f['path'], 'tags': f['tags']} 
+            {'path': f['path'], 'tags': f['tags']}
             for f in recent_files
         ]
-    
+
+    # 4.5. UPDATE FILE MODEL (if project directory)
+    if is_project_directory(PROJECT_ROOT):
+        try:
+            # Quick incremental scan to capture any last-minute changes
+            stored_model = load_stored_file_model(conn, session_id)
+            all_files = walk_project_files(PROJECT_ROOT, respect_gitignore=True, max_files=10000)
+
+            changed_count = 0
+            for file_path in all_files:
+                stored_meta = stored_model.get(file_path)
+                changed, new_hash, hash_method = detect_file_change(file_path, stored_meta)
+
+                if changed:
+                    # Analyze and update
+                    file_type, language, is_standard, standard_type = detect_file_type(file_path)
+                    warnings = check_standard_file_warnings(file_path, file_type, standard_type, PROJECT_ROOT)
+                    semantics = analyze_file_semantics(file_path, file_type, language)
+
+                    file_stat = os.stat(file_path)
+                    metadata = {
+                        'file_path': file_path,
+                        'file_size': file_stat.st_size,
+                        'content_hash': new_hash,
+                        'modified_time': file_stat.st_mtime,
+                        'hash_method': hash_method,
+                        'file_type': file_type,
+                        'language': language,
+                        'is_standard': is_standard,
+                        'standard_type': standard_type,
+                        'warnings': warnings,
+                        **semantics
+                    }
+
+                    store_file_metadata(conn, session_id, file_path, metadata, 0)
+                    changed_count += 1
+
+            if changed_count > 0:
+                output.append(f"\n📊 File model updated: {changed_count} files changed since wake_up")
+                handover['current_state']['file_model_updated'] = {
+                    'files_changed': changed_count,
+                    'total_files': len(all_files)
+                }
+        except Exception as e:
+            # Don't block sleep if file scan fails
+            output.append(f"\n⚠️ File model update skipped: {str(e)}")
+
     # 5. ERRORS OR ISSUES TO ADDRESS
     cursor = conn.execute("""
         SELECT content FROM memory_entries
