@@ -2,7 +2,11 @@
 
 ## Overview
 
-Claude Dementia now tracks **every token used** and compares actual costs (FREE with Ollama) against what you would have paid using OpenAI APIs.
+Claude Dementia now tracks **every token used** and compares actual costs (FREE with Ollama) against what you would have paid using commercial APIs:
+- **OpenAI** (GPT-3.5, GPT-4, text-embedding-3-small/large)
+- **Voyage AI** (voyage-3.5-lite, voyage-3.5, voyage-3-large) - **NEW!**
+
+**See Also**: [VOYAGE_AI_COST_ANALYSIS.md](VOYAGE_AI_COST_ANALYSIS.md) for detailed cost breakdowns and real-world scenarios.
 
 ## Quick Start
 
@@ -271,13 +275,16 @@ tracker.clear_old_records(days=30)  # Keep only last 30 days
 
 ## Pricing Reference (2025)
 
-| Service | Model | Input | Output |
-|---------|-------|-------|--------|
-| OpenAI Embeddings | text-embedding-3-small | $0.02/M | - |
-| OpenAI Embeddings | text-embedding-3-large | $0.13/M | - |
-| OpenAI LLM | GPT-3.5 Turbo | $0.50/M | $1.50/M |
-| OpenAI LLM | GPT-4 Turbo | $10.00/M | $30.00/M |
-| Ollama | All models | **FREE** | **FREE** |
+| Service | Model | Input | Output | Free Tier |
+|---------|-------|-------|--------|-----------|
+| OpenAI Embeddings | text-embedding-3-small | $0.02/M | - | None |
+| OpenAI Embeddings | text-embedding-3-large | $0.13/M | - | None |
+| **Voyage AI** | **voyage-3.5-lite** | **$0.02/M** | - | **200M/month** |
+| **Voyage AI** | **voyage-3.5** | **$0.06/M** | - | **200M/month** |
+| **Voyage AI** | **voyage-3-large** | **$0.18/M** | - | **200M/month** |
+| OpenAI LLM | GPT-3.5 Turbo | $0.50/M | $1.50/M | None |
+| OpenAI LLM | GPT-4 Turbo | $10.00/M | $30.00/M | None |
+| **Ollama** | **All models** | **FREE** | **FREE** | **Unlimited** |
 
 ## Benefits Summary
 

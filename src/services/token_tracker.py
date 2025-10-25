@@ -21,6 +21,20 @@ class TokenTracker:
         'openai_gpt4_input': 10.00,          # GPT-4 Turbo input
         'openai_gpt4_output': 30.00,         # GPT-4 Turbo output
 
+        # Voyage AI Embeddings (200M free tokens for most models)
+        'voyage_3_large': 0.18,              # voyage-3-large
+        'voyage_context_3': 0.18,            # voyage-context-3
+        'voyage_3_5': 0.06,                  # voyage-3.5
+        'voyage_3_5_lite': 0.02,             # voyage-3.5-lite (cheapest)
+        'voyage_code_3': 0.18,               # voyage-code-3
+        'voyage_finance_2': 0.12,            # voyage-finance-2 (50M free)
+        'voyage_law_2': 0.12,                # voyage-law-2 (50M free)
+        'voyage_code_2': 0.12,               # voyage-code-2 (50M free)
+
+        # Voyage AI Rerankers (200M free tokens)
+        'voyage_rerank_2_5': 0.05,           # rerank-2.5
+        'voyage_rerank_2_5_lite': 0.02,      # rerank-2.5-lite
+
         # OpenRouter (via OpenAI-compatible)
         'openrouter_claude_haiku': 0.25,     # Claude 3 Haiku
         'openrouter_mistral_7b': 0.00,       # Free tier
@@ -229,6 +243,11 @@ class TokenTracker:
                 cost_small = (input_tokens / 1_000_000) * self.PRICING['openai_embedding_small']
                 cost_large = (input_tokens / 1_000_000) * self.PRICING['openai_embedding_large']
 
+                # Calculate Voyage AI embedding costs
+                cost_voyage_lite = (input_tokens / 1_000_000) * self.PRICING['voyage_3_5_lite']
+                cost_voyage_35 = (input_tokens / 1_000_000) * self.PRICING['voyage_3_5']
+                cost_voyage_large = (input_tokens / 1_000_000) * self.PRICING['voyage_3_large']
+
                 if 'openai_embedding' not in costs['alternatives']:
                     costs['alternatives']['openai_embedding'] = {
                         'provider': 'OpenAI',
@@ -236,7 +255,34 @@ class TokenTracker:
                         'cost_usd': 0.0
                     }
 
+                if 'voyage_lite' not in costs['alternatives']:
+                    costs['alternatives']['voyage_lite'] = {
+                        'provider': 'Voyage AI',
+                        'model': 'voyage-3.5-lite',
+                        'cost_usd': 0.0,
+                        'free_tier': '200M tokens/month'
+                    }
+
+                if 'voyage_standard' not in costs['alternatives']:
+                    costs['alternatives']['voyage_standard'] = {
+                        'provider': 'Voyage AI',
+                        'model': 'voyage-3.5',
+                        'cost_usd': 0.0,
+                        'free_tier': '200M tokens/month'
+                    }
+
+                if 'voyage_large' not in costs['alternatives']:
+                    costs['alternatives']['voyage_large'] = {
+                        'provider': 'Voyage AI',
+                        'model': 'voyage-3-large',
+                        'cost_usd': 0.0,
+                        'free_tier': '200M tokens/month'
+                    }
+
                 costs['alternatives']['openai_embedding']['cost_usd'] += cost_small
+                costs['alternatives']['voyage_lite']['cost_usd'] += cost_voyage_lite
+                costs['alternatives']['voyage_standard']['cost_usd'] += cost_voyage_35
+                costs['alternatives']['voyage_large']['cost_usd'] += cost_voyage_large
 
             elif op_type == 'llm_completion':
                 # Calculate OpenAI GPT costs
@@ -288,7 +334,10 @@ class TokenTracker:
                 'openai_embeddings': f"${self.PRICING['openai_embedding_small']:.2f}/M tokens",
                 'openai_gpt35': f"${self.PRICING['openai_gpt35_input']:.2f}/M input, ${self.PRICING['openai_gpt35_output']:.2f}/M output",
                 'openai_gpt4': f"${self.PRICING['openai_gpt4_input']:.2f}/M input, ${self.PRICING['openai_gpt4_output']:.2f}/M output",
-                'ollama': 'FREE'
+                'voyage_lite': f"${self.PRICING['voyage_3_5_lite']:.2f}/M tokens (200M free)",
+                'voyage_standard': f"${self.PRICING['voyage_3_5']:.2f}/M tokens (200M free)",
+                'voyage_large': f"${self.PRICING['voyage_3_large']:.2f}/M tokens (200M free)",
+                'ollama': 'FREE (unlimited)'
             }
         }
 
