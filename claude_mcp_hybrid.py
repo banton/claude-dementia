@@ -429,7 +429,72 @@ def initialize_database(conn):
             status TEXT DEFAULT 'OPEN'
         )
     ''')
-    
+
+    # Create file_semantic_model table (v4.2.0)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS file_semantic_model (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+
+            -- Change detection (mtime + size + hash)
+            file_size INTEGER NOT NULL,
+            content_hash TEXT NOT NULL,
+            modified_time REAL NOT NULL,
+            hash_method TEXT DEFAULT 'full',
+
+            -- Basic metadata
+            file_type TEXT,
+            language TEXT,
+            purpose TEXT,
+
+            -- Semantic understanding (JSON)
+            imports TEXT,
+            exports TEXT,
+            dependencies TEXT,
+            used_by TEXT,
+            contains TEXT,
+
+            -- Standard file recognition
+            is_standard BOOLEAN DEFAULT 0,
+            standard_type TEXT,
+            warnings TEXT,
+
+            -- Semantic clustering
+            cluster_name TEXT,
+            related_files TEXT,
+
+            -- Tracking
+            last_scanned REAL NOT NULL,
+            scan_duration_ms INTEGER,
+
+            UNIQUE(session_id, file_path)
+        )
+    ''')
+
+    # Create indexes for file_semantic_model
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_hash ON file_semantic_model(session_id, content_hash)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_mtime ON file_semantic_model(session_id, modified_time)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_cluster ON file_semantic_model(session_id, cluster_name)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_type ON file_semantic_model(session_id, file_type)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_standard ON file_semantic_model(session_id, is_standard)')
+
+    # Create file_change_history table (optional, for tracking changes over time)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS file_change_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            change_type TEXT NOT NULL,
+            timestamp REAL NOT NULL,
+            old_hash TEXT,
+            new_hash TEXT,
+            size_delta INTEGER
+        )
+    ''')
+
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fch_session ON file_change_history(session_id, timestamp DESC)')
+
     conn.commit()
 
 def estimate_tokens(text: str) -> int:
