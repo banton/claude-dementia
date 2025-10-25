@@ -268,8 +268,25 @@ def initialize_database(conn):
         cursor.execute('ALTER TABLE context_locks ADD COLUMN related_contexts TEXT')
     if 'last_accessed' not in columns:
         cursor.execute('ALTER TABLE context_locks ADD COLUMN last_accessed TIMESTAMP')
+        # Migrate existing contexts: set last_accessed = locked_at
+        cursor.execute("""
+            UPDATE context_locks
+            SET last_accessed = locked_at
+            WHERE last_accessed IS NULL
+        """)
+        conn.commit()
+
     if 'access_count' not in columns:
         cursor.execute('ALTER TABLE context_locks ADD COLUMN access_count INTEGER DEFAULT 0')
+
+    # Set last_accessed = locked_at for any contexts that still have NULL
+    # (handles contexts created after column added but before this migration)
+    cursor.execute("""
+        UPDATE context_locks
+        SET last_accessed = locked_at
+        WHERE last_accessed IS NULL
+    """)
+    conn.commit()
 
     # If we just added RLM columns, generate previews for existing contexts
     if 'preview' not in columns:
@@ -281,13 +298,14 @@ def initialize_database(conn):
             from migrate_v4_1_rlm import generate_preview, extract_key_concepts
 
             # Generate previews for existing contexts
-            cursor.execute("SELECT id, content, metadata FROM context_locks WHERE preview IS NULL")
+            cursor.execute("SELECT id, content, metadata, locked_at FROM context_locks WHERE preview IS NULL")
             rows = cursor.fetchall()
 
             for row in rows:
                 row_id = row[0]
                 content = row[1]
                 metadata = json.loads(row[2]) if row[2] else {}
+                locked_at = row[3]
                 tags = metadata.get('tags', [])
 
                 preview = generate_preview(content, max_length=500)
@@ -297,7 +315,7 @@ def initialize_database(conn):
                     UPDATE context_locks
                     SET preview = ?, key_concepts = ?, last_accessed = ?
                     WHERE id = ?
-                """, (preview, json.dumps(key_concepts), time.time(), row_id))
+                """, (preview, json.dumps(key_concepts), locked_at, row_id))
 
             conn.commit()
 
@@ -701,6 +719,276 @@ def apply_tags_to_file(conn: sqlite3.Connection, file_path: str, tags: Set[str],
             # Tag already exists for this file
             pass
     return applied
+
+# ============================================================================
+# STALENESS DETECTION & FILE RELEVANCE
+# ============================================================================
+
+def extract_file_paths(text: str) -> List[str]:
+    """Extract file paths from text using multiple patterns"""
+    paths = []
+
+    # Pattern 1: Explicit file paths (schema.sql, src/api/users.py, etc.)
+    # Matches: word characters, slashes, dots, hyphens
+    import re
+    file_pattern = r'[\w\-/]+\.[\w]+(?::[\d]+)?'
+    matches = re.findall(file_pattern, text)
+    for match in matches:
+        # Remove line number suffix if present
+        path = match.split(':')[0]
+        # Filter out common false positives
+        if not any(fp in path for fp in ['http', 'https', 'www.', 'localhost']):
+            paths.append(path)
+
+    return list(set(paths))  # Deduplicate
+
+def extract_directory_refs(text: str) -> List[str]:
+    """Extract directory references from text"""
+    dirs = []
+
+    # Pattern: "src/auth/", "the config directory", etc.
+    import re
+
+    # Explicit directory paths ending with /
+    dir_pattern = r'[\w\-/]+/'
+    matches = re.findall(dir_pattern, text)
+    for match in matches:
+        if not any(fp in match for fp in ['http', 'https', '://']):
+            dirs.append(match)
+
+    # Natural language: "the X directory" or "X folder"
+    natural_pattern = r'(?:the\s+)?([\w\-/]+)\s+(?:directory|folder|dir)'
+    matches = re.findall(natural_pattern, text, re.IGNORECASE)
+    dirs.extend([f"{m}/" for m in matches])
+
+    return list(set(dirs))
+
+def get_all_tracked_files() -> List[str]:
+    """Get all git-tracked files in project"""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['git', 'ls-files'],
+            capture_output=True,
+            text=True,
+            cwd=PROJECT_ROOT,
+            timeout=5
+        )
+        if result.returncode == 0:
+            return result.stdout.strip().split('\n')
+    except:
+        pass
+    return []
+
+def get_related_files(context: dict, git_info: Optional[dict] = None) -> List[dict]:
+    """
+    Find files related to this context using multiple signals.
+    Returns list of {path, relevance, reason}
+    """
+    related = []
+    seen = {}
+
+    # Signal 1: Explicit file paths in content
+    explicit_files = extract_file_paths(context['content'])
+    for file_path in explicit_files:
+        if os.path.exists(file_path):
+            seen[file_path] = {
+                'path': file_path,
+                'relevance': 1.0,
+                'reason': 'explicitly_mentioned'
+            }
+
+    # Signal 2: Directory references
+    directories = extract_directory_refs(context['content'])
+    for directory in directories:
+        if os.path.exists(directory) and os.path.isdir(directory):
+            # Get files in this directory
+            for root, _, files in os.walk(directory):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    if file_path not in seen:
+                        seen[file_path] = {
+                            'path': file_path,
+                            'relevance': 0.7,
+                            'reason': f'in_directory_{directory}'
+                        }
+
+    # Signal 3: Temporal proximity (files modified within 24h of lock time)
+    if git_info and git_info.get('available'):
+        lock_time = context['locked_at']
+        window = 86400  # 24 hours
+
+        tracked_files = get_all_tracked_files()
+        for file_path in tracked_files:
+            full_path = os.path.join(PROJECT_ROOT, file_path)
+            if os.path.exists(full_path):
+                try:
+                    file_mtime = os.path.getmtime(full_path)
+                    time_delta = abs(file_mtime - lock_time)
+
+                    if time_delta <= window:
+                        proximity_score = 1.0 - (time_delta / window)
+                        relevance = proximity_score * 0.6
+
+                        if full_path not in seen or seen[full_path]['relevance'] < relevance:
+                            seen[full_path] = {
+                                'path': full_path,
+                                'relevance': relevance,
+                                'reason': f'modified_{int(time_delta/3600)}h_from_lock'
+                            }
+                except:
+                    pass
+
+    # Signal 4: Metadata explicit related_files
+    if context.get('metadata'):
+        try:
+            metadata = json.loads(context['metadata']) if isinstance(context['metadata'], str) else context['metadata']
+            if metadata.get('related_files'):
+                for file_path in metadata['related_files']:
+                    if os.path.exists(file_path):
+                        seen[file_path] = {
+                            'path': file_path,
+                            'relevance': 1.0,
+                            'reason': 'user_specified'
+                        }
+        except:
+            pass
+
+    return sorted(seen.values(), key=lambda x: x['relevance'], reverse=True)
+
+def check_context_staleness(context: dict, git_info: Optional[dict] = None) -> Optional[dict]:
+    """
+    Check if context is stale (content changed or not accessed recently)
+    Returns staleness info or None if fresh
+    """
+    related_files = get_related_files(context, git_info)
+
+    # Priority 1: Deleted files (highest priority stale)
+    for file_info in related_files:
+        if file_info['relevance'] >= 0.5:  # Only check relevant files
+            if not os.path.exists(file_info['path']):
+                return {
+                    "type": "content_stale",
+                    "reason": f"{file_info['path']} no longer exists",
+                    "file": file_info['path'],
+                    "confidence": "high",
+                    "severity": "deleted_file",
+                    "recommendation": "update_or_unlock"
+                }
+
+    # Priority 2: Modified files (content staleness)
+    for file_info in related_files:
+        if file_info['relevance'] >= 0.5:  # Only check relevant files
+            try:
+                file_mtime = os.path.getmtime(file_info['path'])
+
+                if file_mtime > context['locked_at']:
+                    days_delta = (file_mtime - context['locked_at']) / 86400
+                    confidence = "high" if file_info['relevance'] >= 0.7 else "medium"
+
+                    return {
+                        "type": "content_stale",
+                        "reason": f"{file_info['path']} modified after context locked",
+                        "file": file_info['path'],
+                        "relevance_score": file_info['relevance'],
+                        "relevance_reason": file_info['reason'],
+                        "days_delta": round(days_delta, 1),
+                        "confidence": confidence,
+                        "recommendation": "review_and_update"
+                    }
+            except:
+                pass
+
+    # Priority 3: Relevance staleness (not accessed recently)
+    if context.get('last_accessed'):
+        days_since_access = (time.time() - context['last_accessed']) / 86400
+
+        if days_since_access >= 30:
+            return {
+                "type": "relevance_stale",
+                "reason": f"not accessed in {int(days_since_access)} days",
+                "days_since_access": int(days_since_access),
+                "confidence": "high",
+                "recommendation": "verify_still_relevant_or_unlock"
+            }
+        elif days_since_access >= 14:
+            return {
+                "type": "relevance_stale",
+                "reason": f"not accessed in {int(days_since_access)} days",
+                "days_since_access": int(days_since_access),
+                "confidence": "medium",
+                "recommendation": "verify_still_relevant"
+            }
+
+    return None
+
+def get_git_status() -> Optional[dict]:
+    """Get git status information if available"""
+    try:
+        import subprocess
+
+        # Check if git is available and this is a git repo
+        if not os.path.exists(os.path.join(PROJECT_ROOT, '.git')):
+            return None
+
+        # Get current branch
+        branch_result = subprocess.run(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+            capture_output=True,
+            text=True,
+            cwd=PROJECT_ROOT,
+            timeout=2
+        )
+        current_branch = branch_result.stdout.strip() if branch_result.returncode == 0 else 'unknown'
+
+        # Get modified files
+        status_result = subprocess.run(
+            ['git', 'status', '--short'],
+            capture_output=True,
+            text=True,
+            cwd=PROJECT_ROOT,
+            timeout=2
+        )
+
+        modified = []
+        staged = []
+        untracked = []
+
+        if status_result.returncode == 0:
+            for line in status_result.stdout.strip().split('\n'):
+                if not line:
+                    continue
+                status = line[:2]
+                filepath = line[3:]
+
+                if status[0] in ('M', 'A', 'D', 'R'):
+                    staged.append(filepath)
+                if status[1] in ('M', 'D'):
+                    modified.append(filepath)
+                if status == '??':
+                    untracked.append(filepath)
+
+        # Get unpushed commits
+        unpushed_result = subprocess.run(
+            ['git', 'log', '@{u}..HEAD', '--oneline'],
+            capture_output=True,
+            text=True,
+            cwd=PROJECT_ROOT,
+            timeout=2
+        )
+        unpushed_commits = len(unpushed_result.stdout.strip().split('\n')) if unpushed_result.returncode == 0 and unpushed_result.stdout.strip() else 0
+
+        return {
+            'available': True,
+            'current_branch': current_branch,
+            'modified_files': modified,
+            'staged_files': staged,
+            'untracked_files': untracked,
+            'unpushed_commits': unpushed_commits,
+            'uncommitted_changes': len(modified) > 0 or len(staged) > 0
+        }
+    except:
+        return None
 
 # ============================================================================
 # SESSION MANAGEMENT (unchanged from before)
@@ -1483,8 +1771,8 @@ async def recall_context(topic: str, version: Optional[str] = "latest") -> str:
     
     if version == "latest":
         cursor = conn.execute("""
-            SELECT content, version, locked_at, metadata 
-            FROM context_locks 
+            SELECT id, content, version, locked_at, metadata
+            FROM context_locks
             WHERE label = ? AND session_id = ?
             ORDER BY locked_at DESC
             LIMIT 1
@@ -1493,17 +1781,27 @@ async def recall_context(topic: str, version: Optional[str] = "latest") -> str:
         # Clean version (remove 'v' prefix if present)
         clean_version = version[1:] if version.startswith('v') else version
         cursor = conn.execute("""
-            SELECT content, version, locked_at, metadata 
-            FROM context_locks 
+            SELECT id, content, version, locked_at, metadata
+            FROM context_locks
             WHERE label = ? AND version = ? AND session_id = ?
         """, (topic, clean_version, session_id))
-    
+
     row = cursor.fetchone()
     if row:
+        context_id = row['id']
         dt = datetime.fromtimestamp(row['locked_at'])
         metadata = json.loads(row['metadata']) if row['metadata'] else {}
         tags = metadata.get('tags', [])
-        
+
+        # Track access
+        conn.execute("""
+            UPDATE context_locks
+            SET last_accessed = ?,
+                access_count = access_count + 1
+            WHERE id = ?
+        """, (time.time(), context_id))
+        conn.commit()
+
         output = []
         output.append(f"📌 {topic} v{row['version']}")
         output.append(f"Locked: {dt.strftime('%Y-%m-%d %H:%M')}")
@@ -1511,7 +1809,7 @@ async def recall_context(topic: str, version: Optional[str] = "latest") -> str:
             output.append(f"Tags: {', '.join(tags)}")
         output.append("-" * 40)
         output.append(row['content'])
-        
+
         return "\n".join(output)
     else:
         return f"❌ No locked context found for '{topic}' (version: {version})"
