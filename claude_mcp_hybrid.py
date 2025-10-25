@@ -121,13 +121,28 @@ except Exception as e:
     # Don't print during module initialization - it can break MCP
     # print(f"Warning: Using fallback database location due to error: {e}", file=sys.stderr)
 
-# Use the project directory from environment if available, otherwise current directory
+# DEPRECATED: These are kept for backwards compatibility but should not be used directly
+# Use get_project_root() and get_project_name() instead for dynamic project detection
 if os.environ.get('CLAUDE_PROJECT_DIR'):
     PROJECT_ROOT = os.environ['CLAUDE_PROJECT_DIR']
 else:
     PROJECT_ROOT = os.getcwd()
 
 PROJECT_NAME = os.path.basename(PROJECT_ROOT) or 'Claude Desktop'
+
+def get_project_root() -> str:
+    """
+    Dynamically get current project root.
+    IMPORTANT: Returns CURRENT working directory, not cached value.
+    This enables proper project isolation in long-running MCP servers.
+    """
+    if os.environ.get('CLAUDE_PROJECT_DIR'):
+        return os.environ['CLAUDE_PROJECT_DIR']
+    return os.getcwd()
+
+def get_project_name() -> str:
+    """Get current project name from dynamic project root."""
+    return os.path.basename(get_project_root()) or 'Claude Desktop'
 
 # For testing: allow SESSION_ID override
 SESSION_ID = None
@@ -565,9 +580,13 @@ def get_current_session_id() -> str:
         return SESSION_ID
 
     conn = get_db()
-    
+
+    # CRITICAL: Use dynamic project detection for proper isolation in long-running MCP servers
+    current_project_root = get_project_root()
+    current_project_name = get_project_name()
+
     # Create a project fingerprint - this ensures sessions are project-specific
-    project_fingerprint = hashlib.md5(f"{PROJECT_ROOT}:{PROJECT_NAME}".encode()).hexdigest()[:8]
+    project_fingerprint = hashlib.md5(f"{current_project_root}:{current_project_name}".encode()).hexdigest()[:8]
     
     # Find active session for THIS PROJECT
     cursor = conn.execute("""
@@ -581,13 +600,13 @@ def get_current_session_id() -> str:
     row = cursor.fetchone()
     if row:
         # Verify we're in the same project (safety check)
-        if row['project_path'] != PROJECT_ROOT:
+        if row['project_path'] != current_project_root:
             # Project moved but same logical project - update path
             conn.execute("""
-                UPDATE sessions 
+                UPDATE sessions
                 SET project_path = ?, last_active = ?
                 WHERE id = ?
-            """, (PROJECT_ROOT, time.time(), row['id']))
+            """, (current_project_root, time.time(), row['id']))
         else:
             # Normal case - just update activity
             conn.execute("""
@@ -599,8 +618,8 @@ def get_current_session_id() -> str:
         return row['id']
     
     # Create new session for this project
-    session_id = f"{PROJECT_NAME[:4]}_{str(uuid.uuid4())[:8]}"
-    
+    session_id = f"{current_project_name[:4]}_{str(uuid.uuid4())[:8]}"
+
     # First add columns if they don't exist (migration)
     cursor.execute("PRAGMA table_info(sessions)")
     columns = [col[1] for col in cursor.fetchall()]
@@ -609,11 +628,11 @@ def get_current_session_id() -> str:
         conn.execute("ALTER TABLE sessions ADD COLUMN project_path TEXT")
         conn.execute("ALTER TABLE sessions ADD COLUMN project_name TEXT")
         conn.commit()
-    
+
     conn.execute("""
         INSERT INTO sessions (id, started_at, last_active, project_fingerprint, project_path, project_name)
         VALUES (?, ?, ?, ?, ?, ?)
-    """, (session_id, time.time(), time.time(), project_fingerprint, PROJECT_ROOT, PROJECT_NAME))
+    """, (session_id, time.time(), time.time(), project_fingerprint, current_project_root, current_project_name))
     conn.commit()
     
     return session_id
@@ -1349,14 +1368,15 @@ async def wake_up() -> str:
 
     # Run file model scan (incremental, only project directories)
     file_model_data = None
-    if is_project_directory(PROJECT_ROOT):
+    current_project_root = get_project_root()  # Dynamic detection
+    if is_project_directory(current_project_root):
         try:
             # Load stored model
             stored_model = load_stored_file_model(conn, session_id)
 
             # Quick incremental scan (respects .gitignore, max 10k files)
             scan_start = time.time()
-            all_files = walk_project_files(PROJECT_ROOT, respect_gitignore=True, max_files=10000)
+            all_files = walk_project_files(current_project_root, respect_gitignore=True, max_files=10000)
 
             # Detect changes
             changed_files = []
@@ -1380,7 +1400,7 @@ async def wake_up() -> str:
                 if changed:
                     # Analyze file
                     file_type, language, is_standard, standard_type = detect_file_type(file_path)
-                    warnings = check_standard_file_warnings(file_path, file_type, standard_type, PROJECT_ROOT)
+                    warnings = check_standard_file_warnings(file_path, file_type, standard_type, current_project_root)
                     semantics = analyze_file_semantics(file_path, file_type, language)
 
                     # Build metadata
@@ -1447,8 +1467,8 @@ async def wake_up() -> str:
     session_data = {
         "session": {
             "id": session_id,
-            "project_name": PROJECT_NAME,
-            "project_root": PROJECT_ROOT,
+            "project_name": get_project_name(),  # Dynamic detection
+            "project_root": get_project_root(),  # Dynamic detection
             "database": DB_PATH,
             "database_location": DB_LOCATION,
             "database_size_mb": round(db_size_mb, 2),
@@ -1703,11 +1723,12 @@ async def sleep() -> str:
         ]
 
     # 4.5. UPDATE FILE MODEL (if project directory)
-    if is_project_directory(PROJECT_ROOT):
+    current_project_root = get_project_root()  # Dynamic detection
+    if is_project_directory(current_project_root):
         try:
             # Quick incremental scan to capture any last-minute changes
             stored_model = load_stored_file_model(conn, session_id)
-            all_files = walk_project_files(PROJECT_ROOT, respect_gitignore=True, max_files=10000)
+            all_files = walk_project_files(current_project_root, respect_gitignore=True, max_files=10000)
 
             changed_count = 0
             for file_path in all_files:
@@ -1717,7 +1738,7 @@ async def sleep() -> str:
                 if changed:
                     # Analyze and update
                     file_type, language, is_standard, standard_type = detect_file_type(file_path)
-                    warnings = check_standard_file_warnings(file_path, file_type, standard_type, PROJECT_ROOT)
+                    warnings = check_standard_file_warnings(file_path, file_type, standard_type, current_project_root)
                     semantics = analyze_file_semantics(file_path, file_type, language)
 
                     file_stat = os.stat(file_path)
