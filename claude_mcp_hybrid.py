@@ -997,45 +997,93 @@ def get_git_status() -> Optional[dict]:
 @mcp.tool()
 async def wake_up() -> str:
     """
-    Start a development session and load context.
-    Shows: active todos, recent changes, locked contexts.
+    Initialize session and load available context for LLM orientation.
+    Returns structured JSON with session info, git status, contexts, and staleness warnings.
+
+    Purpose: Help LLM understand what data/tools are available to minimize confusion.
     """
     update_session_activity()
     conn = get_db()
     session_id = get_current_session_id()
-    
-    output = []
-    
-    # Check for context mismatch warning
+
+    # Get git status
+    git_info = get_git_status()
+
+    # Build session info
+    db_size_mb = os.path.getsize(DB_PATH) / (1024 * 1024) if os.path.exists(DB_PATH) else 0
+
+    session_data = {
+        "session": {
+            "id": session_id,
+            "project_name": PROJECT_NAME,
+            "project_root": PROJECT_ROOT,
+            "database": DB_PATH,
+            "database_location": DB_LOCATION,
+            "database_size_mb": round(db_size_mb, 2),
+            "initialized_at": time.time()
+        },
+        "git": git_info if git_info else {
+            "available": False,
+            "reason": "not_a_git_repo_or_no_access"
+        },
+        "contexts": {
+            "total_count": 0,
+            "by_priority": {
+                "always_check": [],
+                "important": [],
+                "reference": []
+            }
+        },
+        "stale_contexts": [],
+        "handover": None,
+        "memory_health": None
+    }
+
+    # Get all contexts grouped by priority
     cursor = conn.execute("""
-        SELECT id, project_name, project_path, last_active 
-        FROM sessions 
-        WHERE id != ?
-        ORDER BY last_active DESC
-        LIMIT 1
+        SELECT id, label, version, locked_at, metadata, last_accessed, access_count, content
+        FROM context_locks
+        WHERE session_id = ?
+        ORDER BY locked_at DESC
     """, (session_id,))
-    
-    other_session = cursor.fetchone()
-    if other_session:
-        # Check if this other session was more recent and for a different project
-        if other_session['project_path'] != PROJECT_ROOT:
-            days_ago = (time.time() - other_session['last_active']) / 86400
-            if days_ago < 1:
-                output.append("⚠️ CONTEXT WARNING:")
-                output.append(f"   Last session '{other_session['id']}' was for: {other_session['project_name']}")
-                output.append(f"   at: {other_session['project_path']}")
-                output.append(f"   You're now in: {PROJECT_NAME}")
-                output.append("   Did you mean to switch projects?")
-                output.append("")
-    
-    output.append("🌅 Good morning! Loading your context...")
-    output.append(f"Session: {session_id}")
-    output.append(f"Project: {PROJECT_NAME}")
-    output.append(f"Location: {PROJECT_ROOT}")
-    output.append(f"Memory: {DB_PATH} ({DB_LOCATION})")
-    output.append("")
-    
-    # Check for previous session handover
+
+    all_contexts = cursor.fetchall()
+    stale_contexts = []
+
+    for ctx_row in all_contexts:
+        metadata = json.loads(ctx_row['metadata']) if ctx_row['metadata'] else {}
+        priority = metadata.get('priority', 'reference')
+        tags = metadata.get('tags', [])
+
+        ctx_info = {
+            "label": ctx_row['label'],
+            "version": ctx_row['version'],
+            "locked_at": ctx_row['locked_at'],
+            "size_bytes": len(ctx_row['content']) if ctx_row['content'] else 0,
+            "tags": tags,
+            "last_accessed": ctx_row['last_accessed'],
+            "access_count": ctx_row['access_count'] or 0
+        }
+
+        # Check staleness
+        context_dict = dict(ctx_row)
+        staleness = check_context_staleness(context_dict, git_info)
+        if staleness:
+            ctx_info["stale"] = True
+            stale_contexts.append({
+                "label": ctx_row['label'],
+                "version": ctx_row['version'],
+                **staleness
+            })
+
+        # Add to appropriate priority group
+        if priority in session_data["contexts"]["by_priority"]:
+            session_data["contexts"]["by_priority"][priority].append(ctx_info)
+
+    session_data["contexts"]["total_count"] = len(all_contexts)
+    session_data["stale_contexts"] = stale_contexts
+
+    # Get handover if available
     cursor = conn.execute("""
         SELECT content, metadata, timestamp FROM memory_entries
         WHERE category = 'handover'
@@ -1043,153 +1091,38 @@ async def wake_up() -> str:
         LIMIT 1
     """)
     handover = cursor.fetchone()
-    
+
     if handover:
-        dt = datetime.fromtimestamp(handover['timestamp'])
-        days_ago = (time.time() - handover['timestamp']) / 86400
-        
-        if days_ago < 1:
-            time_str = f"{int((time.time() - handover['timestamp']) / 3600)} hours ago"
-        else:
-            time_str = f"{int(days_ago)} days ago"
-        
-        output.append(f"📜 Last session handover ({time_str}):")
-        
-        # Parse handover data
+        hours_ago = (time.time() - handover['timestamp']) / 3600
         try:
             handover_data = json.loads(handover['metadata'])
-            
-            # Show work completed
-            if 'work_done' in handover_data:
-                if handover_data['work_done'].get('progress'):
-                    output.append("\n✅ Previous Progress:")
-                    for item in handover_data['work_done']['progress'][:3]:
-                        output.append(f"   • {item}")
-                
-                if handover_data['work_done'].get('decisions'):
-                    output.append("\n🤔 Previous Decisions:")
-                    for decision in handover_data['work_done']['decisions'][:2]:
-                        output.append(f"   • {decision['decision']}")
-            
-            # Show next steps
-            if 'next_steps' in handover_data:
-                if handover_data['next_steps'].get('todos'):
-                    high_priority = [t for t in handover_data['next_steps']['todos'] 
-                                   if t.get('priority', 0) >= 2]
-                    if high_priority:
-                        output.append("\n🔥 High Priority TODOs:")
-                        for todo in high_priority[:3]:
-                            output.append(f"   • {todo['content']}")
-                
-                if handover_data['next_steps'].get('issues'):
-                    output.append("\n⚠️ Issues to Address:")
-                    for issue in handover_data['next_steps']['issues'][:2]:
-                        output.append(f"   • {issue}")
-            
-            # Show locked contexts
-            if 'important_context' in handover_data:
-                if handover_data['important_context'].get('locked'):
-                    output.append("\n🔒 Available Locked Contexts:")
-                    for ctx in handover_data['important_context']['locked'][:3]:
-                        output.append(f"   • {ctx['label']} (v{ctx['version']})")
-                    output.append("   → Use recall_context('topic') to retrieve")
-            
-        except json.JSONDecodeError:
-            output.append("   (Handover data corrupted)")
-    else:
-        # No handover, show recent updates instead
-        cursor = conn.execute("""
-            SELECT message, timestamp FROM session_updates
-            ORDER BY timestamp DESC
-            LIMIT 5
-        """)
-        updates = cursor.fetchall()
-        
-        if updates:
-            output.append("📝 Recent updates:")
-            for update in updates:
-                dt = datetime.fromtimestamp(update['timestamp'])
-                output.append(f"   • {dt.strftime('%m/%d %H:%M')}: {update['message']}")
-    
-    # Get active todos
-    cursor = conn.execute("""
-        SELECT content, priority FROM todos
-        WHERE status = 'pending'
-        ORDER BY priority DESC, created_at ASC
-        LIMIT 5
-    """)
-    todos = cursor.fetchall()
-    
-    if todos:
-        output.append("\n📋 Active TODOs:")
-        for i, todo in enumerate(todos, 1):
-            priority = todo['priority'] if todo['priority'] else 0
-            priority_label = ['LOW', 'NORMAL', 'HIGH'][min(priority, 2)]
-            output.append(f"   {i}. [{priority_label}] {todo['content']}")
-    
-    # Show high-priority locked contexts
-    engine = ActiveContextEngine(DB_PATH)
-    
-    # Get always_check contexts
-    cursor = conn.execute("""
-        SELECT label, version, metadata 
-        FROM context_locks 
-        WHERE session_id = ? 
-        AND json_extract(metadata, '$.priority') = 'always_check'
-        ORDER BY locked_at DESC
-    """, (session_id,))
-    
-    always_check = cursor.fetchall()
-    if always_check:
-        output.append("\n⚠️ High-Priority Rules (Always Checked):")
-        for ctx in always_check:
-            metadata = json.loads(ctx['metadata']) if ctx['metadata'] else {}
-            tags = metadata.get('tags', [])
-            tag_str = f" ({', '.join(tags[:2])})" if tags else ""
-            output.append(f"   • {ctx['label']} v{ctx['version']}{tag_str}")
-    
-    # Get important contexts
-    cursor = conn.execute("""
-        SELECT label, version, metadata 
-        FROM context_locks 
-        WHERE session_id = ? 
-        AND json_extract(metadata, '$.priority') = 'important'
-        ORDER BY locked_at DESC
-        LIMIT 3
-    """, (session_id,))
-    
-    important = cursor.fetchall()
-    if important:
-        output.append("\n📌 Important Contexts:")
-        for ctx in important:
-            output.append(f"   • {ctx['label']} v{ctx['version']}")
-    
-    # Show regular locked contexts count
-    cursor = conn.execute("""
-        SELECT COUNT(DISTINCT label) as count 
-        FROM context_locks 
-        WHERE session_id = ?
-    """, (session_id,))
-    
-    total = cursor.fetchone()
-    if total and total['count'] > 0:
-        shown = len(always_check or []) + len(important or [])
-        remaining = total['count'] - shown
-        if remaining > 0:
-            output.append(f"\n📚 Plus {remaining} reference contexts available")
-    
-    # Check for issues needing attention
-    cursor = conn.execute("""
-        SELECT COUNT(*) as count FROM memory 
-        WHERE category = 'error' 
-          AND timestamp > ?
-    """, (time.time() - 86400,))  # Last 24 hours
-    
-    errors = cursor.fetchone()
-    if errors and errors['count'] > 0:
-        output.append(f"\n⚠️ {errors['count']} errors in last 24h need attention")
-    
-    return "\n".join(output)
+            session_data["handover"] = {
+                "available": True,
+                "timestamp": handover['timestamp'],
+                "hours_ago": round(hours_ago, 1),
+                "summary": handover_data
+            }
+        except:
+            session_data["handover"] = {
+                "available": False,
+                "reason": "corrupted_data"
+            }
+
+    # Memory health
+    total_size = sum(len(ctx['content'] or '') for ctx in all_contexts)
+    total_size_mb = total_size / (1024 * 1024)
+    capacity_mb = 50  # Current limit
+
+    session_data["memory_health"] = {
+        "total_contexts": len(all_contexts),
+        "total_size_mb": round(total_size_mb, 2),
+        "capacity_mb": capacity_mb,
+        "usage_percent": round((total_size_mb / capacity_mb) * 100, 1),
+        "status": "healthy" if total_size_mb < capacity_mb * 0.8 else "near_capacity"
+    }
+
+    return json.dumps(session_data, indent=2)
+
 
 @mcp.tool()
 async def sleep() -> str:
