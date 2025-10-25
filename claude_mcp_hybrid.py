@@ -510,6 +510,23 @@ def initialize_database(conn):
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_type ON file_semantic_model(session_id, file_type)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_standard ON file_semantic_model(session_id, is_standard)')
 
+    # Create query_results_cache table (v4.3.0 - pagination support)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS query_results_cache (
+            query_id TEXT PRIMARY KEY,
+            query_type TEXT NOT NULL,
+            query_params TEXT,
+            total_results INTEGER NOT NULL,
+            result_data TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            expires_at REAL NOT NULL,
+            session_id TEXT,
+            FOREIGN KEY (session_id) REFERENCES sessions(id)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_qrc_expires ON query_results_cache(expires_at)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_qrc_session ON query_results_cache(session_id)')
+
     # Create file_change_history table (optional, for tracking changes over time)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS file_change_history (
@@ -1179,6 +1196,122 @@ def record_file_change(conn, session_id: str, file_path: str, change_type: str,
 
 
 # ============================================================================
+# PAGINATION HELPERS (v4.3.0 - Token Optimization)
+# ============================================================================
+
+def store_query_results(conn, query_type: str, params: dict, results: list,
+                       ttl_seconds: int = 3600) -> str:
+    """
+    Store query results in database for pagination.
+
+    Purpose: Database-first pattern - process all results, store in DB,
+    return only summary + query_id for later retrieval.
+
+    Args:
+        conn: Database connection
+        query_type: Type of query (e.g., 'query_files', 'search_contexts')
+        params: Query parameters (for cache key)
+        results: Full list of results to store
+        ttl_seconds: Time to live (default: 1 hour)
+
+    Returns:
+        query_id: Unique identifier for retrieving results
+
+    Example:
+        query_id = store_query_results(conn, 'query_files', {'query': 'auth'}, all_files)
+        # Later: get_query_page(conn, query_id, offset=10, limit=10)
+    """
+    session_id = get_current_session_id()
+
+    # Create deterministic query_id from query_type + params
+    query_id = hashlib.md5(
+        f"{query_type}:{json.dumps(params, sort_keys=True)}".encode()
+    ).hexdigest()[:12]
+
+    conn.execute("""
+        INSERT OR REPLACE INTO query_results_cache
+        (query_id, query_type, query_params, total_results, result_data,
+         created_at, expires_at, session_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        query_id,
+        query_type,
+        json.dumps(params),
+        len(results),
+        json.dumps(results),
+        time.time(),
+        time.time() + ttl_seconds,
+        session_id
+    ))
+
+    return query_id
+
+
+def get_query_page_data(conn, query_id: str, offset: int = 0, limit: int = 20) -> dict:
+    """
+    Retrieve paginated results from stored query.
+
+    Args:
+        conn: Database connection
+        query_id: Query identifier from store_query_results()
+        offset: Starting index (0-based)
+        limit: Number of results to return
+
+    Returns:
+        dict with: {
+            query_id, query_type, total_results,
+            offset, limit, page_size, has_more, results
+        }
+
+    Example:
+        page = get_query_page_data(conn, 'abc123', offset=10, limit=10)
+        # Returns results [10-20] of total results
+    """
+    cursor = conn.execute("""
+        SELECT query_type, query_params, total_results, result_data
+        FROM query_results_cache
+        WHERE query_id = ? AND expires_at > ?
+    """, (query_id, time.time()))
+
+    row = cursor.fetchone()
+    if not row:
+        return {"error": "Query not found or expired"}
+
+    all_results = json.loads(row['result_data'])
+    page_results = all_results[offset:offset + limit]
+
+    return {
+        "query_id": query_id,
+        "query_type": row['query_type'],
+        "query_params": json.loads(row['query_params']),
+        "total_results": row['total_results'],
+        "offset": offset,
+        "limit": limit,
+        "page_size": len(page_results),
+        "has_more": offset + limit < row['total_results'],
+        "results": page_results
+    }
+
+
+def cleanup_expired_queries(conn):
+    """
+    Remove expired query results (auto-cleanup).
+
+    Call this periodically (e.g., in wake_up()) to prevent database bloat.
+    """
+    cursor = conn.execute("""
+        DELETE FROM query_results_cache
+        WHERE expires_at < ?
+    """, (time.time(),))
+
+    deleted_count = cursor.rowcount
+    if deleted_count > 0:
+        conn.commit()
+
+    return deleted_count
+
+
+# ============================================================================
 # SESSION MANAGEMENT (unchanged from before)
 # ============================================================================
 
@@ -1189,10 +1322,18 @@ async def wake_up() -> str:
     Returns structured JSON with session info, git status, contexts, and staleness warnings.
 
     Purpose: Help LLM understand what data/tools are available to minimize confusion.
+
+    **Token efficiency: SUMMARY** (~2-5KB)
+    - Returns counts and summaries only
+    - Use get_last_handover() for full handover
+    - Use explore_context_tree() for context list
     """
     update_session_activity()
     conn = get_db()
     session_id = get_current_session_id()
+
+    # Cleanup expired queries (maintenance)
+    cleanup_expired_queries(conn)
 
     # Get git status
     git_info = get_git_status()
@@ -1696,6 +1837,47 @@ async def get_last_handover() -> str:
             "reason": "corrupted_data",
             "error": str(e)
         }, indent=2)
+
+@mcp.tool()
+async def get_query_page(query_id: str, offset: int = 0, limit: int = 20) -> str:
+    """
+    Retrieve paginated results from a previous query.
+
+    **Purpose:** Get additional results from queries that returned a query_id.
+
+    **Token efficiency: PREVIEW** (varies by limit, typically <5KB per page)
+
+    Use this to retrieve more results from queries like:
+    - query_files()
+    - search_contexts()
+    - Any future tools that return query_id for pagination
+
+    Args:
+        query_id: Query identifier from previous query
+        offset: Starting index (0-based)
+        limit: Number of results to return (default: 20)
+
+    Returns: JSON with:
+        - results: Page of results
+        - pagination info: offset, limit, total, has_more
+        - query details: query_type, parameters
+
+    Example:
+    ```python
+    # Initial query returns preview + query_id
+    result = query_files("authentication")
+    # → {total: 50, preview: [5 files], query_id: "abc123"}
+
+    # Get next page
+    page2 = get_query_page("abc123", offset=5, limit=10)
+    # → {results: [files 5-15], has_more: true}
+    ```
+
+    Note: Query results expire after 1 hour (TTL). If expired, run the query again.
+    """
+    conn = get_db()
+    result = get_query_page_data(conn, query_id, offset, limit)
+    return json.dumps(result, indent=2)
 
 # ============================================================================
 # MEMORY MANAGEMENT (unchanged)

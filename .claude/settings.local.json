@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "mcp__sequential-thinking__sequentialthinking",
-      "Bash(timeout 3 python3 /Users/banton/Sites/claude-dementia/claude_mcp_hybrid.py)"
+      "Bash(timeout 3 python3 /Users/banton/Sites/claude-dementia/claude_mcp_hybrid.py)",
+      "Bash(test:*)"
     ],
     "deny": [],
     "ask": [],
