@@ -2123,6 +2123,355 @@ async def batch_recall_contexts(topics: str) -> str:
 
 
 
+
+@mcp.tool()
+async def search_contexts(
+    query: str,
+    priority: Optional[str] = None,
+    tags: Optional[str] = None,
+    limit: int = 10
+) -> str:
+    """
+    Search locked contexts by content (full-text search).
+
+    **Purpose:** Find contexts by what they contain, not just their label
+
+    **Parameters:**
+    - query: Search term (searches in content, preview, key_concepts, label)
+    - priority: Filter by priority (always_check/important/reference)
+    - tags: Filter by tags (comma-separated)
+    - limit: Max results to return (default: 10)
+
+    **Returns:** JSON with matching contexts sorted by relevance score
+
+    **Relevance scoring:**
+    - Exact label match: 1.0 points
+    - Key concepts match: 0.7 points
+    - Content match: 0.5 points
+    - Preview match: 0.3 points
+
+    **Example:**
+    ```
+    search_contexts("authentication")
+    search_contexts("JWT", priority="important")
+    search_contexts("database", tags="schema,migration", limit=5)
+    ```
+
+    **Use cases:**
+    - Find contexts related to a topic
+    - Locate context by remembered content
+    - Discover relevant contexts for current work
+    - Filter contexts by priority/tags
+    """
+    conn = get_db()
+    session_id = get_current_session_id()
+
+    # Build SQL query
+    sql = """
+        SELECT
+            label, version, content, preview, key_concepts,
+            locked_at, metadata, last_accessed, access_count
+        FROM context_locks
+        WHERE session_id = ?
+          AND (
+              content LIKE ?
+              OR preview LIKE ?
+              OR key_concepts LIKE ?
+              OR label LIKE ?
+          )
+    """
+
+    params = [session_id, f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%']
+
+    # Add priority filter
+    if priority:
+        sql += " AND json_extract(metadata, '$.priority') = ?"
+        params.append(priority)
+
+    # Add tags filter
+    if tags:
+        tag_conditions = []
+        for tag in tags.split(','):
+            tag = tag.strip()
+            tag_conditions.append("json_extract(metadata, '$.tags') LIKE ?")
+            params.append(f'%{tag}%')
+        sql += f" AND ({' OR '.join(tag_conditions)})"
+
+    sql += " LIMIT ?"
+    params.append(limit)
+
+    try:
+        cursor = conn.execute(sql, params)
+        results = cursor.fetchall()
+
+        if not results:
+            return json.dumps({
+                "query": query,
+                "filters": {
+                    "priority": priority,
+                    "tags": tags
+                },
+                "total_found": 0,
+                "message": "No contexts found matching query",
+                "results": []
+            }, indent=2)
+
+        # Calculate relevance scores
+        scored_results = []
+        for row in results:
+            score = 0.0
+
+            # Exact label match = highest score
+            if query.lower() in row['label'].lower():
+                score += 1.0
+
+            # Key concepts match
+            if row['key_concepts'] and query.lower() in row['key_concepts'].lower():
+                score += 0.7
+
+            # Content match
+            if row['content'] and query.lower() in row['content'].lower():
+                score += 0.5
+
+            # Preview match
+            if row['preview'] and query.lower() in row['preview'].lower():
+                score += 0.3
+
+            # Parse metadata
+            metadata = json.loads(row['metadata']) if row['metadata'] else {}
+
+            scored_results.append({
+                "label": row['label'],
+                "version": row['version'],
+                "score": round(score, 2),
+                "preview": row['preview'] or row['content'][:200] + "..." if row['content'] else "",
+                "priority": metadata.get('priority', 'reference'),
+                "tags": metadata.get('tags', []),
+                "last_accessed": row['last_accessed'],
+                "access_count": row['access_count'] or 0
+            })
+
+        # Sort by score (highest first)
+        scored_results.sort(key=lambda x: x['score'], reverse=True)
+
+        return json.dumps({
+            "query": query,
+            "filters": {
+                "priority": priority,
+                "tags": tags,
+                "limit": limit
+            },
+            "total_found": len(scored_results),
+            "results": scored_results
+        }, indent=2)
+
+    except Exception as e:
+        return f"❌ Search error: {str(e)}"
+
+
+
+@mcp.tool()
+async def memory_analytics() -> str:
+    """
+    Analyze memory system usage and health.
+
+    **Purpose:** Understand memory patterns, identify waste, get recommendations
+
+    **Returns:** JSON with comprehensive analytics:
+    - Overview: Total contexts, size, age
+    - Most accessed: Top 10 frequently used contexts
+    - Least accessed: Never-accessed contexts (candidates for cleanup)
+    - Largest contexts: Storage hogs
+    - Stale contexts: Not accessed in 30+ days
+    - By priority: Distribution across priority levels
+    - Recommendations: Actionable cleanup suggestions
+
+    **Use cases:**
+    - Identify unused contexts for cleanup
+    - Find most valuable contexts (high access count)
+    - Monitor storage usage
+    - Optimize memory system
+    - Plan capacity
+
+    **Example output:**
+    ```json
+    {
+      "overview": {
+        "total_contexts": 42,
+        "total_size_mb": 5.2,
+        "average_size_kb": 127
+      },
+      "recommendations": [
+        "Consider unlocking 8 stale contexts (not accessed in 30+ days)",
+        "12 contexts never accessed - verify still needed"
+      ]
+    }
+    ```
+    """
+    conn = get_db()
+    session_id = get_current_session_id()
+
+    analytics = {
+        "overview": {},
+        "most_accessed": [],
+        "least_accessed": [],
+        "largest_contexts": [],
+        "stale_contexts": [],
+        "by_priority": {},
+        "recommendations": []
+    }
+
+    # Overview statistics
+    cursor = conn.execute("""
+        SELECT
+            COUNT(*) as total,
+            SUM(LENGTH(content)) as total_bytes,
+            AVG(LENGTH(content)) as avg_bytes,
+            MIN(locked_at) as oldest,
+            MAX(locked_at) as newest
+        FROM context_locks
+        WHERE session_id = ?
+    """, (session_id,))
+    overview = cursor.fetchone()
+
+    if overview and overview['total'] > 0:
+        analytics["overview"] = {
+            "total_contexts": overview['total'],
+            "total_size_mb": round(overview['total_bytes'] / (1024*1024), 2),
+            "average_size_kb": round(overview['avg_bytes'] / 1024, 2),
+            "oldest_context_age_days": round((time.time() - overview['oldest']) / 86400, 1),
+            "newest_context_age_days": round((time.time() - overview['newest']) / 86400, 1)
+        }
+    else:
+        return json.dumps({
+            "message": "No contexts found in memory",
+            "overview": {"total_contexts": 0}
+        }, indent=2)
+
+    # Most accessed (top 10)
+    cursor = conn.execute("""
+        SELECT
+            label, version, access_count,
+            last_accessed, LENGTH(content) as size_bytes
+        FROM context_locks
+        WHERE session_id = ? AND access_count > 0
+        ORDER BY access_count DESC
+        LIMIT 10
+    """, (session_id,))
+    analytics["most_accessed"] = [
+        {
+            "label": row['label'],
+            "version": row['version'],
+            "access_count": row['access_count'],
+            "size_kb": round(row['size_bytes'] / 1024, 2),
+            "last_accessed_days_ago": round((time.time() - row['last_accessed']) / 86400, 1) if row['last_accessed'] else None
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # Least accessed (never accessed)
+    cursor = conn.execute("""
+        SELECT
+            label, version, locked_at, LENGTH(content) as size_bytes
+        FROM context_locks
+        WHERE session_id = ? AND (access_count IS NULL OR access_count = 0)
+        ORDER BY locked_at DESC
+        LIMIT 10
+    """, (session_id,))
+    analytics["least_accessed"] = [
+        {
+            "label": row['label'],
+            "version": row['version'],
+            "locked_days_ago": round((time.time() - row['locked_at']) / 86400, 1),
+            "size_kb": round(row['size_bytes'] / 1024, 2)
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # Largest contexts (top 10 storage hogs)
+    cursor = conn.execute("""
+        SELECT
+            label, version, LENGTH(content) as size_bytes, access_count
+        FROM context_locks
+        WHERE session_id = ?
+        ORDER BY LENGTH(content) DESC
+        LIMIT 10
+    """, (session_id,))
+    analytics["largest_contexts"] = [
+        {
+            "label": row['label'],
+            "version": row['version'],
+            "size_kb": round(row['size_bytes'] / 1024, 2),
+            "access_count": row['access_count'] or 0
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # Stale contexts (not accessed in 30+ days)
+    thirty_days_ago = time.time() - (30 * 86400)
+    cursor = conn.execute("""
+        SELECT
+            label, version, last_accessed, LENGTH(content) as size_bytes
+        FROM context_locks
+        WHERE session_id = ?
+          AND (last_accessed IS NULL OR last_accessed < ?)
+        ORDER BY last_accessed ASC NULLS FIRST
+    """, (session_id, thirty_days_ago))
+    analytics["stale_contexts"] = [
+        {
+            "label": row['label'],
+            "version": row['version'],
+            "days_since_access": round((time.time() - row['last_accessed']) / 86400, 1) if row['last_accessed'] else "never",
+            "size_kb": round(row['size_bytes'] / 1024, 2)
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # By priority distribution
+    cursor = conn.execute("""
+        SELECT
+            json_extract(metadata, '$.priority') as priority,
+            COUNT(*) as count,
+            SUM(LENGTH(content)) as total_bytes
+        FROM context_locks
+        WHERE session_id = ?
+        GROUP BY json_extract(metadata, '$.priority')
+    """, (session_id,))
+
+    analytics["by_priority"] = {}
+    for row in cursor.fetchall():
+        priority = row['priority'] or 'reference'
+        analytics["by_priority"][priority] = {
+            "count": row['count'],
+            "size_mb": round(row['total_bytes'] / (1024*1024), 2)
+        }
+
+    # Generate recommendations
+    if len(analytics["stale_contexts"]) > 0:
+        analytics["recommendations"].append(
+            f"Consider unlocking {len(analytics['stale_contexts'])} stale contexts (not accessed in 30+ days)"
+        )
+
+    if len(analytics["least_accessed"]) > 5:
+        analytics["recommendations"].append(
+            f"{len(analytics['least_accessed'])} contexts have never been accessed - verify they're still needed"
+        )
+
+    total_mb = analytics["overview"]["total_size_mb"]
+    capacity_mb = 50  # Current limit
+    usage_percent = (total_mb / capacity_mb) * 100
+
+    if usage_percent > 80:
+        analytics["recommendations"].append(
+            f"Memory usage at {total_mb}MB ({usage_percent:.1f}% of {capacity_mb}MB limit) - consider cleanup"
+        )
+
+    if not analytics["recommendations"]:
+        analytics["recommendations"].append("Memory system looks healthy - no immediate actions needed")
+
+    return json.dumps(analytics, indent=2)
+
+
 @mcp.tool()
 async def sync_project_memory(
     path: Optional[str] = None,
