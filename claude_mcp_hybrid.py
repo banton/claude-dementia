@@ -1309,66 +1309,47 @@ async def wake_up() -> str:
             "reason": "not_a_git_repo_or_no_access"
         },
         "file_model": file_model_data,
-        "contexts": {
-            "total_count": 0,
-            "by_priority": {
-                "always_check": [],
-                "important": [],
-                "reference": []
-            }
-        },
-        "stale_contexts": [],
-        "handover": None,
+        "contexts": None,  # Will be filled with counts only
+        "handover": None,  # Will be filled with availability only
         "memory_health": None
     }
 
-    # Get all contexts grouped by priority
+    # Get context COUNTS only (not full data - use explore_context_tree for that)
     cursor = conn.execute("""
-        SELECT id, label, version, locked_at, metadata, last_accessed, access_count, content
+        SELECT metadata, last_accessed, locked_at, label, version, content
         FROM context_locks
         WHERE session_id = ?
-        ORDER BY locked_at DESC
     """, (session_id,))
 
     all_contexts = cursor.fetchall()
-    stale_contexts = []
+
+    # Count by priority (minimal data)
+    priority_counts = {"always_check": 0, "important": 0, "reference": 0}
+    stale_count = 0
 
     for ctx_row in all_contexts:
         metadata = json.loads(ctx_row['metadata']) if ctx_row['metadata'] else {}
         priority = metadata.get('priority', 'reference')
-        tags = metadata.get('tags', [])
 
-        ctx_info = {
-            "label": ctx_row['label'],
-            "version": ctx_row['version'],
-            "locked_at": ctx_row['locked_at'],
-            "size_bytes": len(ctx_row['content']) if ctx_row['content'] else 0,
-            "tags": tags,
-            "last_accessed": ctx_row['last_accessed'],
-            "access_count": ctx_row['access_count'] or 0
-        }
+        if priority in priority_counts:
+            priority_counts[priority] += 1
 
-        # Check staleness
+        # Check staleness (just count, don't return details)
         context_dict = dict(ctx_row)
         staleness = check_context_staleness(context_dict, git_info)
         if staleness:
-            ctx_info["stale"] = True
-            stale_contexts.append({
-                "label": ctx_row['label'],
-                "version": ctx_row['version'],
-                **staleness
-            })
+            stale_count += 1
 
-        # Add to appropriate priority group
-        if priority in session_data["contexts"]["by_priority"]:
-            session_data["contexts"]["by_priority"][priority].append(ctx_info)
+    session_data["contexts"] = {
+        "total_count": len(all_contexts),
+        "by_priority": priority_counts,
+        "stale_count": stale_count
+        # NOTE: Use explore_context_tree() to see full context list
+    }
 
-    session_data["contexts"]["total_count"] = len(all_contexts)
-    session_data["stale_contexts"] = stale_contexts
-
-    # Get handover if available
+    # Get handover if available (MINIMAL - just availability, not full content)
     cursor = conn.execute("""
-        SELECT content, metadata, timestamp FROM memory_entries
+        SELECT timestamp FROM memory_entries
         WHERE category = 'handover'
         ORDER BY timestamp DESC
         LIMIT 1
@@ -1377,19 +1358,12 @@ async def wake_up() -> str:
 
     if handover:
         hours_ago = (time.time() - handover['timestamp']) / 3600
-        try:
-            handover_data = json.loads(handover['metadata'])
-            session_data["handover"] = {
-                "available": True,
-                "timestamp": handover['timestamp'],
-                "hours_ago": round(hours_ago, 1),
-                "summary": handover_data
-            }
-        except:
-            session_data["handover"] = {
-                "available": False,
-                "reason": "corrupted_data"
-            }
+        session_data["handover"] = {
+            "available": True,
+            "timestamp": handover['timestamp'],
+            "hours_ago": round(hours_ago, 1)
+            # NOTE: Use get_last_handover() tool to retrieve full content
+        }
 
     # Memory health
     total_size = sum(len(ctx['content'] or '') for ctx in all_contexts)
@@ -1672,6 +1646,56 @@ async def sleep() -> str:
     output.append("Your context and progress are preserved!")
     
     return "\n".join(output)
+
+@mcp.tool()
+async def get_last_handover() -> str:
+    """
+    Retrieve the last session handover package.
+
+    **Purpose:** Get full details of what was accomplished in the previous session.
+
+    **Returns:** JSON with work done, pending tasks, locked contexts, and next steps.
+
+    **Token efficiency:** Returns full handover (~2-5KB). Use only when needed.
+    wake_up() only shows availability - use this tool to get full details.
+
+    **Example:**
+    ```python
+    # wake_up() shows: "handover": {"available": true, "hours_ago": 2.5}
+    # Then call this to get details:
+    result = get_last_handover()
+    # Returns: {work_done, next_steps, important_context, ...}
+    ```
+    """
+    conn = get_db()
+
+    cursor = conn.execute("""
+        SELECT content, metadata, timestamp FROM memory_entries
+        WHERE category = 'handover'
+        ORDER BY timestamp DESC
+        LIMIT 1
+    """)
+    handover = cursor.fetchone()
+
+    if not handover:
+        return json.dumps({"available": False, "reason": "no_handover_found"}, indent=2)
+
+    try:
+        handover_data = json.loads(handover['metadata'])
+        hours_ago = (time.time() - handover['timestamp']) / 3600
+
+        return json.dumps({
+            "available": True,
+            "timestamp": handover['timestamp'],
+            "hours_ago": round(hours_ago, 1),
+            "content": handover_data
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "available": False,
+            "reason": "corrupted_data",
+            "error": str(e)
+        }, indent=2)
 
 # ============================================================================
 # MEMORY MANAGEMENT (unchanged)
