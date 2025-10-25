@@ -2,6 +2,7 @@
 
 import requests
 from typing import Optional
+import time
 
 
 class OllamaLLMService:
@@ -10,11 +11,13 @@ class OllamaLLMService:
     def __init__(
         self,
         base_url: str = "http://localhost:11434",
-        default_model: str = "mistral"
+        default_model: str = "mistral",
+        token_tracker=None
     ):
         self.base_url = base_url
         self.default_model = default_model
         self.enabled = self._check_ollama_available()
+        self.token_tracker = token_tracker
 
     def _check_ollama_available(self) -> bool:
         """Check if Ollama is running and model is available."""
@@ -34,7 +37,8 @@ class OllamaLLMService:
         model: Optional[str] = None,
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 1000
+        max_tokens: int = 1000,
+        context_id: Optional[int] = None
     ) -> Optional[str]:
         """
         Generate chat completion via Ollama.
@@ -53,6 +57,8 @@ class OllamaLLMService:
         messages.append({"role": "user", "content": prompt})
 
         try:
+            start_time = time.time()
+
             response = requests.post(
                 f"{self.base_url}/api/chat",
                 json={
@@ -68,8 +74,24 @@ class OllamaLLMService:
             )
             response.raise_for_status()
 
+            duration_ms = int((time.time() - start_time) * 1000)
+
             data = response.json()
-            return data['message']['content']
+            output = data['message']['content']
+
+            # Track usage
+            if self.token_tracker:
+                input_text = (system_prompt or "") + prompt
+                self.token_tracker.track_llm_completion(
+                    input_text=input_text,
+                    output_text=output,
+                    model=model or self.default_model,
+                    provider='ollama',
+                    duration_ms=duration_ms,
+                    context_id=context_id
+                )
+
+            return output
         except Exception as e:
             print(f"Ollama completion failed: {e}")
             return None

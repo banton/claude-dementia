@@ -5121,7 +5121,7 @@ async def generate_embeddings(
         generate_embeddings(regenerate=True)  # Regenerate all
     """
     try:
-        from src.services import embedding_service
+        from src.services import embedding_service, init_token_tracker
         from src.services.semantic_search import SemanticSearch
     except Exception as e:
         return json.dumps({
@@ -5138,6 +5138,10 @@ async def generate_embeddings(
         }, indent=2)
 
     conn = get_db()
+
+    # Initialize token tracker
+    init_token_tracker(conn)
+
     semantic_search = SemanticSearch(conn, embedding_service)
 
     # Determine which contexts to process
@@ -5396,6 +5400,99 @@ async def embedding_status() -> str:
         }
 
     return json.dumps(status, indent=2)
+
+
+@mcp.tool()
+async def usage_statistics(days: int = 30) -> str:
+    """
+    Get detailed token usage statistics for cost analysis.
+
+    **Token Efficiency: SUMMARY** (~2-3KB)
+
+    Args:
+        days: Number of days to analyze (default: 30)
+
+    Returns: Detailed usage statistics including:
+        - Operation counts
+        - Token counts by operation type
+        - Performance metrics (avg duration)
+        - Model breakdown
+
+    Example:
+        usage_statistics()  # Last 30 days
+        usage_statistics(days=7)  # Last week
+        usage_statistics(days=90)  # Last quarter
+    """
+    try:
+        from src.services import init_token_tracker
+    except Exception as e:
+        return json.dumps({
+            "error": "Token tracker initialization failed",
+            "reason": str(e)
+        }, indent=2)
+
+    conn = get_db()
+    tracker = init_token_tracker(conn)
+
+    stats = tracker.get_usage_stats(days=days)
+
+    return json.dumps(stats, indent=2)
+
+
+@mcp.tool()
+async def cost_comparison(days: int = 30) -> str:
+    """
+    Compare actual costs (FREE with Ollama) vs OpenAI API costs.
+
+    **Token Efficiency: SUMMARY** (~2-3KB)
+
+    Args:
+        days: Number of days to analyze (default: 30)
+
+    Returns: Cost comparison showing:
+        - Actual cost: $0.00 (Ollama)
+        - OpenAI embedding cost (if you used text-embedding-3-small)
+        - OpenAI GPT-3.5 cost (if you used GPT-3.5 Turbo)
+        - OpenAI GPT-4 cost (if you used GPT-4 Turbo)
+        - Total savings
+
+    This tool helps justify using local models by showing:
+    - How much you would have spent with OpenAI
+    - Token usage patterns
+    - Performance metrics
+
+    Example:
+        cost_comparison()  # Monthly comparison
+        cost_comparison(days=7)  # Weekly
+        cost_comparison(days=365)  # Annual projection
+    """
+    try:
+        from src.services import init_token_tracker
+    except Exception as e:
+        return json.dumps({
+            "error": "Token tracker initialization failed",
+            "reason": str(e)
+        }, indent=2)
+
+    conn = get_db()
+    tracker = init_token_tracker(conn)
+
+    comparison = tracker.get_cost_comparison(days=days)
+
+    # Calculate annual projection
+    if days > 0:
+        daily_savings = {}
+        for alt_name, alt_data in comparison['cost_comparison']['alternatives'].items():
+            daily_cost = alt_data['cost_usd'] / days
+            annual_cost = daily_cost * 365
+            daily_savings[alt_name] = {
+                'daily_avg': daily_cost,
+                'annual_projected': annual_cost
+            }
+
+        comparison['projections'] = daily_savings
+
+    return json.dumps(comparison, indent=2)
 
 
 # ============================================================================

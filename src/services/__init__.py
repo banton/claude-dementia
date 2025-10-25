@@ -3,6 +3,17 @@
 from typing import Optional
 from src.config import config
 
+# Global token tracker (initialized when get_db is called)
+_token_tracker = None
+
+
+def init_token_tracker(conn):
+    """Initialize token tracker with database connection."""
+    global _token_tracker
+    from src.services.token_tracker import TokenTracker
+    _token_tracker = TokenTracker(conn)
+    return _token_tracker
+
 
 def get_embedding_service():
     """Get embedding service based on configuration."""
@@ -11,7 +22,8 @@ def get_embedding_service():
     if config.embedding_provider == "ollama":
         service = OllamaEmbeddingService(
             base_url=config.ollama_base_url,
-            model=config.embedding_model
+            model=config.embedding_model,
+            token_tracker=_token_tracker
         )
         if service.enabled:
             return service
@@ -45,7 +57,8 @@ def get_llm_service():
     if config.llm_provider == "ollama":
         service = OllamaLLMService(
             base_url=config.ollama_base_url,
-            default_model=config.llm_model
+            default_model=config.llm_model,
+            token_tracker=_token_tracker
         )
         if service.enabled:
             return service

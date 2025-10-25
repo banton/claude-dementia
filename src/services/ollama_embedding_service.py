@@ -3,6 +3,7 @@
 import requests
 from typing import List, Optional
 import numpy as np
+import time
 
 
 class OllamaEmbeddingService:
@@ -11,12 +12,14 @@ class OllamaEmbeddingService:
     def __init__(
         self,
         base_url: str = "http://localhost:11434",
-        model: str = "nomic-embed-text"
+        model: str = "nomic-embed-text",
+        token_tracker=None
     ):
         self.base_url = base_url
         self.model = model
         self.dimensions = 768  # nomic-embed-text dimensions
         self.enabled = self._check_ollama_available()
+        self.token_tracker = token_tracker
 
     def _check_ollama_available(self) -> bool:
         """Check if Ollama is running and model is available."""
@@ -30,7 +33,7 @@ class OllamaEmbeddingService:
         except Exception:
             return False
 
-    def generate_embedding(self, text: str) -> Optional[List[float]]:
+    def generate_embedding(self, text: str, context_id: Optional[int] = None) -> Optional[List[float]]:
         """
         Generate embedding vector for text.
 
@@ -43,6 +46,8 @@ class OllamaEmbeddingService:
             return None
 
         try:
+            start_time = time.time()
+
             response = requests.post(
                 f"{self.base_url}/api/embeddings",
                 json={
@@ -53,8 +58,22 @@ class OllamaEmbeddingService:
             )
             response.raise_for_status()
 
+            duration_ms = int((time.time() - start_time) * 1000)
+
             data = response.json()
-            return data['embedding']
+            embedding = data['embedding']
+
+            # Track usage
+            if self.token_tracker:
+                self.token_tracker.track_embedding(
+                    text=text,
+                    model=self.model,
+                    provider='ollama',
+                    duration_ms=duration_ms,
+                    context_id=context_id
+                )
+
+            return embedding
         except Exception as e:
             print(f"Ollama embedding generation failed: {e}")
             return None
