@@ -146,7 +146,7 @@ FILE_TYPE_MAP = {
     '.env': ('environment_config', None),
     '.conf': ('config', None),
     '.ini': ('config', None),
-    '.cfg': ('config', None'),
+    '.cfg': ('config', None),
 
     # Documentation
     '.txt': ('text', None),

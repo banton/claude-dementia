@@ -206,6 +206,26 @@ def get_db():
             print(f"File permissions: {oct(os.stat(DB_PATH).st_mode)}", file=sys.stderr)
         raise
 
+def is_project_directory(path: str) -> bool:
+    """Check if path is a project directory (has .git, package.json, requirements.txt, etc)"""
+    project_markers = [
+        '.git',
+        'package.json',
+        'requirements.txt',
+        'pyproject.toml',
+        'Cargo.toml',
+        'go.mod',
+        'pom.xml',
+        'build.gradle',
+        'Makefile'
+    ]
+
+    for marker in project_markers:
+        if os.path.exists(os.path.join(path, marker)):
+            return True
+
+    return False
+
 def initialize_database(conn):
     """Create database tables if they don't exist and migrate existing schemas"""
     cursor = conn.cursor()
@@ -1234,10 +1254,11 @@ async def wake_up() -> str:
 
                     # Track changes
                     if stored_meta:
-                        record_file_change(conn, session_id, file_path, 'modified', stored_meta.get('content_hash'), new_hash)
+                        size_delta = metadata['file_size'] - stored_meta.get('file_size', 0)
+                        record_file_change(conn, session_id, file_path, 'modified', stored_meta.get('content_hash'), new_hash, size_delta)
                         changed_files.append(file_path)
                     else:
-                        record_file_change(conn, session_id, file_path, 'added', None, new_hash)
+                        record_file_change(conn, session_id, file_path, 'added', None, new_hash, metadata['file_size'])
                         changed_files.append(file_path)
 
                     analyzed_files.append(metadata)
