@@ -3,7 +3,13 @@
     "allow": [
       "mcp__sequential-thinking__sequentialthinking",
       "Bash(timeout 3 python3 /Users/banton/Sites/claude-dementia/claude_mcp_hybrid.py)",
-      "Bash(test:*)"
+      "Bash(test:*)",
+      "WebSearch",
+      "Bash(git stash push:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(python3:*)",
+      "Read(//var/folders/lp/y8m8sn3s4d1bp2959n1cpqx40000gn/T/TemporaryItems/NSIRD_screencaptureui_Hx6XnH/**)"
     ],
     "deny": [],
     "ask": [],
