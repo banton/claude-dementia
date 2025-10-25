@@ -1490,11 +1490,27 @@ async def wake_up() -> str:
         if staleness:
             stale_count += 1
 
+    # Add token cost estimates for context operations
+    context_count = len(all_contexts)
+    token_estimates = {
+        "explore_tree_flat": "~1,000 tokens ✅",
+        "explore_tree_full": f"~{context_count * 50:,} tokens",
+        "recall_single_preview": "~350 tokens ✅",
+        "recall_single_full": "~900 tokens"
+    }
+
+    # Add warning if context count is high
+    overflow_warning = None
+    if context_count > 50:
+        overflow_warning = f"⚠️ High context count ({context_count}). Use flat=True for explore_context_tree() to avoid overflow."
+
     session_data["contexts"] = {
-        "total_count": len(all_contexts),
+        "total_count": context_count,
         "by_priority": priority_counts,
-        "stale_count": stale_count
-        # NOTE: Use explore_context_tree() to see full context list
+        "stale_count": stale_count,
+        "token_estimates": token_estimates,
+        "overflow_warning": overflow_warning
+        # NOTE: Use explore_context_tree(flat=True) to see labels (token-efficient)
     }
 
     # Get handover if available (MINIMAL - just availability, not full content)
@@ -4374,14 +4390,18 @@ async def check_contexts(text: str) -> str:
     return "\n".join(output)
 
 @mcp.tool()
-async def explore_context_tree(flat: bool = False) -> str:
+async def explore_context_tree(flat: bool = True, confirm_full: bool = False) -> str:
     """
     Browse all your locked contexts organized by priority and tags.
 
+    **Token Efficiency:** flat=True uses ~1K tokens, flat=False uses ~50 tokens per context
+
     **Parameters:**
-    - flat: bool = False
-      - If True: Returns simple list (replacement for removed list_topics())
-      - If False: Returns grouped tree view with previews (default)
+    - flat: bool = True (CHANGED: was False)
+      - If True: Returns simple list (DEFAULT for token efficiency)
+      - If False: Returns grouped tree view with previews (requires confirm_full=True for large sets)
+    - confirm_full: bool = False
+      - Required safety check when flat=False and >50 contexts exist
 
     **When to use this tool:**
     - At session start to see what contexts exist
@@ -4456,6 +4476,19 @@ async def explore_context_tree(flat: bool = False) -> str:
 
     if not contexts:
         return "No locked contexts yet." if flat else "📭 No locked contexts yet.\n\n💡 Use lock_context() to save important information for future reference."
+
+    # Safety check: Warn about high token cost for full tree mode
+    if not flat and len(contexts) > 50 and not confirm_full:
+        estimated_tokens = len(contexts) * 50
+        return json.dumps({
+            "error": "High token cost operation requires confirmation",
+            "context_count": len(contexts),
+            "estimated_tokens": estimated_tokens,
+            "current_mode": "tree (with previews)",
+            "recommendation": "Use flat=True for labels only (~1,000 tokens)",
+            "to_proceed": "Set confirm_full=True to load full tree anyway",
+            "example": "explore_context_tree(flat=False, confirm_full=True)"
+        }, indent=2)
 
     # Flat mode: simple list (replacement for removed list_topics())
     if flat:
