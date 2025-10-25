@@ -5968,7 +5968,7 @@ async def scan_and_analyze_directory(
                     words INTEGER,
                     chars INTEGER,
                     error TEXT,
-                    scanned_at REAL DEFAULT (unixepoch())
+                    scanned_at REAL DEFAULT (strftime('%s', 'now'))
                 )
             """)
 
