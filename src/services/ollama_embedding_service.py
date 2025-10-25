@@ -48,14 +48,22 @@ class OllamaEmbeddingService:
             return None
 
         try:
+            import sys
+
+            # nomic-embed-text has a 1020 character limit
+            MAX_CHARS = 1020
+            if len(text) > MAX_CHARS:
+                print(f"[ERROR] Text too long: {len(text)} chars (max: {MAX_CHARS})", file=sys.stderr)
+                print(f"[ERROR] Text will be truncated to {MAX_CHARS} chars", file=sys.stderr)
+                text = text[:MAX_CHARS]
+
             start_time = time.time()
 
             request_data = {
                 "model": self.model,
-                "prompt": text[:8000]  # Reasonable limit
+                "prompt": text
             }
 
-            import sys
             print(f"[DEBUG] Ollama embedding request: POST {self.base_url}/api/embeddings", file=sys.stderr)
             print(f"[DEBUG] Model: {self.model}, Text length: {len(text)} chars", file=sys.stderr)
 

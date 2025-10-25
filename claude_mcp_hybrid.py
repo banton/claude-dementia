@@ -5112,6 +5112,12 @@ async def generate_embeddings(
     - Ollama running locally
     - nomic-embed-text model installed (ollama pull nomic-embed-text)
 
+    **Technical Details:**
+    - Uses context preview (not full content) for efficient semantic matching
+    - Max input: 1020 characters (nomic-embed-text limit)
+    - Previews are automatically truncated if needed
+    - 768-dimensional embeddings
+
     **Cost:** FREE (local)
     **Performance:** ~30ms per embedding
 
@@ -5145,16 +5151,17 @@ async def generate_embeddings(
     semantic_search = SemanticSearch(conn, embedding_service)
 
     # Determine which contexts to process
+    # Use preview instead of content (nomic-embed-text has 1020 char limit)
     if context_ids:
         ids = [int(id.strip()) for id in context_ids.split(',')]
-        sql = f"SELECT id, content FROM context_locks WHERE id IN ({','.join(['?']*len(ids))})"
+        sql = f"SELECT id, preview FROM context_locks WHERE id IN ({','.join(['?']*len(ids))})"
         cursor = conn.execute(sql, ids)
     elif regenerate:
-        cursor = conn.execute("SELECT id, content FROM context_locks")
+        cursor = conn.execute("SELECT id, preview FROM context_locks")
     else:
-        cursor = conn.execute("SELECT id, content FROM context_locks WHERE embedding IS NULL")
+        cursor = conn.execute("SELECT id, preview FROM context_locks WHERE embedding IS NULL")
 
-    contexts = [{"id": row['id'], "content": row['content']} for row in cursor.fetchall()]
+    contexts = [{"id": row['id'], "content": row['preview']} for row in cursor.fetchall()]
 
     if not contexts:
         return json.dumps({
