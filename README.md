@@ -204,7 +204,7 @@ get_file_clusters()
 file_model_status()
 ```
 
-## Available Tools (20)
+## Available Tools (23)
 
 ### Session Management (2)
 - `wake_up()` - Initialize session, load context, check staleness, **auto-scan project files**
@@ -225,6 +225,10 @@ file_model_status()
 - `search_contexts(query, priority, tags, limit)` - Full-text search with filters
 - `memory_analytics()` - Usage insights and recommendations
 
+### Token Optimization (2) - **NEW in Phase 1**
+- `get_last_handover()` - Retrieve full handover package on-demand
+- `get_query_page(query_id, offset, limit)` - Universal pagination for all queries
+
 ### File Semantic Model (4) - **NEW in v4.2**
 - `scan_project_files(full_scan, max_files)` - Build/update file semantic model
 - `query_files(query, file_type, cluster, limit)` - Search files by content/purpose
@@ -235,10 +239,11 @@ file_model_status()
 - `memory_status()` - Memory system statistics
 - `sync_project_memory()` - Sync file metadata to memory
 
-### Database Tools (3)
+### Database Tools (4)
 - `query_database(sql)` - Safe read-only SQL queries
 - `inspect_database()` - View schema and tables
-- `execute_sql(sql)` - Execute write operations (admin only)
+- `execute_sql(sql)` - Execute write operations (INSERT/UPDATE/DELETE with safety checks)
+- `manage_workspace_table(operation, table_name, schema)` - **NEW** Create/drop temporary tables dynamically
 
 ## Example Workflows
 
@@ -311,6 +316,55 @@ file_model_status()
 # Manual full rescan if needed
 scan_project_files(full_scan=True)
 ```
+
+### Using Dynamic Workspace Tables
+
+Claude can create temporary tables for complex multi-step processing:
+
+```python
+# 1. Create a workspace table for analysis results
+manage_workspace_table(
+    operation='create',
+    table_name='analysis_results',
+    schema='''
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_path TEXT NOT NULL,
+        complexity_score REAL,
+        issue_count INTEGER,
+        analyzed_at REAL
+    ''',
+    dry_run=False,
+    confirm=True
+)
+# Creates: workspace_analysis_results
+
+# 2. Populate the table using execute_sql()
+execute_sql(
+    "INSERT INTO workspace_analysis_results (file_path, complexity_score, issue_count, analyzed_at) VALUES (?, ?, ?, ?)",
+    params=["src/main.py", 8.5, 3, 1234567890],
+    dry_run=False,
+    confirm=True
+)
+
+# 3. Query the results
+query_database("SELECT * FROM workspace_analysis_results ORDER BY complexity_score DESC")
+
+# 4. Inspect the table
+manage_workspace_table(operation='inspect', table_name='analysis_results')
+
+# 5. Clean up when done
+manage_workspace_table(operation='drop', table_name='analysis_results', dry_run=False, confirm=True)
+
+# List all workspace tables
+manage_workspace_table(operation='list')
+```
+
+**Benefits:**
+- Prevents context window overflow by storing intermediate results in database
+- Enables complex multi-step analyses without losing data
+- Pagination-friendly: Store all results, query only what you need
+- Namespace isolation: All workspace tables prefixed with `workspace_`
+- Protected: Cannot accidentally modify core memory tables
 
 ## Project Structure
 

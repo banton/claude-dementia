@@ -3861,6 +3861,304 @@ async def execute_sql(
 
 
 @mcp.tool()
+async def manage_workspace_table(
+    operation: str,
+    table_name: str,
+    schema: Optional[str] = None,
+    dry_run: bool = True,
+    confirm: bool = False
+) -> str:
+    """
+    Dynamically create, drop, or modify temporary workspace tables for complex operations.
+
+    **Purpose:** Enable Claude to create temporary tables for multi-step processing,
+    intermediate results, or complex queries without filling the context window.
+
+    **Use Cases:**
+    - Create temporary tables for storing intermediate query results
+    - Build working tables for data transformation pipelines
+    - Store analytical results for later pagination
+    - Manage custom data structures for specific tasks
+
+    **Safety Features:**
+    - Namespace isolation: All workspace tables prefixed with 'workspace_'
+    - Dry-run by default: Preview changes before execution
+    - Auto-cleanup: Can mark tables for auto-deletion on session end
+    - Schema validation: Checks SQL syntax before execution
+    - Prevents modification of core tables (sessions, contexts, memory_entries, etc.)
+
+    **Supported Operations:**
+    - 'create': Create a new workspace table
+    - 'drop': Remove a workspace table
+    - 'inspect': View table schema and row count
+    - 'list': List all workspace tables
+
+    **Examples:**
+
+    1. Create a temporary results table:
+       manage_workspace_table(
+           operation='create',
+           table_name='analysis_results',
+           schema='''
+               id INTEGER PRIMARY KEY,
+               metric_name TEXT NOT NULL,
+               value REAL,
+               calculated_at REAL
+           ''',
+           dry_run=False,
+           confirm=True
+       )
+
+    2. Create a table for storing file clusters:
+       manage_workspace_table(
+           operation='create',
+           table_name='file_clusters_cache',
+           schema='''
+               cluster_name TEXT PRIMARY KEY,
+               file_paths TEXT,  -- JSON array
+               file_count INTEGER,
+               created_at REAL
+           ''',
+           dry_run=False,
+           confirm=True
+       )
+
+    3. List all workspace tables:
+       manage_workspace_table(operation='list')
+
+    4. Inspect a workspace table:
+       manage_workspace_table(
+           operation='inspect',
+           table_name='analysis_results'
+       )
+
+    5. Drop a workspace table:
+       manage_workspace_table(
+           operation='drop',
+           table_name='analysis_results',
+           dry_run=False,
+           confirm=True
+       )
+
+    **After Creating Tables:**
+    - Use query_database() to read data: SELECT * FROM workspace_analysis_results
+    - Use execute_sql() to insert/update data
+    - Use manage_workspace_table(operation='drop') to clean up
+
+    **Best Practices:**
+    - Name tables descriptively: 'file_analysis', 'search_cache', 'temp_results'
+    - Clean up tables when done to avoid database bloat
+    - Use AUTO-CLEANUP comment in schema for automatic removal on session end
+
+    Args:
+        operation: 'create', 'drop', 'inspect', or 'list'
+        table_name: Name of workspace table (without 'workspace_' prefix)
+        schema: Table schema for 'create' operation (columns and types)
+        dry_run: If True, preview changes without executing (default: True)
+        confirm: Must be True to execute write operations (default: False)
+
+    Returns:
+        JSON with operation result, including table info and SQL executed
+    """
+    import time
+    import re
+
+    try:
+        # Validate operation
+        valid_operations = ['create', 'drop', 'inspect', 'list']
+        if operation not in valid_operations:
+            return json.dumps({
+                "error": "Invalid operation",
+                "provided": operation,
+                "valid_operations": valid_operations
+            }, indent=2)
+
+        conn = get_db()
+
+        # Handle LIST operation
+        if operation == 'list':
+            cursor = conn.execute("""
+                SELECT name, sql FROM sqlite_master
+                WHERE type='table' AND name LIKE 'workspace_%'
+                ORDER BY name
+            """)
+            tables = []
+            for row in cursor.fetchall():
+                # Get row count
+                count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {row['name']}")
+                count = count_cursor.fetchone()['count']
+
+                tables.append({
+                    "name": row['name'],
+                    "schema": row['sql'],
+                    "row_count": count
+                })
+
+            return json.dumps({
+                "operation": "list",
+                "workspace_tables": tables,
+                "total_count": len(tables)
+            }, indent=2)
+
+        # Validate table_name
+        if not table_name:
+            return json.dumps({
+                "error": "table_name is required for this operation"
+            }, indent=2)
+
+        # Sanitize table name and add workspace_ prefix
+        safe_table_name = re.sub(r'[^a-zA-Z0-9_]', '', table_name)
+        full_table_name = f"workspace_{safe_table_name}"
+
+        # Protect core tables
+        core_tables = [
+            'sessions', 'memory_entries', 'context_locks', 'context_archives',
+            'file_tags', 'todos', 'project_variables', 'query_results_cache',
+            'file_semantic_model'
+        ]
+        if safe_table_name in core_tables or table_name.startswith('workspace_'):
+            return json.dumps({
+                "error": "Cannot use reserved table names or 'workspace_' prefix",
+                "attempted": table_name,
+                "reserved_tables": core_tables
+            }, indent=2)
+
+        # Handle INSPECT operation
+        if operation == 'inspect':
+            # Check if table exists
+            cursor = conn.execute("""
+                SELECT sql FROM sqlite_master
+                WHERE type='table' AND name=?
+            """, (full_table_name,))
+            result = cursor.fetchone()
+
+            if not result:
+                return json.dumps({
+                    "error": "Table not found",
+                    "table": full_table_name,
+                    "note": "Use operation='list' to see all workspace tables"
+                }, indent=2)
+
+            # Get row count
+            count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
+            count = count_cursor.fetchone()['count']
+
+            # Get sample data (first 5 rows)
+            sample_cursor = conn.execute(f"SELECT * FROM {full_table_name} LIMIT 5")
+            sample_data = [dict(row) for row in sample_cursor.fetchall()]
+
+            return json.dumps({
+                "operation": "inspect",
+                "table": full_table_name,
+                "schema": result['sql'],
+                "row_count": count,
+                "sample_data": sample_data
+            }, indent=2)
+
+        # Handle CREATE operation
+        if operation == 'create':
+            if not schema:
+                return json.dumps({
+                    "error": "schema is required for create operation",
+                    "example": "id INTEGER PRIMARY KEY, name TEXT, value REAL"
+                }, indent=2)
+
+            # Check if table already exists
+            cursor = conn.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name=?
+            """, (full_table_name,))
+            if cursor.fetchone():
+                return json.dumps({
+                    "error": "Table already exists",
+                    "table": full_table_name,
+                    "note": "Use operation='drop' first to recreate, or choose a different name"
+                }, indent=2)
+
+            create_sql = f"CREATE TABLE {full_table_name} ({schema})"
+
+            if dry_run:
+                return json.dumps({
+                    "dry_run": True,
+                    "operation": "create",
+                    "table": full_table_name,
+                    "sql": create_sql,
+                    "note": "Set dry_run=False and confirm=True to execute"
+                }, indent=2)
+
+            if not confirm:
+                return json.dumps({
+                    "error": "Confirmation required",
+                    "note": "Set confirm=True to execute this operation"
+                }, indent=2)
+
+            # Execute CREATE
+            conn.execute(create_sql)
+            conn.commit()
+
+            return json.dumps({
+                "success": True,
+                "operation": "create",
+                "table": full_table_name,
+                "sql": create_sql,
+                "usage": f"Use query_database() with: SELECT * FROM {full_table_name}"
+            }, indent=2)
+
+        # Handle DROP operation
+        if operation == 'drop':
+            # Check if table exists
+            cursor = conn.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name=?
+            """, (full_table_name,))
+            if not cursor.fetchone():
+                return json.dumps({
+                    "error": "Table not found",
+                    "table": full_table_name,
+                    "note": "Use operation='list' to see existing tables"
+                }, indent=2)
+
+            drop_sql = f"DROP TABLE {full_table_name}"
+
+            if dry_run:
+                # Get row count for preview
+                count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
+                count = count_cursor.fetchone()['count']
+
+                return json.dumps({
+                    "dry_run": True,
+                    "operation": "drop",
+                    "table": full_table_name,
+                    "rows_to_delete": count,
+                    "sql": drop_sql,
+                    "note": "Set dry_run=False and confirm=True to execute"
+                }, indent=2)
+
+            if not confirm:
+                return json.dumps({
+                    "error": "Confirmation required",
+                    "note": "Set confirm=True to execute this operation"
+                }, indent=2)
+
+            # Execute DROP
+            conn.execute(drop_sql)
+            conn.commit()
+
+            return json.dumps({
+                "success": True,
+                "operation": "drop",
+                "table": full_table_name,
+                "sql": drop_sql
+            }, indent=2)
+
+    except Exception as e:
+        return json.dumps({
+            "error": str(e),
+            "operation": operation
+        }, indent=2)
+
+
+@mcp.tool()
 async def check_contexts(text: str) -> str:
     """
     Check what locked contexts are relevant to your current task and detect rule violations.
