@@ -93,7 +93,8 @@ class OllamaLLMService:
 
             return output
         except Exception as e:
-            print(f"Ollama completion failed: {e}")
+            import sys
+            print(f"Ollama completion failed: {e}", file=sys.stderr)
             return None
 
     def summarize_context(

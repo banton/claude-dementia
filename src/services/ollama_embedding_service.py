@@ -75,7 +75,8 @@ class OllamaEmbeddingService:
 
             return embedding
         except Exception as e:
-            print(f"Ollama embedding generation failed: {e}")
+            import sys
+            print(f"Ollama embedding generation failed: {e}", file=sys.stderr)
             return None
 
     def batch_generate_embeddings(

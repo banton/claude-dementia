@@ -68,7 +68,8 @@ class SemanticSearch:
                     """, (embedding_bytes, self.embedding_service.model, ctx['id']))
                     success += 1
                 except Exception as e:
-                    print(f"Failed to store embedding for context {ctx['id']}: {e}")
+                    import sys
+                    print(f"Failed to store embedding for context {ctx['id']}: {e}", file=sys.stderr)
                     failed += 1
             else:
                 failed += 1
