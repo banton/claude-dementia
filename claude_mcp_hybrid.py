@@ -3416,9 +3416,14 @@ async def check_contexts(text: str) -> str:
     return "\n".join(output)
 
 @mcp.tool()
-async def explore_context_tree() -> str:
+async def explore_context_tree(flat: bool = False) -> str:
     """
     Browse all your locked contexts organized by priority and tags.
+
+    **Parameters:**
+    - flat: bool = False
+      - If True: Returns simple list (replacement for removed list_topics())
+      - If False: Returns grouped tree view with previews (default)
 
     **When to use this tool:**
     - At session start to see what contexts exist
@@ -3426,7 +3431,15 @@ async def explore_context_tree() -> str:
     - To discover contexts you've forgotten about
     - To understand the structure of your locked knowledge
 
-    **What this does:**
+    **Flat mode (flat=True):**
+    Returns simple list of contexts:
+    ```
+    api_auth_rules v1.0
+    database_config v1.2
+    code_style v1.0
+    ```
+
+    **Tree mode (flat=False, default):**
     - Lists all locked contexts in the current session
     - Groups by priority level (always_check → important → reference)
     - Shows tags for each context
@@ -3443,9 +3456,9 @@ async def explore_context_tree() -> str:
     1. Use at session start to orient yourself
     2. Look for always_check contexts first (critical rules)
     3. Browse by tags to find related contexts
-    4. Use recall_context() or get_context_preview() to dive deeper
+    4. Use recall_context() to dive deeper
 
-    **Example output:**
+    **Example output (tree mode):**
     ```
     📚 Context Tree (5 contexts)
 
@@ -3466,25 +3479,34 @@ async def explore_context_tree() -> str:
     Uses lightweight preview queries, not full content.
     Fast even with 100+ contexts.
 
-    Returns: Tree structure of all contexts with previews
+    Returns: Tree structure of all contexts with previews (or simple list if flat=True)
     """
     conn = get_db()
     session_id = get_current_session_id()
 
     # Get all contexts with previews (not full content - RLM optimization!)
-    cursor = conn.execute("""
+    # Flat mode: alphabetical order, Tree mode: most recent first
+    order_clause = "ORDER BY label" if flat else "ORDER BY locked_at DESC"
+    cursor = conn.execute(f"""
         SELECT label, version, preview, key_concepts, metadata, locked_at
         FROM context_locks
         WHERE session_id = ?
-        ORDER BY locked_at DESC
+        {order_clause}
     """, (session_id,))
 
     contexts = cursor.fetchall()
 
     if not contexts:
-        return "📭 No locked contexts yet.\n\n💡 Use lock_context() to save important information for future reference."
+        return "No locked contexts yet." if flat else "📭 No locked contexts yet.\n\n💡 Use lock_context() to save important information for future reference."
 
-    # Group by priority
+    # Flat mode: simple list (replacement for removed list_topics())
+    if flat:
+        results = []
+        for row in contexts:
+            results.append(f"{row['label']} v{row['version']}")
+        return "\n".join(results)
+
+    # Tree mode: Group by priority
     priority_groups = {
         'always_check': [],
         'important': [],
