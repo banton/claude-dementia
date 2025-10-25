@@ -2095,22 +2095,37 @@ async def lock_context(content: str, topic: str, tags: Optional[str] = None, pri
 
     # Store lock
     try:
+        current_time = time.time()
         conn.execute("""
             INSERT INTO context_locks
             (session_id, label, version, content, content_hash, locked_at, metadata,
              preview, key_concepts, last_accessed)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (session_id, topic, version, content, content_hash, time.time(), json.dumps(metadata),
-              preview, json.dumps(key_concepts), time.time()))
-        
+        """, (session_id, topic, version, content, content_hash, current_time, json.dumps(metadata),
+              preview, json.dumps(key_concepts), current_time))
+
+        # Create audit trail entry
+        priority_label = {
+            'always_check': ' [CRITICAL RULE]',
+            'important': ' [IMPORTANT]',
+            'reference': ''
+        }.get(priority, '')
+
+        audit_message = f"Locked context '{topic}' v{version}{priority_label} ({len(content)} chars, {len(tag_list)} tags)"
+
+        conn.execute("""
+            INSERT INTO memory_entries (category, content, timestamp, session_id)
+            VALUES ('progress', ?, ?, ?)
+        """, (audit_message, current_time, session_id))
+
         conn.commit()
-        
+
         priority_indicator = {
             'always_check': ' ⚠️ [ALWAYS CHECK]',
             'important': ' 📌 [IMPORTANT]',
             'reference': ''
         }.get(priority, '')
-        
+
         return f"✅ Locked '{topic}' as v{version}{priority_indicator} ({len(content)} chars, hash: {content_hash[:8]})"
         
     except sqlite3.IntegrityError:
@@ -2399,10 +2414,22 @@ async def unlock_context(
                 WHERE label = ? AND version = ? AND session_id = ?
             """, (topic, version, session_id))
 
-        conn.commit()
-
+        # Create audit trail entry
+        current_time = time.time()
         count = len(contexts)
         version_str = f"{count} version(s)" if version == "all" else f"version {version}"
+
+        critical_label = " [CRITICAL]" if has_critical else ""
+        audit_message = f"Deleted {version_str} of context '{topic}'{critical_label}"
+        if archive:
+            audit_message += " (archived for recovery)"
+
+        conn.execute("""
+            INSERT INTO memory_entries (category, content, timestamp, session_id)
+            VALUES ('progress', ?, ?, ?)
+        """, (audit_message, current_time, session_id))
+
+        conn.commit()
 
         result = f"✅ Deleted {version_str} of '{topic}'"
 
