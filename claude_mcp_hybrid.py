@@ -2110,22 +2110,35 @@ async def lock_context(content: str, topic: str, tags: Optional[str] = None, pri
         return f"❌ Failed to lock context: {str(e)}"
 
 @mcp.tool()
-async def recall_context(topic: str, version: Optional[str] = "latest") -> str:
+async def recall_context(
+    topic: str,
+    version: Optional[str] = "latest",
+    preview_only: bool = False
+) -> str:
     """
-    Retrieve exact content of a previously locked context by topic name.
+    Retrieve content of a previously locked context by topic name.
+
+    **Token Efficiency: MINIMAL (preview) or FULL (complete)**
+    - preview_only=True: Returns 500-char summary (~100 tokens)
+    - preview_only=False: Returns full content (could be 10KB+)
 
     **When to use this tool:**
     - When check_contexts indicates a relevant locked context exists
     - To get full details of an API spec, rule, or decision
     - To verify exact requirements before implementing
     - To recall specific configuration or setup details
-    - When you need the complete context (not just preview)
 
-    **What this returns:**
-    - Full content of the locked context (exactly as stored)
-    - Version number and timestamp
-    - Priority level and tags
-    - Complete metadata
+    **Preview Mode (preview_only=True):**
+    - Returns intelligent summary (~500 chars)
+    - Shows key concepts and important rules
+    - Indicates content size
+    - Perfect for quick relevance checking
+    - 95% token reduction vs full content
+
+    **Full Mode (preview_only=False, default):**
+    - Returns complete content (exactly as stored)
+    - Use when you need exact details
+    - Use after preview confirms relevance
 
     **Version handling:**
     - "latest" (default): Returns most recent version
@@ -2135,42 +2148,46 @@ async def recall_context(topic: str, version: Optional[str] = "latest") -> str:
 
     **Best practices:**
     1. Use after check_contexts identifies relevant context
-    2. Don't recall all contexts at session start (use wake_up instead)
-    3. Recall only when you need full details for current task
-    4. Check version history if requirements seem contradictory
+    2. Start with preview_only=True to assess relevance
+    3. Load full content only when needed for implementation
+    4. Use batch_recall_contexts() for multiple contexts
 
     **Example workflow:**
-    ```
+    ```python
     # Step 1: Check what's relevant
     check_contexts("implementing user authentication")
     # Returns: "api_auth_rules is relevant (⚠️ always_check)"
 
-    # Step 2: Recall the full context
-    recall_context("api_auth_rules")
-    # Returns full API authentication specification
+    # Step 2: Get preview first
+    recall_context("api_auth_rules", preview_only=True)
+    # Returns: "JWT tokens required. MUST use OAuth2. NEVER store plaintext..."
+    # Size: 8.5KB
 
-    # Step 3: Implement following the rules
+    # Step 3: Load full content if needed
+    recall_context("api_auth_rules")
+    # Returns full API authentication specification (8.5KB)
     ```
 
-    **Common patterns:**
-    - Recall before implementing to verify requirements
-    - Recall when check_contexts shows rule violations
-    - Recall specific version if debugging old behavior
-    - List all topics first with list_topics() if unsure of name
-
     **Performance note:**
-    With RLM optimization, check_contexts uses lightweight previews,
-    then recall_context loads full content only when needed.
-    This enables 60-80% token reduction compared to loading everything.
+    With RLM optimization:
+    - check_contexts uses lightweight previews (fast scan)
+    - recall_context(preview_only=True) returns summary (100 tokens)
+    - recall_context() loads full content only when needed
+    - Result: 95% token reduction for context exploration
 
-    Returns: Full context content with metadata, or error if not found
+    Args:
+        topic: Context label/name
+        version: "latest" or specific version like "1.0"
+        preview_only: If True, return summary instead of full content
+
+    Returns: Context content (preview or full) with metadata, or error if not found
     """
     conn = get_db()
     session_id = get_current_session_id()
-    
+
     if version == "latest":
         cursor = conn.execute("""
-            SELECT id, content, version, locked_at, metadata
+            SELECT id, content, preview, key_concepts, version, locked_at, metadata
             FROM context_locks
             WHERE label = ? AND session_id = ?
             ORDER BY locked_at DESC
@@ -2180,7 +2197,7 @@ async def recall_context(topic: str, version: Optional[str] = "latest") -> str:
         # Clean version (remove 'v' prefix if present)
         clean_version = version[1:] if version.startswith('v') else version
         cursor = conn.execute("""
-            SELECT id, content, version, locked_at, metadata
+            SELECT id, content, preview, key_concepts, version, locked_at, metadata
             FROM context_locks
             WHERE label = ? AND version = ? AND session_id = ?
         """, (topic, clean_version, session_id))
@@ -2191,6 +2208,7 @@ async def recall_context(topic: str, version: Optional[str] = "latest") -> str:
         dt = datetime.fromtimestamp(row['locked_at'])
         metadata = json.loads(row['metadata']) if row['metadata'] else {}
         tags = metadata.get('tags', [])
+        key_concepts = json.loads(row['key_concepts']) if row['key_concepts'] else []
 
         # Track access
         conn.execute("""
@@ -2201,15 +2219,34 @@ async def recall_context(topic: str, version: Optional[str] = "latest") -> str:
         """, (time.time(), context_id))
         conn.commit()
 
-        output = []
-        output.append(f"📌 {topic} v{row['version']}")
-        output.append(f"Locked: {dt.strftime('%Y-%m-%d %H:%M')}")
-        if tags:
-            output.append(f"Tags: {', '.join(tags)}")
-        output.append("-" * 40)
-        output.append(row['content'])
+        if preview_only:
+            # Return preview mode (token-efficient)
+            content_size_kb = len(row['content']) / 1024
+            preview_text = row['preview'] or row['content'][:500] + "..."
 
-        return "\n".join(output)
+            return json.dumps({
+                "topic": topic,
+                "version": row['version'],
+                "preview": preview_text,
+                "key_concepts": key_concepts[:5],  # Top 5 concepts
+                "tags": tags,
+                "locked_at": dt.strftime('%Y-%m-%d %H:%M'),
+                "content_size_kb": round(content_size_kb, 1),
+                "note": "Use preview_only=False to get full content"
+            }, indent=2)
+        else:
+            # Return full content
+            output = []
+            output.append(f"📌 {topic} v{row['version']}")
+            output.append(f"Locked: {dt.strftime('%Y-%m-%d %H:%M')}")
+            if tags:
+                output.append(f"Tags: {', '.join(tags)}")
+            if key_concepts:
+                output.append(f"Concepts: {', '.join(key_concepts[:5])}")
+            output.append("-" * 40)
+            output.append(row['content'])
+
+            return "\n".join(output)
     else:
         return f"❌ No locked context found for '{topic}' (version: {version})"
 
@@ -2578,9 +2615,13 @@ async def batch_lock_contexts(contexts: str) -> str:
 
 
 @mcp.tool()
-async def batch_recall_contexts(topics: str) -> str:
+async def batch_recall_contexts(topics: str, preview_only: bool = True) -> str:
     """
     Recall multiple contexts in one operation.
+
+    **Token Efficiency: MINIMAL (preview) or FULL (complete)**
+    - preview_only=True: Returns summaries (~100 tokens each, DEFAULT)
+    - preview_only=False: Returns full content (could be 50KB+ total)
 
     **Purpose:** Efficient bulk context retrieval
 
@@ -2589,17 +2630,47 @@ async def batch_recall_contexts(topics: str) -> str:
     ["api_spec", "database_schema", "auth_rules"]
     ```
 
-    **Returns:** JSON with content for each requested topic
+    **Preview Mode (preview_only=True, DEFAULT):**
+    - Returns intelligent summaries for each context
+    - Shows key concepts, size, and relevance info
+    - Perfect for assessing which contexts to load fully
+    - 95% token reduction vs full content
+    - Recommended for exploring multiple contexts
+
+    **Full Mode (preview_only=False):**
+    - Returns complete content for all contexts
+    - Use when you need exact details from all contexts
+    - Warning: Can consume 50KB+ tokens with multiple contexts
+
+    **Returns:** JSON with content/preview for each requested topic
 
     **Benefits:**
     - Single operation instead of multiple recall calls
     - Efficient for loading related contexts
-    - Returns status for each topic (found/not found)
+    - Returns status for each topic (found/not_found)
+    - Defaults to preview mode to prevent context overflow
 
-    **Example:**
+    **Example workflow:**
+    ```python
+    # Step 1: Get previews of all related contexts
+    batch_recall_contexts('["api_v1", "database_schema", "auth_rules"]')
+    # Returns: 3 summaries (~300 tokens total)
+
+    # Step 2: Load specific contexts fully as needed
+    recall_context("api_v1")  # Full content only for this one
     ```
-    batch_recall_contexts('["api_v1", "database_schema"]')
-    ```
+
+    **Best practices:**
+    1. Always start with preview_only=True (default)
+    2. Review previews to identify which contexts you actually need
+    3. Load full content individually for the 1-2 most relevant
+    4. Avoid loading 5+ full contexts at once (context overflow)
+
+    Args:
+        topics: JSON array of topic names
+        preview_only: If True, return summaries (default); if False, full content
+
+    Returns: JSON with summary and results for each topic
     """
     try:
         topics_list = json.loads(topics)
@@ -2624,7 +2695,7 @@ async def batch_recall_contexts(topics: str) -> str:
             continue
 
         try:
-            content = await recall_context(topic)
+            content = await recall_context(topic, preview_only=preview_only)
             if "❌" in content:  # recall_context returns error message
                 results.append({
                     "topic": topic,
@@ -2633,11 +2704,27 @@ async def batch_recall_contexts(topics: str) -> str:
                 })
                 not_found += 1
             else:
-                results.append({
-                    "topic": topic,
-                    "status": "found",
-                    "content": content
-                })
+                # Parse JSON if preview mode
+                if preview_only and content.startswith('{'):
+                    try:
+                        content_data = json.loads(content)
+                        results.append({
+                            "topic": topic,
+                            "status": "found",
+                            "preview": content_data
+                        })
+                    except:
+                        results.append({
+                            "topic": topic,
+                            "status": "found",
+                            "content": content
+                        })
+                else:
+                    results.append({
+                        "topic": topic,
+                        "status": "found",
+                        "content": content
+                    })
                 found += 1
         except Exception as e:
             results.append({
@@ -2651,7 +2738,9 @@ async def batch_recall_contexts(topics: str) -> str:
         "summary": {
             "total": len(topics_list),
             "found": found,
-            "not_found": not_found
+            "not_found": not_found,
+            "mode": "preview" if preview_only else "full",
+            "note": "Use preview_only=False to get full content" if preview_only else None
         },
         "results": results
     }, indent=2)

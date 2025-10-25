@@ -332,25 +332,45 @@ recall_context("api_spec")
 
 2. **TOKEN_OPTIMIZATION_STRATEGY.md:** Created comprehensive guide
 
-## Phase 2: Next Tool Migrations
+## ✅ Phase 2: Context Summarization (COMPLETE)
 
-### High Priority Tools
+### Implemented Features
 
-1. **recall_context()** - Add preview_only parameter
+1. **✅ recall_context()** - Added preview_only parameter
    ```python
    async def recall_context(topic: str, version: str = "latest",
                            preview_only: bool = False):
-       # preview_only=True: Return first 500 chars + query_id
-       # preview_only=False: Return full content
+       # preview_only=True: Returns 500-char summary (~100 tokens)
+       # preview_only=False: Returns full content (could be 10KB+)
+       # Result: 95% token reduction in preview mode
    ```
 
-2. **batch_recall_contexts()** - Add preview_only parameter
+2. **✅ batch_recall_contexts()** - Added preview_only parameter
    ```python
-   async def batch_recall_contexts(topics: list, preview_only: bool = True):
-       # Default to summaries for multiple contexts
+   async def batch_recall_contexts(topics: str, preview_only: bool = True):
+       # Defaults to summaries (prevent context overflow)
+       # preview_only=True: ~100 tokens per context
+       # preview_only=False: Full content for all
    ```
 
-3. **query_files()** - Integrate pagination
+3. **✅ Automatic summarization** - Already implemented in v4.1
+   - `preview` column stores intelligent 500-char summaries
+   - `generate_preview()` extracts key sentences and rules
+   - Auto-generated on lock_context()
+   - Migration support for existing contexts
+
+### Benefits Achieved
+- ✅ 95% token reduction for context preview
+- ✅ Prevents context overflow when exploring multiple contexts
+- ✅ Enables "scan all contexts" without filling window
+- ✅ Progressive disclosure: preview → full content
+- ✅ Fits perfectly with database-first pattern
+
+## Phase 3: Remaining Tool Migrations
+
+### High Priority Tools
+
+1. **query_files()** - Integrate pagination
    ```python
    async def query_files(query: str, preview_only: bool = True, limit: int = 5):
        # Store full results, return preview + query_id

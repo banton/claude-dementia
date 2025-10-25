@@ -262,7 +262,7 @@ batch_lock_contexts([
 search_contexts("authentication", tags="api")
 ```
 
-### Debugging Session
+### Debugging Session (with Context Summarization)
 ```python
 # Start with context
 wake_up()
@@ -270,8 +270,17 @@ wake_up()
 # Search for related contexts
 search_contexts("database connection", priority="important")
 
-# Recall multiple contexts at once
-batch_recall_contexts(["database_config", "error_handling"])
+# Get previews of multiple contexts (DEFAULT - token-efficient)
+batch_recall_contexts('["database_config", "error_handling"]')
+# Returns: 2 summaries (~200 tokens total) showing key info
+
+# Load full content only for the most relevant one
+recall_context("database_config")
+# Returns: Full configuration details (~5KB)
+
+# Or get just a preview first
+recall_context("error_handling", preview_only=True)
+# Returns: Summary with key concepts (~100 tokens)
 
 # Lock new findings
 lock_context("Fixed connection pool issue...", "db_fix", priority="important")
