@@ -5165,7 +5165,23 @@ async def generate_embeddings(
     # Generate embeddings in batch
     result = semantic_search.batch_add_embeddings(contexts)
 
+    # Build user-friendly summary
+    mode = "specific contexts" if context_ids else ("all contexts (regenerate)" if regenerate else "contexts without embeddings")
+
+    summary_text = f"""
+🔄 Embedding Generation Task
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Mode: {mode}
+Processed: {len(contexts)} contexts
+Success: {result['success']}
+Failed: {result['failed']}
+Model: {embedding_service.model}
+Performance: ~30ms per embedding
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+""".strip()
+
     return json.dumps({
+        "summary": summary_text,
         "message": "Embedding generation complete",
         "total_processed": len(contexts),
         "success": result['success'],
@@ -5236,8 +5252,27 @@ async def semantic_search_contexts(
         tags_filter=tags
     )
 
+    # Build user-friendly summary
+    filters_text = []
+    if priority:
+        filters_text.append(f"priority={priority}")
+    if tags:
+        filters_text.append(f"tags={tags}")
+    filters = f" | Filters: {', '.join(filters_text)}" if filters_text else ""
+
+    summary_text = f"""
+🔍 Semantic Search Results
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Query: "{query}"
+Threshold: {threshold}{filters}
+Found: {len(results)} contexts
+Model: {embedding_service.model}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+""".strip()
+
     if not results:
         return json.dumps({
+            "summary": summary_text.replace(f"Found: {len(results)} contexts", "Found: 0 contexts ❌"),
             "query": query,
             "total_results": 0,
             "message": "No similar contexts found",
@@ -5249,6 +5284,7 @@ async def semantic_search_contexts(
         }, indent=2)
 
     return json.dumps({
+        "summary": summary_text,
         "query": query,
         "total_results": len(results),
         "threshold": threshold,
@@ -5324,7 +5360,18 @@ async def ai_summarize_context(topic: str) -> str:
             "fallback_preview": row['preview']
         }, indent=2)
 
+    summary_text = f"""
+🤖 AI-Generated Summary
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Topic: {topic}
+Model: {llm_service.default_model}
+Performance: ~1-2s
+Cost: FREE (local)
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+""".strip()
+
     return json.dumps({
+        "summary": summary_text,
         "topic": topic,
         "ai_summary": summary,
         "model": llm_service.default_model,
@@ -5399,6 +5446,24 @@ async def embedding_status() -> str:
             "performance": "~1-2s per summary"
         }
 
+    # Build status summary
+    emb_status = "✓ Enabled" if embedding_service.enabled else "✗ Disabled"
+    llm_status = "✓ Enabled" if llm_service.enabled else "✗ Disabled"
+
+    summary_text = f"""
+⚙️ AI Services Status
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Embeddings: {emb_status}
+  Provider: {config.embedding_provider}
+  Model: {config.embedding_model if embedding_service.enabled else 'N/A'}
+
+LLM: {llm_status}
+  Provider: {config.llm_provider}
+  Model: {config.llm_model if llm_service.enabled else 'N/A'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+""".strip()
+
+    status["summary"] = summary_text
     return json.dumps(status, indent=2)
 
 
@@ -5436,6 +5501,20 @@ async def usage_statistics(days: int = 30) -> str:
 
     stats = tracker.get_usage_stats(days=days)
 
+    # Build user-friendly summary
+    total_ops = stats['summary']['total_operations']
+    total_tokens = stats['summary']['total_tokens']
+
+    summary_text = f"""
+📊 Token Usage Statistics
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Period: Last {days} days
+Total Operations: {total_ops:,}
+Total Tokens: {total_tokens:,}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+""".strip()
+
+    stats["summary_display"] = summary_text
     return json.dumps(stats, indent=2)
 
 
@@ -5492,6 +5571,26 @@ async def cost_comparison(days: int = 30) -> str:
 
         comparison['projections'] = daily_savings
 
+    # Build user-friendly summary
+    alternatives = comparison['cost_comparison']['alternatives']
+    gpt4_savings = alternatives.get('openai_gpt4', {}).get('cost_usd', 0)
+    gpt35_savings = alternatives.get('openai_gpt35', {}).get('cost_usd', 0)
+
+    summary_text = f"""
+💰 Cost Comparison
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Period: Last {days} days
+Actual Cost: $0.00 (Ollama)
+
+Savings vs OpenAI:
+  GPT-4: ${gpt4_savings:.2f}
+  GPT-3.5: ${gpt35_savings:.2f}
+
+Total Savings: 100%
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+""".strip()
+
+    comparison["summary_display"] = summary_text
     return json.dumps(comparison, indent=2)
 
 
