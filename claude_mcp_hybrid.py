@@ -4003,6 +4003,328 @@ async def scan_project_files(
         }, indent=2)
 
 
+@mcp.tool()
+async def query_files(
+    query: str,
+    file_type: Optional[str] = None,
+    cluster: Optional[str] = None,
+    limit: int = 20
+) -> str:
+    """
+    Search file semantic model by content, path, imports, or exports.
+
+    **Purpose:** Find files by what they contain or do, not just their name.
+
+    **Parameters:**
+    - query: str (required)
+      Search term - searches in: file_path, purpose, imports, exports
+    - file_type: str (optional)
+      Filter by type: 'python', 'javascript', 'markdown', 'config', etc.
+    - cluster: str (optional)
+      Filter by semantic cluster: 'authentication', 'api', 'database', etc.
+    - limit: int = 20
+      Maximum results to return
+
+    **Returns:** JSON with matching files and their semantic information
+
+    **Example queries:**
+    ```python
+    # Find authentication-related files
+    query_files("authentication")
+
+    # Find Python files that import FastAPI
+    query_files("fastapi", file_type="python")
+
+    # Find all API endpoint files
+    query_files("", cluster="api")
+
+    # Find files that export specific functions
+    query_files("authenticate_user")
+    ```
+
+    **Best practices:**
+    - Search broadly first, then filter with file_type/cluster
+    - Empty query with cluster returns all files in that cluster
+    - Results ordered by relevance (path match > imports/exports match)
+    """
+    conn = get_db()
+    session_id = get_current_session_id()
+
+    try:
+        # Build SQL query
+        sql = """
+            SELECT
+                file_path, file_type, language, purpose,
+                imports, exports, dependencies, used_by, contains,
+                cluster_name, is_standard, standard_type, warnings,
+                file_size, modified_time, last_scanned
+            FROM file_semantic_model
+            WHERE session_id = ?
+        """
+
+        params = [session_id]
+
+        # Add search filter
+        if query:
+            sql += """
+                AND (
+                    file_path LIKE ?
+                    OR purpose LIKE ?
+                    OR imports LIKE ?
+                    OR exports LIKE ?
+                )
+            """
+            search_pattern = f'%{query}%'
+            params.extend([search_pattern, search_pattern, search_pattern, search_pattern])
+
+        # Add file_type filter
+        if file_type:
+            sql += " AND file_type = ?"
+            params.append(file_type)
+
+        # Add cluster filter
+        if cluster:
+            sql += " AND cluster_name = ?"
+            params.append(cluster)
+
+        sql += f" LIMIT {limit}"
+
+        cursor = conn.execute(sql, params)
+        results = cursor.fetchall()
+
+        # Format results
+        formatted = []
+        for row in results:
+            formatted.append({
+                'path': row['file_path'],
+                'type': row['file_type'],
+                'language': row['language'],
+                'purpose': row['purpose'],
+                'imports': json.loads(row['imports'] or '[]'),
+                'exports': json.loads(row['exports'] or '[]'),
+                'dependencies': json.loads(row['dependencies'] or '[]'),
+                'used_by': json.loads(row['used_by'] or '[]'),
+                'contains': json.loads(row['contains'] or '{}'),
+                'cluster': row['cluster_name'],
+                'is_standard': bool(row['is_standard']),
+                'standard_type': row['standard_type'],
+                'warnings': json.loads(row['warnings'] or '[]'),
+                'size_kb': round(row['file_size'] / 1024, 2) if row['file_size'] else 0,
+                'modified': datetime.fromtimestamp(row['modified_time']).isoformat() if row['modified_time'] else None,
+                'last_scanned': datetime.fromtimestamp(row['last_scanned']).isoformat() if row['last_scanned'] else None
+            })
+
+        return json.dumps({
+            'query': query,
+            'filters': {
+                'file_type': file_type,
+                'cluster': cluster,
+                'limit': limit
+            },
+            'total_found': len(formatted),
+            'results': formatted
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({
+            'error': str(e),
+            'query': query
+        }, indent=2)
+
+
+@mcp.tool()
+async def get_file_clusters() -> str:
+    """
+    Get semantic file clusters showing how files are grouped.
+
+    **Purpose:** Understand project organization through automatic semantic grouping.
+
+    **What are clusters?**
+    Files are automatically grouped by:
+    - Directory structure (src/auth → authentication cluster)
+    - File naming patterns (auth.py, login.js → authentication)
+    - Import relationships (files that import each other)
+    - Semantic keywords (database, api, test, etc.)
+
+    **Returns:** JSON with clusters, file counts, and sample files
+
+    **Common clusters:**
+    - authentication: Auth/login/user management
+    - api: API endpoints and routes
+    - database: Database models, migrations, queries
+    - tests: Test files and test utilities
+    - configuration: Config files (.env, yaml, json)
+    - documentation: README, docs, guides
+    - misc: Uncategorized files
+
+    **Use cases:**
+    - Understand project structure at a glance
+    - Find all files related to a feature
+    - Navigate large codebases
+    - Identify architectural patterns
+    """
+    conn = get_db()
+    session_id = get_current_session_id()
+
+    try:
+        # Get cluster summary
+        cursor = conn.execute("""
+            SELECT
+                cluster_name,
+                COUNT(*) as file_count,
+                SUM(file_size) as total_size
+            FROM file_semantic_model
+            WHERE session_id = ?
+            GROUP BY cluster_name
+            ORDER BY file_count DESC
+        """, (session_id,))
+
+        clusters = []
+        for row in cursor.fetchall():
+            cluster_name = row['cluster_name']
+            if not cluster_name:
+                cluster_name = 'misc'
+
+            # Get file types in this cluster
+            types_cursor = conn.execute("""
+                SELECT DISTINCT file_type
+                FROM file_semantic_model
+                WHERE session_id = ? AND (cluster_name = ? OR (cluster_name IS NULL AND ? = 'misc'))
+            """, (session_id, cluster_name if cluster_name != 'misc' else None, cluster_name))
+
+            file_types = [r['file_type'] for r in types_cursor.fetchall() if r['file_type']]
+
+            # Get sample files (top 5)
+            samples_cursor = conn.execute("""
+                SELECT file_path, purpose
+                FROM file_semantic_model
+                WHERE session_id = ? AND (cluster_name = ? OR (cluster_name IS NULL AND ? = 'misc'))
+                ORDER BY file_size DESC
+                LIMIT 5
+            """, (session_id, cluster_name if cluster_name != 'misc' else None, cluster_name))
+
+            sample_files = [
+                {'path': r['file_path'], 'purpose': r['purpose']}
+                for r in samples_cursor.fetchall()
+            ]
+
+            clusters.append({
+                'name': cluster_name,
+                'file_count': row['file_count'],
+                'total_size_mb': round(row['total_size'] / (1024 * 1024), 2) if row['total_size'] else 0,
+                'file_types': file_types,
+                'sample_files': sample_files
+            })
+
+        return json.dumps({
+            'total_clusters': len(clusters),
+            'clusters': clusters
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({'error': str(e)}, indent=2)
+
+
+@mcp.tool()
+async def file_model_status() -> str:
+    """
+    Get file semantic model statistics and health.
+
+    **Purpose:** Monitor the file model system and understand project composition.
+
+    **Returns:** JSON with overview, file type distribution, standard files, warnings
+
+    **Health status:**
+    - "healthy": Model contains files, recent scan
+    - "no_data": No files scanned yet (run scan_project_files)
+    - "stale": Last scan >7 days ago (consider re-scanning)
+
+    **Use cases:**
+    - Check if model is up to date
+    - Understand project composition
+    - Monitor standard file warnings
+    - Verify scan performance
+    """
+    conn = get_db()
+    session_id = get_current_session_id()
+
+    try:
+        # Overview statistics
+        cursor = conn.execute("""
+            SELECT
+                COUNT(*) as total_files,
+                SUM(file_size) as total_size,
+                AVG(file_size) as avg_size,
+                MIN(last_scanned) as oldest_scan,
+                MAX(last_scanned) as newest_scan,
+                AVG(scan_duration_ms) as avg_scan_time
+            FROM file_semantic_model
+            WHERE session_id = ?
+        """, (session_id,))
+
+        stats = cursor.fetchone()
+
+        if not stats or stats['total_files'] == 0:
+            return json.dumps({
+                'overview': {'total_files': 0},
+                'health': 'no_data',
+                'message': 'No files scanned yet. Run scan_project_files() to build model.'
+            }, indent=2)
+
+        # Type distribution
+        type_cursor = conn.execute("""
+            SELECT file_type, COUNT(*) as count
+            FROM file_semantic_model
+            WHERE session_id = ?
+            GROUP BY file_type
+            ORDER BY count DESC
+            LIMIT 10
+        """, (session_id,))
+
+        type_dist = {row['file_type']: row['count'] for row in type_cursor.fetchall() if row['file_type']}
+
+        # Standard files
+        std_cursor = conn.execute("""
+            SELECT file_path, standard_type, warnings
+            FROM file_semantic_model
+            WHERE session_id = ? AND is_standard = 1
+            ORDER BY file_path
+        """, (session_id,))
+
+        standard_files = []
+        for row in std_cursor.fetchall():
+            warnings = json.loads(row['warnings'] or '[]')
+            standard_files.append({
+                'path': row['file_path'],
+                'type': row['standard_type'],
+                'warnings': warnings
+            })
+
+        # Determine health
+        age_days = (time.time() - stats['newest_scan']) / 86400 if stats['newest_scan'] else 999
+        if age_days > 7:
+            health = 'stale'
+        else:
+            health = 'healthy'
+
+        return json.dumps({
+            'overview': {
+                'total_files': stats['total_files'],
+                'total_size_mb': round(stats['total_size'] / (1024 * 1024), 2) if stats['total_size'] else 0,
+                'average_file_kb': round(stats['avg_size'] / 1024, 2) if stats['avg_size'] else 0,
+                'last_full_scan': datetime.fromtimestamp(stats['oldest_scan']).isoformat() if stats['oldest_scan'] else None,
+                'last_update': datetime.fromtimestamp(stats['newest_scan']).isoformat() if stats['newest_scan'] else None,
+                'avg_scan_time_ms': round(stats['avg_scan_time'] or 0, 2)
+            },
+            'type_distribution': type_dist,
+            'standard_files': standard_files,
+            'health': health
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({'error': str(e)}, indent=2)
+
+
 # ============================================================================
 # ENHANCED PROJECT INTELLIGENCE WITH AUTO-TAGGING
 # ============================================================================
