@@ -5599,6 +5599,89 @@ async def diagnose_ollama() -> str:
 
 
 @mcp.tool()
+async def test_single_embedding(text: str = "Test embedding") -> str:
+    """
+    Test embedding generation with a single text and capture detailed debug output.
+
+    **Token Efficiency: DEBUG** (~1KB)
+
+    Args:
+        text: Text to generate embedding for (default: "Test embedding")
+
+    Returns: Detailed test results including any stderr debug/error output
+
+    Use this to debug why embeddings are failing - it will show the actual
+    Ollama API request/response cycle.
+    """
+    import sys
+    import io
+    from contextlib import redirect_stderr
+
+    try:
+        from src.services import embedding_service
+    except Exception as e:
+        return json.dumps({
+            "error": "Service initialization failed",
+            "reason": str(e)
+        }, indent=2)
+
+    # Capture stderr output
+    stderr_capture = io.StringIO()
+
+    result = {
+        "test_input": text,
+        "text_length": len(text),
+        "service_enabled": embedding_service.enabled,
+        "model": embedding_service.model,
+        "base_url": embedding_service.base_url
+    }
+
+    try:
+        # Try to generate embedding while capturing stderr
+        with redirect_stderr(stderr_capture):
+            embedding = embedding_service.generate_embedding(text)
+
+        stderr_output = stderr_capture.getvalue()
+
+        if embedding:
+            result["status"] = "✓ SUCCESS"
+            result["embedding_dimensions"] = len(embedding)
+            result["embedding_sample"] = embedding[:5]  # First 5 values
+        else:
+            result["status"] = "✗ FAILED"
+            result["embedding"] = None
+
+        # Include captured debug/error messages
+        if stderr_output:
+            result["debug_output"] = stderr_output.split('\n')
+
+    except Exception as e:
+        result["status"] = "✗ EXCEPTION"
+        result["error"] = f"{type(e).__name__}: {str(e)}"
+        import traceback
+        result["traceback"] = traceback.format_exc()
+
+        stderr_output = stderr_capture.getvalue()
+        if stderr_output:
+            result["debug_output"] = stderr_output.split('\n')
+
+    # Build summary
+    summary_lines = [
+        "🧪 Embedding Test Results",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Status: {result.get('status', 'UNKNOWN')}",
+        f"Service: {'Enabled' if result['service_enabled'] else 'Disabled'}",
+        f"Model: {result['model']}",
+        f"Text: {len(text)} chars",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    ]
+
+    result["summary"] = "\n".join(summary_lines)
+
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
 async def usage_statistics(days: int = 30) -> str:
     """
     Get detailed token usage statistics for cost analysis.

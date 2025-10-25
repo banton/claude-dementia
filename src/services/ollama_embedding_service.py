@@ -50,20 +50,35 @@ class OllamaEmbeddingService:
         try:
             start_time = time.time()
 
+            request_data = {
+                "model": self.model,
+                "prompt": text[:8000]  # Reasonable limit
+            }
+
+            import sys
+            print(f"[DEBUG] Ollama embedding request: POST {self.base_url}/api/embeddings", file=sys.stderr)
+            print(f"[DEBUG] Model: {self.model}, Text length: {len(text)} chars", file=sys.stderr)
+
             response = requests.post(
                 f"{self.base_url}/api/embeddings",
-                json={
-                    "model": self.model,
-                    "prompt": text[:8000]  # Reasonable limit
-                },
+                json=request_data,
                 timeout=30
             )
+
+            print(f"[DEBUG] Response status: {response.status_code}", file=sys.stderr)
+
             response.raise_for_status()
 
             duration_ms = int((time.time() - start_time) * 1000)
 
             data = response.json()
+            print(f"[DEBUG] Response keys: {list(data.keys())}", file=sys.stderr)
+
+            if 'embedding' not in data:
+                raise ValueError(f"Response missing 'embedding' key. Got keys: {list(data.keys())}, Response: {str(data)[:500]}")
+
             embedding = data['embedding']
+            print(f"[DEBUG] Embedding generated: {len(embedding)} dimensions in {duration_ms}ms", file=sys.stderr)
 
             # Track usage
             if self.token_tracker:
@@ -78,19 +93,29 @@ class OllamaEmbeddingService:
             return embedding
         except requests.exceptions.ConnectionError as e:
             import sys
-            print(f"Ollama connection failed: Is Ollama running at {self.base_url}?", file=sys.stderr)
+            print(f"[ERROR] Ollama connection failed: Is Ollama running at {self.base_url}?", file=sys.stderr)
+            print(f"[ERROR] Exception: {str(e)}", file=sys.stderr)
             return None
         except requests.exceptions.Timeout as e:
             import sys
-            print(f"Ollama request timeout (30s): Model may be loading or system overloaded", file=sys.stderr)
+            print(f"[ERROR] Ollama request timeout (30s): Model may be loading or system overloaded", file=sys.stderr)
+            print(f"[ERROR] Exception: {str(e)}", file=sys.stderr)
             return None
         except requests.exceptions.HTTPError as e:
             import sys
-            print(f"Ollama HTTP error: {e.response.status_code} - {e.response.text[:200]}", file=sys.stderr)
+            print(f"[ERROR] Ollama HTTP error: {e.response.status_code}", file=sys.stderr)
+            print(f"[ERROR] Response body: {e.response.text[:500]}", file=sys.stderr)
+            print(f"[ERROR] Request was: POST {self.base_url}/api/embeddings model={self.model}", file=sys.stderr)
+            return None
+        except ValueError as e:
+            import sys
+            print(f"[ERROR] Ollama response format error: {str(e)}", file=sys.stderr)
             return None
         except Exception as e:
             import sys
-            print(f"Ollama embedding generation failed: {type(e).__name__}: {str(e)}", file=sys.stderr)
+            print(f"[ERROR] Ollama embedding generation failed: {type(e).__name__}: {str(e)}", file=sys.stderr)
+            import traceback
+            print(f"[ERROR] Traceback: {traceback.format_exc()}", file=sys.stderr)
             return None
 
     def batch_generate_embeddings(
