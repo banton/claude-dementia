@@ -6013,29 +6013,25 @@ Average per file:
 
         response = {
             "summary": summary_text,
-            "directory": str(dir_path),
-            "pattern": pattern,
             "files_processed": len(results),
             "statistics": {
                 "total_size_bytes": total_size,
                 "total_lines": total_lines,
                 "total_words": total_words,
-                "total_chars": total_chars,
-                "avg_size_bytes": total_size // len(results) if results else 0,
-                "avg_lines": total_lines // len(results) if results else 0,
-                "avg_words": total_words // len(results) if results else 0
+                "total_chars": total_chars
             },
-            "files": results[:20]  # Show first 20 in response
+            "sample_files": results[:5]  # Show only first 5 as sample
         }
 
-        if len(results) > 20:
-            response["note"] = f"Showing first 20 of {len(results)} files. See full results in workspace table."
+        if len(results) > 5:
+            response["note"] = f"Showing 5 sample files of {len(results)} total. Full data stored in table."
 
         if store_in_table:
             response["stored_in"] = store_in_table
-            response["query_example"] = f"query_database(\"SELECT * FROM {store_in_table} ORDER BY words DESC LIMIT 10\")"
+            response["query_help"] = f"Use: query_database(\"SELECT * FROM {store_in_table} ORDER BY words DESC LIMIT 10\")"
 
-        return json.dumps(response, indent=2)
+        # Use compact JSON (no indent) to reduce response size
+        return json.dumps(response)
 
     except Exception as e:
         import traceback
@@ -6043,7 +6039,7 @@ Average per file:
             "error": "Scan failed",
             "exception": f"{type(e).__name__}: {str(e)}",
             "traceback": traceback.format_exc()
-        }, indent=2)
+        })
 
 
 @mcp.tool()
