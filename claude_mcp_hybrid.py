@@ -4490,3 +4490,21 @@ async def file_model_status() -> str:
 # ENHANCED PROJECT INTELLIGENCE WITH AUTO-TAGGING
 # ============================================================================
 
+# Keep all other unchanged tools...
+# (Additional tools can be added here as needed)
+
+# ============================================================================
+# RUN SERVER
+# ============================================================================
+
+if __name__ == "__main__":
+    # DO NOT print anything to stdout - MCP requires clean JSON communication
+    # Any debug output would break the JSON protocol
+    import sys
+    import logging
+
+    # Suppress all stdout output that isn't JSON
+    logging.basicConfig(level=logging.ERROR, stream=sys.stderr)
+
+    # Run the MCP server silently
+    asyncio.run(mcp.run())
