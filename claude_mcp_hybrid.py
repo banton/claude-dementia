@@ -543,6 +543,15 @@ def initialize_database(conn):
 
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fch_session ON file_change_history(session_id, timestamp DESC)')
 
+    # Check and add embedding columns to context_locks if they don't exist (v4.4.0)
+    cursor = conn.execute("PRAGMA table_info(context_locks)")
+    columns = [row[1] for row in cursor.fetchall()]
+
+    if 'embedding' not in columns:
+        conn.execute('ALTER TABLE context_locks ADD COLUMN embedding BLOB')
+        conn.execute('ALTER TABLE context_locks ADD COLUMN embedding_model TEXT')
+        conn.commit()
+
     conn.commit()
 
 def estimate_tokens(text: str) -> int:
@@ -5080,11 +5089,314 @@ async def file_model_status() -> str:
 
 
 # ============================================================================
-# ENHANCED PROJECT INTELLIGENCE WITH AUTO-TAGGING
+# SEMANTIC SEARCH & AI FEATURES (v4.4.0)
 # ============================================================================
 
-# Keep all other unchanged tools...
-# (Additional tools can be added here as needed)
+@mcp.tool()
+async def generate_embeddings(
+    context_ids: Optional[str] = None,
+    regenerate: bool = False
+) -> str:
+    """
+    Generate embeddings for contexts to enable semantic search.
+
+    **Token Efficiency: MINIMAL** (~500 tokens)
+
+    Args:
+        context_ids: Comma-separated IDs to generate embeddings for (default: all without embeddings)
+        regenerate: If True, regenerate embeddings even if they exist
+
+    Returns: Statistics about embedding generation
+
+    **Requirements:**
+    - Ollama running locally
+    - nomic-embed-text model installed (ollama pull nomic-embed-text)
+
+    **Cost:** FREE (local)
+    **Performance:** ~30ms per embedding
+
+    Example:
+        generate_embeddings()  # Generate for all contexts without embeddings
+        generate_embeddings(context_ids="1,2,3")  # Specific contexts
+        generate_embeddings(regenerate=True)  # Regenerate all
+    """
+    try:
+        from src.services import embedding_service
+        from src.services.semantic_search import SemanticSearch
+    except Exception as e:
+        return json.dumps({
+            "error": "Service initialization failed",
+            "reason": str(e),
+            "setup": "Ensure src/ directory and services are properly installed"
+        }, indent=2)
+
+    if not embedding_service.enabled:
+        return json.dumps({
+            "error": "Embedding service not available",
+            "reason": "Ollama not running or nomic-embed-text not installed",
+            "setup": "1. Start Ollama\n2. Run: ollama pull nomic-embed-text"
+        }, indent=2)
+
+    conn = get_db()
+    semantic_search = SemanticSearch(conn, embedding_service)
+
+    # Determine which contexts to process
+    if context_ids:
+        ids = [int(id.strip()) for id in context_ids.split(',')]
+        sql = f"SELECT id, content FROM context_locks WHERE id IN ({','.join(['?']*len(ids))})"
+        cursor = conn.execute(sql, ids)
+    elif regenerate:
+        cursor = conn.execute("SELECT id, content FROM context_locks")
+    else:
+        cursor = conn.execute("SELECT id, content FROM context_locks WHERE embedding IS NULL")
+
+    contexts = [{"id": row['id'], "content": row['content']} for row in cursor.fetchall()]
+
+    if not contexts:
+        return json.dumps({
+            "message": "No contexts to process",
+            "total_contexts": 0
+        }, indent=2)
+
+    # Generate embeddings in batch
+    result = semantic_search.batch_add_embeddings(contexts)
+
+    return json.dumps({
+        "message": "Embedding generation complete",
+        "total_processed": len(contexts),
+        "success": result['success'],
+        "failed": result['failed'],
+        "model": embedding_service.model,
+        "performance": "~30ms per embedding",
+        "cost": "FREE (local)"
+    }, indent=2)
+
+
+@mcp.tool()
+async def semantic_search_contexts(
+    query: str,
+    limit: int = 10,
+    threshold: float = 0.7,
+    priority: Optional[str] = None,
+    tags: Optional[str] = None
+) -> str:
+    """
+    Search contexts using semantic similarity (embeddings).
+
+    **Token Efficiency: PREVIEW** (~2-5KB depending on limit)
+
+    Args:
+        query: Natural language search query
+        limit: Maximum number of results (default: 10)
+        threshold: Minimum similarity score 0-1 (default: 0.7)
+        priority: Filter by priority ("always_check", "important", "reference")
+        tags: Comma-separated tags to filter by
+
+    Returns: Contexts ranked by semantic similarity with scores
+
+    **Requirement:** Must run generate_embeddings() first
+    **Cost:** FREE (local)
+    **Performance:** ~30ms per query
+
+    Example:
+        semantic_search_contexts("How do we handle authentication?")
+        # Returns contexts about JWT, OAuth, auth flows even without exact keywords
+
+        semantic_search_contexts("database connection pooling", priority="important")
+    """
+    try:
+        from src.services import embedding_service
+        from src.services.semantic_search import SemanticSearch
+    except Exception as e:
+        return json.dumps({
+            "error": "Service initialization failed",
+            "reason": str(e)
+        }, indent=2)
+
+    if not embedding_service.enabled:
+        return json.dumps({
+            "error": "Semantic search not available",
+            "reason": "Ollama not running or nomic-embed-text not installed",
+            "fallback": "Use search_contexts() for keyword-based search"
+        }, indent=2)
+
+    conn = get_db()
+    semantic_search = SemanticSearch(conn, embedding_service)
+
+    # Perform semantic search
+    results = semantic_search.search_similar(
+        query=query,
+        limit=limit,
+        threshold=threshold,
+        priority_filter=priority,
+        tags_filter=tags
+    )
+
+    if not results:
+        return json.dumps({
+            "query": query,
+            "total_results": 0,
+            "message": "No similar contexts found",
+            "suggestions": [
+                f"Lower threshold value (current: {threshold})",
+                "Run generate_embeddings() if not done yet",
+                "Try broader query terms"
+            ]
+        }, indent=2)
+
+    return json.dumps({
+        "query": query,
+        "total_results": len(results),
+        "threshold": threshold,
+        "results": results,
+        "note": "Similarity scores range from 0-1, higher is more similar"
+    }, indent=2)
+
+
+@mcp.tool()
+async def ai_summarize_context(topic: str) -> str:
+    """
+    Generate AI-powered summary of a context using local LLM.
+
+    **Token Efficiency: SUMMARY** (~1-2KB)
+
+    Args:
+        topic: Context topic/label to summarize
+
+    Returns: AI-generated summary focusing on key concepts and rules
+
+    **Requirements:**
+    - Ollama running locally
+    - LLM model installed (qwen2.5-coder:1.5b recommended)
+
+    **Cost:** FREE (local)
+    **Performance:** ~1-2s per summary
+
+    Example:
+        ai_summarize_context("api_specification")
+        # Returns: Intelligent summary highlighting:
+        #   - Main purpose
+        #   - Key rules (MUST/ALWAYS/NEVER)
+        #   - Technical concepts
+    """
+    try:
+        from src.services import llm_service
+    except Exception as e:
+        return json.dumps({
+            "error": "Service initialization failed",
+            "reason": str(e)
+        }, indent=2)
+
+    if not llm_service.enabled:
+        return json.dumps({
+            "error": "AI summarization not available",
+            "reason": "Ollama not running or LLM model not installed",
+            "setup": "1. Start Ollama\n2. Run: ollama pull qwen2.5-coder:1.5b",
+            "fallback": "Use recall_context(topic, preview_only=True) for extract-based summary"
+        }, indent=2)
+
+    conn = get_db()
+
+    # Get context content
+    cursor = conn.execute("""
+        SELECT content, preview FROM context_locks
+        WHERE label = ?
+        ORDER BY version DESC LIMIT 1
+    """, (topic,))
+
+    row = cursor.fetchone()
+    if not row:
+        return json.dumps({
+            "error": "Context not found",
+            "topic": topic
+        }, indent=2)
+
+    # Generate AI summary
+    summary = llm_service.summarize_context(row['content'])
+
+    if not summary:
+        return json.dumps({
+            "error": "Summary generation failed",
+            "fallback_preview": row['preview']
+        }, indent=2)
+
+    return json.dumps({
+        "topic": topic,
+        "ai_summary": summary,
+        "model": llm_service.default_model,
+        "performance": "~1-2s per summary",
+        "cost": "FREE (local)",
+        "note": "AI-generated summary may differ from extract-based preview"
+    }, indent=2)
+
+
+@mcp.tool()
+async def embedding_status() -> str:
+    """
+    Check status of embedding and AI features.
+
+    **Token Efficiency: MINIMAL** (~500 tokens)
+
+    Returns: Configuration status, statistics, and setup instructions
+    """
+    try:
+        from src.services import embedding_service, llm_service
+        from src.services.semantic_search import SemanticSearch
+        from src.config import config
+    except Exception as e:
+        return json.dumps({
+            "error": "Service initialization failed",
+            "reason": str(e),
+            "services": {
+                "embedding": {"enabled": False, "reason": "Import failed"},
+                "llm": {"enabled": False, "reason": "Import failed"}
+            }
+        }, indent=2)
+
+    conn = get_db()
+    semantic_search = SemanticSearch(conn, embedding_service)
+
+    status = {
+        "embedding_service": {
+            "enabled": embedding_service.enabled,
+            "provider": config.embedding_provider,
+            "model": config.embedding_model if embedding_service.enabled else None,
+            "dimensions": embedding_service.dimensions if embedding_service.enabled else None,
+            "features": ["semantic_search"] if embedding_service.enabled else []
+        },
+        "llm_service": {
+            "enabled": llm_service.enabled,
+            "provider": config.llm_provider,
+            "model": config.llm_model if llm_service.enabled else None,
+            "features": ["ai_summarization", "priority_classification"] if llm_service.enabled else []
+        },
+        "statistics": semantic_search.get_embedding_stats(),
+        "setup_instructions": {}
+    }
+
+    # Add setup instructions if services disabled
+    if not embedding_service.enabled:
+        status["setup_instructions"]["embeddings"] = {
+            "step1": "Start Ollama (if not running)",
+            "step2": "Run: ollama pull nomic-embed-text",
+            "step3": "Restart MCP server",
+            "step4": "Run generate_embeddings() to populate existing contexts",
+            "cost": "FREE (local)",
+            "performance": "~30ms per embedding"
+        }
+
+    if not llm_service.enabled:
+        status["setup_instructions"]["llm"] = {
+            "step1": "Start Ollama (if not running)",
+            "step2": "Run: ollama pull qwen2.5-coder:1.5b (recommended for speed)",
+            "step3": "Restart MCP server",
+            "step4": "Use ai_summarize_context() for AI-powered summaries",
+            "cost": "FREE (local)",
+            "performance": "~1-2s per summary"
+        }
+
+    return json.dumps(status, indent=2)
+
 
 # ============================================================================
 # RUN SERVER
