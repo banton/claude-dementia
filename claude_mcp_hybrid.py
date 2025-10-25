@@ -33,6 +33,17 @@ from active_context_engine import (
 # Import RLM preview generation
 from migrate_v4_1_rlm import generate_preview, extract_key_concepts
 
+# Import file semantic model
+from file_semantic_model import (
+    detect_file_change,
+    compute_file_hash,
+    detect_file_type,
+    check_standard_file_warnings,
+    analyze_file_semantics,
+    walk_project_files,
+    cluster_files_by_semantics
+)
+
 # Initialize MCP server
 mcp = FastMCP("claude-dementia")
 
@@ -1054,6 +1065,98 @@ def get_git_status() -> Optional[dict]:
         }
     except:
         return None
+
+# ============================================================================
+# FILE SEMANTIC MODEL - Database Helper Functions
+# ============================================================================
+
+def load_stored_file_model(conn, session_id: str) -> Dict[str, Dict]:
+    """Load stored file semantic model from database"""
+    cursor = conn.execute("""
+        SELECT file_path, file_size, content_hash, modified_time, hash_method,
+               file_type, language, purpose, imports, exports, dependencies,
+               used_by, contains, is_standard, standard_type, warnings,
+               cluster_name, related_files
+        FROM file_semantic_model
+        WHERE session_id = ?
+    """, (session_id,))
+
+    stored = {}
+    for row in cursor.fetchall():
+        stored[row['file_path']] = {
+            'file_size': row['file_size'],
+            'content_hash': row['content_hash'],
+            'modified_time': row['modified_time'],
+            'hash_method': row['hash_method'],
+            'file_type': row['file_type'],
+            'language': row['language'],
+            'purpose': row['purpose'],
+            'imports': row['imports'],
+            'exports': row['exports'],
+            'dependencies': row['dependencies'],
+            'used_by': row['used_by'],
+            'contains': row['contains'],
+            'is_standard': bool(row['is_standard']),
+            'standard_type': row['standard_type'],
+            'warnings': row['warnings'],
+            'cluster_name': row['cluster_name'],
+            'related_files': row['related_files']
+        }
+
+    return stored
+
+
+def store_file_metadata(conn, session_id: str, file_path: str, metadata: Dict, scan_time_ms: int):
+    """Store or update file metadata in database"""
+    conn.execute("""
+        INSERT OR REPLACE INTO file_semantic_model (
+            session_id, file_path, file_size, content_hash, modified_time, hash_method,
+            file_type, language, purpose, imports, exports, dependencies, used_by, contains,
+            is_standard, standard_type, warnings, cluster_name, related_files,
+            last_scanned, scan_duration_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        session_id,
+        file_path,
+        metadata['file_size'],
+        metadata['content_hash'],
+        metadata['modified_time'],
+        metadata['hash_method'],
+        metadata.get('file_type'),
+        metadata.get('language'),
+        metadata.get('purpose'),
+        json.dumps(metadata.get('imports', [])),
+        json.dumps(metadata.get('exports', [])),
+        json.dumps(metadata.get('dependencies', [])),
+        json.dumps(metadata.get('used_by', [])),
+        json.dumps(metadata.get('contains', {})),
+        1 if metadata.get('is_standard') else 0,
+        metadata.get('standard_type'),
+        json.dumps(metadata.get('warnings', [])),
+        metadata.get('cluster_name'),
+        json.dumps(metadata.get('related_files', [])),
+        time.time(),
+        scan_time_ms
+    ))
+
+
+def mark_file_deleted(conn, session_id: str, file_path: str):
+    """Remove file from semantic model (it was deleted)"""
+    conn.execute("""
+        DELETE FROM file_semantic_model
+        WHERE session_id = ? AND file_path = ?
+    """, (session_id, file_path))
+
+
+def record_file_change(conn, session_id: str, file_path: str, change_type: str,
+                       old_hash: Optional[str], new_hash: str, size_delta: int):
+    """Record file change in history"""
+    conn.execute("""
+        INSERT INTO file_change_history (
+            session_id, file_path, change_type, timestamp, old_hash, new_hash, size_delta
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (session_id, file_path, change_type, time.time(), old_hash, new_hash, size_delta))
+
 
 # ============================================================================
 # SESSION MANAGEMENT (unchanged from before)
@@ -3651,6 +3754,254 @@ async def explore_context_tree(flat: bool = False) -> str:
     output.append("   • Use ask_memory('question') to search naturally")
 
     return "\n".join(output)
+
+# ============================================================================
+# FILE SEMANTIC MODEL - MCP Tools
+# ============================================================================
+
+@mcp.tool()
+async def scan_project_files(
+    full_scan: bool = False,
+    max_files: int = 10000,
+    respect_gitignore: bool = True
+) -> str:
+    """
+    Scan project files and build/update semantic model.
+
+    **Purpose:** Build intelligent understanding of project structure with automatic
+    change detection and semantic analysis.
+
+    **Parameters:**
+    - full_scan: bool = False
+      Force full rescan (default: incremental using mtime+size+hash)
+    - max_files: int = 10000
+      Safety limit for large projects
+    - respect_gitignore: bool = True
+      Skip files/directories in .gitignore
+
+    **How it works:**
+    1. Walk filesystem (respecting .gitignore)
+    2. Detect changes using three-stage detection:
+       - Stage 1: mtime check (instant)
+       - Stage 2: size check (instant)
+       - Stage 3: hash check (only if needed)
+    3. Analyze changed/new files:
+       - Extract imports, exports, dependencies
+       - Detect file type and language
+       - Recognize standard files (.env, package.json, etc)
+       - Generate warnings for config issues
+    4. Build semantic clusters (authentication, api, database, etc)
+
+    **Returns:** JSON with scan results, changes detected, warnings
+
+    **Example output:**
+    ```json
+    {
+      "scan_type": "incremental",
+      "scan_time_ms": 52.3,
+      "total_files": 247,
+      "changes": {
+        "added": 2,
+        "modified": 3,
+        "deleted": 0,
+        "unchanged": 242
+      },
+      "file_types": {
+        "python": 45,
+        "javascript": 38,
+        "markdown": 12
+      },
+      "clusters": ["authentication", "api", "database", "tests"],
+      "warnings": [
+        ".env not in .gitignore - may expose secrets"
+      ]
+    }
+    ```
+
+    **Best practices:**
+    - Runs automatically during wake_up() (incremental)
+    - Use full_scan=True after major changes (git pull, branch switch)
+    - Results persist in database for fast future scans
+    """
+    conn = get_db()
+    session_id = get_current_session_id()
+
+    # Get project root
+    project_root = os.getcwd()
+
+    start_time = time.time()
+
+    try:
+        # Load stored model
+        stored_model = load_stored_file_model(conn, session_id)
+
+        # Walk filesystem
+        all_files = walk_project_files(project_root, respect_gitignore, max_files)
+
+        # Detect changes
+        changes = {
+            'added': [],
+            'modified': [],
+            'deleted': [],
+            'unchanged': []
+        }
+
+        files_to_analyze = []
+
+        for file_path in all_files:
+            stored_meta = stored_model.get(file_path)
+
+            if full_scan:
+                # Full scan - analyze everything
+                files_to_analyze.append(file_path)
+                if stored_meta:
+                    changes['modified'].append(file_path)
+                else:
+                    changes['added'].append(file_path)
+            else:
+                # Incremental scan - detect changes
+                changed, new_hash, hash_method = detect_file_change(file_path, stored_meta)
+
+                if not stored_meta:
+                    changes['added'].append(file_path)
+                    files_to_analyze.append(file_path)
+                elif changed:
+                    changes['modified'].append(file_path)
+                    files_to_analyze.append(file_path)
+                else:
+                    changes['unchanged'].append(file_path)
+
+        # Find deleted files
+        stored_paths = set(stored_model.keys())
+        current_paths = set(all_files)
+        deleted_paths = stored_paths - current_paths
+
+        for deleted_path in deleted_paths:
+            changes['deleted'].append(deleted_path)
+            mark_file_deleted(conn, session_id, deleted_path)
+
+        # Analyze changed/new files
+        analyzed_files = []
+
+        for file_path in files_to_analyze:
+            try:
+                # Get file stats
+                stat = os.stat(file_path)
+                file_size = stat.st_size
+                modified_time = stat.st_mtime
+
+                # Compute hash
+                content_hash, hash_method = compute_file_hash(file_path, file_size)
+
+                # Detect file type
+                file_type, language, is_standard, standard_type = detect_file_type(file_path)
+
+                # Generate warnings for standard files
+                warnings = check_standard_file_warnings(file_path, file_type, standard_type, project_root)
+
+                # Semantic analysis
+                semantics = analyze_file_semantics(file_path, file_type, language)
+
+                # Build metadata
+                metadata = {
+                    'file_size': file_size,
+                    'content_hash': content_hash,
+                    'modified_time': modified_time,
+                    'hash_method': hash_method,
+                    'file_type': file_type,
+                    'language': language,
+                    'is_standard': is_standard,
+                    'standard_type': standard_type,
+                    'warnings': warnings,
+                    'imports': semantics.get('imports', []),
+                    'exports': semantics.get('exports', []),
+                    'contains': semantics.get('contains', {})
+                }
+
+                analyzed_files.append({
+                    'file_path': file_path,
+                    **metadata
+                })
+
+                # Store in database
+                store_file_metadata(conn, session_id, file_path, metadata, 0)
+
+                # Record change
+                if file_path in changes['added']:
+                    record_file_change(conn, session_id, file_path, 'added', None, content_hash, file_size)
+                elif file_path in changes['modified']:
+                    old_hash = stored_model[file_path].get('content_hash')
+                    old_size = stored_model[file_path].get('file_size', 0)
+                    size_delta = file_size - old_size
+                    record_file_change(conn, session_id, file_path, 'modified', old_hash, content_hash, size_delta)
+
+            except Exception as e:
+                # Skip files that can't be analyzed
+                continue
+
+        # Build clusters
+        clusters_dict = cluster_files_by_semantics(analyzed_files)
+
+        # Update cluster names in database
+        for cluster_name, file_paths in clusters_dict.items():
+            for file_path in file_paths:
+                conn.execute("""
+                    UPDATE file_semantic_model
+                    SET cluster_name = ?
+                    WHERE session_id = ? AND file_path = ?
+                """, (cluster_name, session_id, file_path))
+
+        conn.commit()
+
+        # Get file type distribution
+        type_cursor = conn.execute("""
+            SELECT file_type, COUNT(*) as count
+            FROM file_semantic_model
+            WHERE session_id = ?
+            GROUP BY file_type
+            ORDER BY count DESC
+        """, (session_id,))
+
+        file_types = {row['file_type']: row['count'] for row in type_cursor.fetchall()}
+
+        # Get all warnings
+        warnings_cursor = conn.execute("""
+            SELECT warnings
+            FROM file_semantic_model
+            WHERE session_id = ? AND warnings IS NOT NULL AND warnings != '[]'
+        """, (session_id,))
+
+        all_warnings = []
+        for row in warnings_cursor.fetchall():
+            try:
+                file_warnings = json.loads(row['warnings'])
+                all_warnings.extend(file_warnings)
+            except:
+                pass
+
+        scan_time_ms = (time.time() - start_time) * 1000
+
+        return json.dumps({
+            'scan_type': 'full' if full_scan else 'incremental',
+            'scan_time_ms': round(scan_time_ms, 2),
+            'total_files': len(all_files),
+            'changes': {
+                'added': len(changes['added']),
+                'modified': len(changes['modified']),
+                'deleted': len(changes['deleted']),
+                'unchanged': len(changes['unchanged'])
+            },
+            'file_types': file_types,
+            'clusters': list(clusters_dict.keys()),
+            'warnings': list(set(all_warnings))[:10]  # Top 10 unique warnings
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({
+            'error': str(e),
+            'scan_type': 'full' if full_scan else 'incremental'
+        }, indent=2)
+
 
 # ============================================================================
 # ENHANCED PROJECT INTELLIGENCE WITH AUTO-TAGGING
