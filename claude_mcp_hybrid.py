@@ -3169,7 +3169,7 @@ async def get_last_handover(project: Optional[str] = None) -> str:
         }, indent=2)
 
 @mcp.tool()
-async def get_query_page(query_id: str, offset: int = 0, limit: int = 20) -> str:
+async def get_query_page(query_id: str, offset: int = 0, limit: int = 20, project: Optional[str] = None) -> str:
     """
     Retrieve paginated results from a previous query.
 
@@ -3205,7 +3205,7 @@ async def get_query_page(query_id: str, offset: int = 0, limit: int = 20) -> str
 
     Note: Query results expire after 1 hour (TTL). If expired, run the query again.
     """
-    conn = get_db()
+    conn = _get_db_for_project(project)
     result = get_query_page_data(conn, query_id, offset, limit)
     return json.dumps(result, indent=2)
 
@@ -3214,11 +3214,11 @@ async def get_query_page(query_id: str, offset: int = 0, limit: int = 20) -> str
 # ============================================================================
 
 @mcp.tool()
-async def memory_status() -> str:
+async def memory_status(project: Optional[str] = None) -> str:
     """
     Show memory system status and statistics.
     """
-    conn = get_db()
+    conn = _get_db_for_project(project)
     session_id = get_current_session_id()
     
     output = []
@@ -3701,7 +3701,8 @@ async def unlock_context(
     topic: str,
     version: str = "all",
     force: bool = False,
-    archive: bool = True
+    archive: bool = True,
+    project: Optional[str] = None
 ) -> str:
     """
     Remove locked context(s) that are no longer relevant.
@@ -3763,7 +3764,7 @@ async def unlock_context(
     Returns: Confirmation with count of deleted contexts
     """
     update_session_activity()
-    conn = get_db()
+    conn = _get_db_for_project(project)
     session_id = get_current_session_id()
 
     # 1. Find contexts to delete
