@@ -425,24 +425,23 @@ def is_postgresql_mode():
     """Always returns True - PostgreSQL is the only mode."""
     return True
 
-def get_db(project: Optional[str] = None):
+def get_db():
     """
     Get PostgreSQL database connection with auto-cleanup.
 
-    Args:
-        project: Project name for schema isolation. If None, uses global adapter's default.
-                 IMPORTANT: Use _get_db_for_project() for full project resolution logic.
-                 This function is for internal use and simple cases only.
+    Uses the global adapter's default schema (no project switching).
+    For project-aware connections, use _get_db_for_project(project) instead.
 
     Returns AutoClosingPostgreSQLConnection with:
-    - Schema isolation via search_path
+    - Schema isolation via search_path (global adapter's schema)
     - Dict-like rows via RealDictCursor
     - Automatic placeholder conversion (? to %s)
     - Connection pooling (returned to pool on close)
+
+    WARNING: Do not call this with a project parameter!
+    Use _get_db_for_project(project) for project-aware connections.
     """
-    # Simple pass-through to global adapter
-    # For proper project resolution, callers should use _get_db_for_project()
-    conn = _postgres_adapter.get_connection(project)
+    conn = _postgres_adapter.get_connection()
     return AutoClosingPostgreSQLConnection(conn, _postgres_adapter)
 
 # ============================================================================
