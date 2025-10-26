@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(awk:*)"
+      "Bash(awk:*)",
+      "mcp__fetch__fetch"
     ],
     "deny": [],
     "ask": [],

@@ -425,9 +425,12 @@ def is_postgresql_mode():
     """Always returns True - PostgreSQL is the only mode."""
     return True
 
-def get_db():
+def get_db(project: Optional[str] = None):
     """
     Get PostgreSQL database connection with auto-cleanup.
+
+    Args:
+        project: Project name for schema isolation. If None, uses default project.
 
     Returns AutoClosingPostgreSQLConnection with:
     - Schema isolation via search_path
@@ -435,7 +438,11 @@ def get_db():
     - Automatic placeholder conversion (? to %s)
     - Connection pooling (returned to pool on close)
     """
-    conn = _postgres_adapter.get_connection()
+    # Resolve project name
+    if not project:
+        project = _active_projects.get(get_user_id()) or auto_detect_project() or "default"
+
+    conn = _postgres_adapter.get_connection(project)
     return AutoClosingPostgreSQLConnection(conn, _postgres_adapter)
 
 # ============================================================================
