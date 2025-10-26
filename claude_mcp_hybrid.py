@@ -4811,7 +4811,8 @@ async def query_database(
 async def inspect_database(
     mode: str = "overview",
     filter_text: Optional[str] = None,
-    db_path: Optional[str] = None
+    db_path: Optional[str] = None,
+    project: Optional[str] = None
 ) -> str:
     """
     Quick inspection of ANY SQLite database with preset queries - no SQL knowledge required.
@@ -4891,6 +4892,7 @@ async def inspect_database(
         mode: Inspection mode - "overview", "schema", "contexts", "tables"
         filter_text: Optional text to filter results (for contexts mode)
         db_path: Optional path to SQLite database file (default: dementia memory database)
+        project: Project name (default: auto-detect or active project)
 
     Returns:
         Formatted inspection results with relevant statistics
@@ -5090,7 +5092,8 @@ async def execute_sql(
     db_path: Optional[str] = None,
     dry_run: bool = True,
     confirm: bool = False,
-    max_affected: Optional[int] = None
+    max_affected: Optional[int] = None,
+    project: Optional[str] = None
 ) -> str:
     """
     Execute write operations (INSERT, UPDATE, DELETE) on SQLite databases with comprehensive safety.
@@ -5179,6 +5182,7 @@ async def execute_sql(
         dry_run: If True, preview changes without executing (default: True)
         confirm: Must be True to execute (safety check, default: False)
         max_affected: Optional limit on number of rows that can be affected
+        project: Project name (default: auto-detect or active project)
 
     Returns:
         Detailed report of operation result including affected rows and execution time
@@ -5369,7 +5373,8 @@ async def manage_workspace_table(
     table_name: str,
     schema: Optional[str] = None,
     dry_run: bool = True,
-    confirm: bool = False
+    confirm: bool = False,
+    project: Optional[str] = None
 ) -> str:
     """
     Dynamically create, drop, or modify temporary workspace tables for complex operations.
@@ -5459,6 +5464,7 @@ async def manage_workspace_table(
         schema: Table schema for 'create' operation (columns and types)
         dry_run: If True, preview changes without executing (default: True)
         confirm: Must be True to execute write operations (default: False)
+        project: Project name (default: auto-detect or active project)
 
     Returns:
         JSON with operation result, including table info and SQL executed
