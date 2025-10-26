@@ -107,7 +107,9 @@ def get_database_path():
     
     return os.path.join(cache_dir, f'{context_hash}.db')
 
-# Set up database path and project info
+# DEPRECATED: Static DB_PATH set at module load
+# This is kept for backwards compatibility but should not be used directly
+# Use get_current_db_path() instead for dynamic database selection
 try:
     DB_PATH = get_database_path()
     # Ensure parent directory exists
@@ -120,6 +122,29 @@ except Exception as e:
     DB_PATH = os.path.join(fallback_dir, 'claude-memory-fallback.db')
     # Don't print during module initialization - it can break MCP
     # print(f"Warning: Using fallback database location due to error: {e}", file=sys.stderr)
+
+def get_current_db_path() -> str:
+    """
+    Dynamically get database path for CURRENT working directory.
+    CRITICAL: This recalculates on every call for proper multi-project isolation.
+
+    Returns:
+        str: Path to database file for current project
+    """
+    try:
+        return get_database_path()
+    except Exception as e:
+        # Fallback to temp location if there's any error
+        fallback_dir = tempfile.gettempdir()
+        return os.path.join(fallback_dir, 'claude-memory-fallback.db')
+
+def get_db_location_type() -> str:
+    """Get human-readable description of database location."""
+    db_path = get_current_db_path()
+    if 'claude-dementia' in db_path or '/tmp/' in db_path or '/var/folders/' in db_path:
+        return 'user cache'
+    else:
+        return 'project local'
 
 # DEPRECATED: These are kept for backwards compatibility but should not be used directly
 # Use get_project_root() and get_project_name() instead for dynamic project detection
@@ -147,7 +172,8 @@ def get_project_name() -> str:
 # For testing: allow SESSION_ID override
 SESSION_ID = None
 
-# Show where database is stored (for debugging)
+# DEPRECATED: Static DB_LOCATION based on initial DB_PATH
+# Use get_db_location_type() instead for dynamic location
 if 'claude-dementia' in DB_PATH or '/tmp/' in DB_PATH or '/var/folders/' in DB_PATH:
     DB_LOCATION = 'user cache'
 else:
@@ -187,16 +213,22 @@ class AutoClosingConnection:
                 pass
 
 def get_db():
-    """Get database connection with row factory and auto-cleanup"""
+    """
+    Get database connection with row factory and auto-cleanup.
+    IMPORTANT: Uses dynamic database path for proper multi-project isolation.
+    """
+    # Get current database path (recalculated each time for project isolation)
+    current_db_path = get_current_db_path()
+
     # Ensure the directory exists
-    db_dir = os.path.dirname(DB_PATH)
+    db_dir = os.path.dirname(current_db_path)
     if db_dir and not os.path.exists(db_dir):
         os.makedirs(db_dir, exist_ok=True)
-    
+
     # Connect with better error handling and concurrency support
     try:
         # Use a timeout to avoid hanging on locked databases
-        conn = sqlite3.connect(DB_PATH, timeout=10.0, check_same_thread=False)
+        conn = sqlite3.connect(current_db_path, timeout=10.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         
         # Enable WAL mode for better concurrency (multiple readers, one writer)
@@ -213,12 +245,12 @@ def get_db():
     except sqlite3.Error as e:
         # Provide detailed error information
         print(f"Database connection error: {e}", file=sys.stderr)
-        print(f"Database path: {DB_PATH}", file=sys.stderr)
+        print(f"Database path: {current_db_path}", file=sys.stderr)
         print(f"Database directory: {db_dir}", file=sys.stderr)
         print(f"Directory exists: {os.path.exists(db_dir) if db_dir else 'N/A'}", file=sys.stderr)
-        print(f"Database file exists: {os.path.exists(DB_PATH)}", file=sys.stderr)
-        if os.path.exists(DB_PATH):
-            print(f"File permissions: {oct(os.stat(DB_PATH).st_mode)}", file=sys.stderr)
+        print(f"Database file exists: {os.path.exists(current_db_path)}", file=sys.stderr)
+        if os.path.exists(current_db_path):
+            print(f"File permissions: {oct(os.stat(current_db_path).st_mode)}", file=sys.stderr)
         raise
 
 def is_project_directory(path: str) -> bool:
@@ -1461,16 +1493,17 @@ async def wake_up() -> str:
             "reason": "non_project_directory"
         }
 
-    # Build session info
-    db_size_mb = os.path.getsize(DB_PATH) / (1024 * 1024) if os.path.exists(DB_PATH) else 0
+    # Build session info (using dynamic database path)
+    current_db_path = get_current_db_path()
+    db_size_mb = os.path.getsize(current_db_path) / (1024 * 1024) if os.path.exists(current_db_path) else 0
 
     session_data = {
         "session": {
             "id": session_id,
             "project_name": get_project_name(),  # Dynamic detection
             "project_root": get_project_root(),  # Dynamic detection
-            "database": DB_PATH,
-            "database_location": DB_LOCATION,
+            "database": current_db_path,         # Dynamic detection
+            "database_location": get_db_location_type(),  # Dynamic detection
             "database_size_mb": round(db_size_mb, 2),
             "initialized_at": time.time()
         },
@@ -4390,12 +4423,13 @@ async def check_contexts(text: str) -> str:
     Returns: List of relevant contexts, rule violations, and suggestions
     """
     session_id = get_current_session_id()
-    
+    current_db_path = get_current_db_path()  # Dynamic database path
+
     # Get relevant contexts
-    relevant = get_relevant_contexts_for_text(text, session_id, DB_PATH)
-    
+    relevant = get_relevant_contexts_for_text(text, session_id, current_db_path)
+
     # Check for violations
-    violations = check_command_context(text, session_id, DB_PATH)
+    violations = check_command_context(text, session_id, current_db_path)
     
     output = []
     if relevant:
