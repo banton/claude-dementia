@@ -43,8 +43,16 @@ class TokenTracker:
         'ollama': 0.00                        # FREE
     }
 
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(self, conn):
         self.conn = conn
+
+        # Detect database type
+        try:
+            self.conn.cursor()
+            self.is_postgresql = True
+        except AttributeError:
+            self.is_postgresql = False
+
         self._init_schema()
 
         # Initialize tokenizer for accurate counting
@@ -53,31 +61,60 @@ class TokenTracker:
         except:
             self.tokenizer = None  # Fallback to char-based estimation
 
+    def _execute(self, sql, params=()):
+        """Execute SQL on either SQLite or PostgreSQL connection."""
+        if self.is_postgresql:
+            # PostgreSQL uses %s placeholders instead of ?
+            sql = sql.replace('?', '%s')
+            cur = self.conn.cursor()
+            cur.execute(sql, params)
+            return cur
+        else:
+            return self.conn.execute(sql, params)
+
     def _init_schema(self):
         """Create usage tracking table if not exists."""
-        self.conn.execute('''
-            CREATE TABLE IF NOT EXISTS token_usage (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp REAL NOT NULL,
-                operation_type TEXT NOT NULL,
-                model TEXT NOT NULL,
-                provider TEXT NOT NULL,
-                input_tokens INTEGER NOT NULL,
-                output_tokens INTEGER DEFAULT 0,
-                input_chars INTEGER NOT NULL,
-                output_chars INTEGER DEFAULT 0,
-                duration_ms INTEGER,
-                context_id INTEGER,
-                metadata TEXT
-            )
-        ''')
+        if self.is_postgresql:
+            self._execute('''
+                CREATE TABLE IF NOT EXISTS token_usage (
+                    id SERIAL PRIMARY KEY,
+                    timestamp DOUBLE PRECISION NOT NULL,
+                    operation_type TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL,
+                    output_tokens INTEGER DEFAULT 0,
+                    input_chars INTEGER NOT NULL,
+                    output_chars INTEGER DEFAULT 0,
+                    duration_ms INTEGER,
+                    context_id INTEGER,
+                    metadata TEXT
+                )
+            ''')
+        else:
+            self._execute('''
+                CREATE TABLE IF NOT EXISTS token_usage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL NOT NULL,
+                    operation_type TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL,
+                    output_tokens INTEGER DEFAULT 0,
+                    input_chars INTEGER NOT NULL,
+                    output_chars INTEGER DEFAULT 0,
+                    duration_ms INTEGER,
+                    context_id INTEGER,
+                    metadata TEXT
+                )
+            ''')
 
-        self.conn.execute('''
+        self._execute('''
             CREATE INDEX IF NOT EXISTS idx_usage_timestamp
             ON token_usage(timestamp DESC)
         ''')
 
-        self.conn.execute('''
+        self._execute('''
             CREATE INDEX IF NOT EXISTS idx_usage_operation
             ON token_usage(operation_type, provider)
         ''')
@@ -110,7 +147,7 @@ class TokenTracker:
         """Track embedding generation."""
         tokens = self.count_tokens(text)
 
-        self.conn.execute('''
+        self._execute('''
             INSERT INTO token_usage
             (timestamp, operation_type, model, provider,
              input_tokens, input_chars, duration_ms, context_id)
@@ -141,7 +178,7 @@ class TokenTracker:
         input_tokens = self.count_tokens(input_text)
         output_tokens = self.count_tokens(output_text)
 
-        self.conn.execute('''
+        self._execute('''
             INSERT INTO token_usage
             (timestamp, operation_type, model, provider,
              input_tokens, output_tokens, input_chars, output_chars,
@@ -197,7 +234,7 @@ class TokenTracker:
 
         sql += ' GROUP BY operation_type, provider, model'
 
-        cursor = self.conn.execute(sql, params)
+        cursor = self._execute(sql, params)
 
         stats = []
         for row in cursor.fetchall():
@@ -345,7 +382,7 @@ class TokenTracker:
         """Clear usage records older than specified days."""
         cutoff = time.time() - (days * 86400)
 
-        cursor = self.conn.execute('''
+        cursor = self._execute('''
             DELETE FROM token_usage WHERE timestamp < ?
         ''', (cutoff,))
 
