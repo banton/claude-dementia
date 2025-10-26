@@ -101,6 +101,73 @@ def _get_project_for_context(project: str = None) -> str:
     # Priority 4: Default project
     return "default"
 
+def _get_table_list(conn, like_pattern: str = '%'):
+    """
+    Get list of tables from database (works with SQLite and PostgreSQL).
+
+    Args:
+        conn: Database connection
+        like_pattern: SQL LIKE pattern for table names (default: all tables)
+
+    Returns:
+        List of dicts with 'name' and 'sql' keys
+    """
+    # Check if PostgreSQL (AutoClosingPostgreSQLConnection or psycopg2 connection)
+    is_pg = isinstance(conn, AutoClosingPostgreSQLConnection) or not hasattr(conn, 'row_factory')
+
+    if is_pg:
+        # PostgreSQL - use ? placeholder (wrapper will convert to %s)
+        cursor = conn.execute(f"""
+            SELECT
+                table_name as name,
+                NULL as sql
+            FROM information_schema.tables
+            WHERE table_schema = current_schema()
+            AND table_type = 'BASE TABLE'
+            AND table_name LIKE ?
+            ORDER BY table_name
+        """, (like_pattern,))
+    else:
+        # SQLite
+        cursor = conn.execute(f"""
+            SELECT name, sql FROM sqlite_master
+            WHERE type='table' AND name LIKE ?
+            ORDER BY name
+        """, (like_pattern,))
+
+    return cursor.fetchall()
+
+def _table_exists(conn, table_name: str) -> bool:
+    """
+    Check if a table exists (works with SQLite and PostgreSQL).
+
+    Args:
+        conn: Database connection
+        table_name: Name of table to check
+
+    Returns:
+        True if table exists, False otherwise
+    """
+    # Check if PostgreSQL (AutoClosingPostgreSQLConnection or psycopg2 connection)
+    is_pg = isinstance(conn, AutoClosingPostgreSQLConnection) or not hasattr(conn, 'row_factory')
+
+    if is_pg:
+        # PostgreSQL
+        cursor = conn.execute("""
+            SELECT table_name as name
+            FROM information_schema.tables
+            WHERE table_schema = current_schema()
+            AND table_name = ?
+        """, (table_name,))
+    else:
+        # SQLite
+        cursor = conn.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name=?
+        """, (table_name,))
+
+    return cursor.fetchone() is not None
+
 def _get_db_for_project(project: str = None):
     """
     Get database connection for a specific project.
@@ -5692,20 +5759,20 @@ async def manage_workspace_table(
 
         # Handle LIST operation
         if operation == 'list':
-            cursor = conn.execute("""
-                SELECT name, sql FROM sqlite_master
-                WHERE type='table' AND name LIKE 'workspace_%'
-                ORDER BY name
-            """)
+            rows = _get_table_list(conn, 'workspace_%')
             tables = []
-            for row in cursor.fetchall():
+            for row in rows:
                 # Get row count
-                count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {row['name']}")
+                if hasattr(conn, 'execute'):
+                    count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {row['name']}")
+                else:
+                    count_cursor = conn.cursor()
+                    count_cursor.execute(f"SELECT COUNT(*) as count FROM {row['name']}")
                 count = count_cursor.fetchone()['count']
 
                 tables.append({
                     "name": row['name'],
-                    "schema": row['sql'],
+                    "schema": row['sql'] if row['sql'] else "(PostgreSQL table)",
                     "row_count": count
                 })
 
@@ -5741,13 +5808,7 @@ async def manage_workspace_table(
         # Handle INSPECT operation
         if operation == 'inspect':
             # Check if table exists
-            cursor = conn.execute("""
-                SELECT sql FROM sqlite_master
-                WHERE type='table' AND name=?
-            """, (full_table_name,))
-            result = cursor.fetchone()
-
-            if not result:
+            if not _table_exists(conn, full_table_name):
                 return json.dumps({
                     "error": "Table not found",
                     "table": full_table_name,
@@ -5755,17 +5816,23 @@ async def manage_workspace_table(
                 }, indent=2)
 
             # Get row count
-            count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
+            if hasattr(conn, 'execute'):
+                count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
+                sample_cursor = conn.execute(f"SELECT * FROM {full_table_name} LIMIT 5")
+            else:
+                count_cursor = conn.cursor()
+                count_cursor.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
+                sample_cursor = conn.cursor()
+                sample_cursor.execute(f"SELECT * FROM {full_table_name} LIMIT 5")
+
             count = count_cursor.fetchone()['count']
 
             # Get sample data (first 5 rows)
-            sample_cursor = conn.execute(f"SELECT * FROM {full_table_name} LIMIT 5")
             sample_data = [dict(row) for row in sample_cursor.fetchall()]
 
             return json.dumps({
                 "operation": "inspect",
                 "table": full_table_name,
-                "schema": result['sql'],
                 "row_count": count,
                 "sample_data": sample_data
             }, indent=2)
@@ -5779,11 +5846,7 @@ async def manage_workspace_table(
                 }, indent=2)
 
             # Check if table already exists
-            cursor = conn.execute("""
-                SELECT name FROM sqlite_master
-                WHERE type='table' AND name=?
-            """, (full_table_name,))
-            if cursor.fetchone():
+            if _table_exists(conn, full_table_name):
                 return json.dumps({
                     "error": "Table already exists",
                     "table": full_table_name,
@@ -5808,7 +5871,11 @@ async def manage_workspace_table(
                 }, indent=2)
 
             # Execute CREATE
-            conn.execute(create_sql)
+            if hasattr(conn, 'execute'):
+                conn.execute(create_sql)
+            else:
+                cursor = conn.cursor()
+                cursor.execute(create_sql)
             conn.commit()
 
             return json.dumps({
@@ -5822,11 +5889,7 @@ async def manage_workspace_table(
         # Handle DROP operation
         if operation == 'drop':
             # Check if table exists
-            cursor = conn.execute("""
-                SELECT name FROM sqlite_master
-                WHERE type='table' AND name=?
-            """, (full_table_name,))
-            if not cursor.fetchone():
+            if not _table_exists(conn, full_table_name):
                 return json.dumps({
                     "error": "Table not found",
                     "table": full_table_name,
@@ -5837,7 +5900,11 @@ async def manage_workspace_table(
 
             if dry_run:
                 # Get row count for preview
-                count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
+                if hasattr(conn, 'execute'):
+                    count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
+                else:
+                    count_cursor = conn.cursor()
+                    count_cursor.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
                 count = count_cursor.fetchone()['count']
 
                 return json.dumps({
@@ -5856,7 +5923,11 @@ async def manage_workspace_table(
                 }, indent=2)
 
             # Execute DROP
-            conn.execute(drop_sql)
+            if hasattr(conn, 'execute'):
+                conn.execute(drop_sql)
+            else:
+                cursor = conn.cursor()
+                cursor.execute(drop_sql)
             conn.commit()
 
             return json.dumps({
