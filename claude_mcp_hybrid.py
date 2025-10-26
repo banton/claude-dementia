@@ -680,9 +680,12 @@ def update_session_activity():
     """, (time.time(), session_id))
     conn.commit()
 
-def validate_database_isolation() -> dict:
+def validate_database_isolation(conn) -> dict:
     """
     Internal function to validate database isolation for current project.
+
+    Args:
+        conn: Existing database connection (to avoid creating new connection)
 
     Checks 8 parameters of database "rightness":
     1. Path Correctness - Database path calculated from current directory
@@ -697,7 +700,6 @@ def validate_database_isolation() -> dict:
     Returns:
         dict: Validation report with status, checks, warnings, errors
     """
-    conn = get_db()
     current_cwd = os.getcwd()
     validation_report = {
         "valid": True,
@@ -1786,7 +1788,7 @@ async def wake_up() -> str:
     cleanup_expired_queries(conn)
 
     # Validate database isolation (critical security check)
-    validation_report = validate_database_isolation()
+    validation_report = validate_database_isolation(conn)
 
     # Get git status
     git_info = get_git_status()
