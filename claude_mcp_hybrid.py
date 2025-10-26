@@ -1854,12 +1854,33 @@ def load_stored_file_model(conn, session_id: str) -> Dict[str, Dict]:
 def store_file_metadata(conn, session_id: str, file_path: str, metadata: Dict, scan_time_ms: int):
     """Store or update file metadata in database"""
     conn.execute("""
-        INSERT OR REPLACE INTO file_semantic_model (
+        INSERT INTO file_semantic_model (
             session_id, file_path, file_size, content_hash, modified_time, hash_method,
             file_type, language, purpose, imports, exports, dependencies, used_by, contains,
             is_standard, standard_type, warnings, cluster_name, related_files,
             last_scanned, scan_duration_ms
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (session_id, file_path)
+        DO UPDATE SET
+            file_size = EXCLUDED.file_size,
+            content_hash = EXCLUDED.content_hash,
+            modified_time = EXCLUDED.modified_time,
+            hash_method = EXCLUDED.hash_method,
+            file_type = EXCLUDED.file_type,
+            language = EXCLUDED.language,
+            purpose = EXCLUDED.purpose,
+            imports = EXCLUDED.imports,
+            exports = EXCLUDED.exports,
+            dependencies = EXCLUDED.dependencies,
+            used_by = EXCLUDED.used_by,
+            contains = EXCLUDED.contains,
+            is_standard = EXCLUDED.is_standard,
+            standard_type = EXCLUDED.standard_type,
+            warnings = EXCLUDED.warnings,
+            cluster_name = EXCLUDED.cluster_name,
+            related_files = EXCLUDED.related_files,
+            last_scanned = EXCLUDED.last_scanned,
+            scan_duration_ms = EXCLUDED.scan_duration_ms
     """, (
         session_id,
         file_path,
@@ -1937,10 +1958,19 @@ def store_query_results(conn, query_type: str, params: dict, results: list,
     ).hexdigest()[:12]
 
     conn.execute("""
-        INSERT OR REPLACE INTO query_results_cache
+        INSERT INTO query_results_cache
         (query_id, query_type, query_params, total_results, result_data,
          created_at, expires_at, session_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (query_id)
+        DO UPDATE SET
+            query_type = EXCLUDED.query_type,
+            query_params = EXCLUDED.query_params,
+            total_results = EXCLUDED.total_results,
+            result_data = EXCLUDED.result_data,
+            created_at = EXCLUDED.created_at,
+            expires_at = EXCLUDED.expires_at,
+            session_id = EXCLUDED.session_id
     """, (
         query_id,
         query_type,
@@ -2943,11 +2973,11 @@ async def sleep(project: Optional[str] = None) -> str:
     
     # 4. FILES BEING WORKED ON
     cursor = conn.execute("""
-        SELECT DISTINCT path, string_agg(tag, ', ') as tags
+        SELECT path, string_agg(tag, ', ') as tags, MAX(created_at) as latest
         FROM file_tags
         WHERE created_at > ?
         GROUP BY path
-        ORDER BY created_at DESC
+        ORDER BY latest DESC
         LIMIT 5
     """, (session['started_at'],))
 
@@ -4280,7 +4310,7 @@ async def search_contexts(
 
     # Add priority filter
     if priority:
-        sql += " AND json_extract(metadata, '$.priority') = ?"
+        sql += " AND metadata->>'priority' = ?"
         params.append(priority)
 
     # Add tags filter
@@ -4288,7 +4318,7 @@ async def search_contexts(
         tag_conditions = []
         for tag in tags.split(','):
             tag = tag.strip()
-            tag_conditions.append("json_extract(metadata, '$.tags') LIKE ?")
+            tag_conditions.append("metadata->>'tags' LIKE ?")
             params.append(f'%{tag}%')
         sql += f" AND ({' OR '.join(tag_conditions)})"
 
@@ -4527,12 +4557,12 @@ async def memory_analytics(project: Optional[str] = None) -> str:
     # By priority distribution
     cursor = conn.execute("""
         SELECT
-            json_extract(metadata, '$.priority') as priority,
+            metadata->>'priority' as priority,
             COUNT(*) as count,
             SUM(LENGTH(content)) as total_bytes
         FROM context_locks
         WHERE session_id = ?
-        GROUP BY json_extract(metadata, '$.priority')
+        GROUP BY metadata->>'priority'
     """, (session_id,))
 
     analytics["by_priority"] = {}
@@ -5016,7 +5046,7 @@ async def inspect_database(
             # Locked contexts by priority
             cursor = conn.execute("""
                 SELECT
-                    json_extract(metadata, '$.priority') as priority,
+                    metadata->>'priority' as priority,
                     COUNT(*) as count
                 FROM context_locks
                 WHERE session_id = ?
@@ -5069,27 +5099,56 @@ async def inspect_database(
         elif mode == "schema":
             output = ["📋 DATABASE SCHEMA", "=" * 60, ""]
 
-            # Get all tables
-            cursor = conn.execute("""
-                SELECT name FROM sqlite_master
-                WHERE type='table'
-                ORDER BY name
-            """)
+            # Get all tables (PostgreSQL-compatible)
+            if is_postgresql_mode():
+                cursor = conn.execute("""
+                    SELECT table_name as name
+                    FROM information_schema.tables
+                    WHERE table_schema = current_schema()
+                    AND table_type = 'BASE TABLE'
+                    ORDER BY table_name
+                """)
+            else:
+                cursor = conn.execute("""
+                    SELECT name FROM sqlite_master
+                    WHERE type='table'
+                    ORDER BY name
+                """)
 
             tables = [row['name'] for row in cursor.fetchall()]
 
             for table in tables:
                 output.append(f"\n📄 Table: {table}")
 
-                # Get column info
-                cursor = conn.execute(f"PRAGMA table_info({table})")
-                columns = cursor.fetchall()
+                # Get column info (PostgreSQL-compatible)
+                if is_postgresql_mode():
+                    cursor = conn.execute("""
+                        SELECT
+                            column_name as name,
+                            data_type as type,
+                            is_nullable,
+                            CASE WHEN column_default LIKE 'nextval%%' THEN 1 ELSE 0 END as pk
+                        FROM information_schema.columns
+                        WHERE table_schema = current_schema()
+                        AND table_name = ?
+                        ORDER BY ordinal_position
+                    """, (table,))
+                    columns = cursor.fetchall()
 
-                output.append("   Columns:")
-                for col in columns:
-                    pk = " (PRIMARY KEY)" if col['pk'] else ""
-                    notnull = " NOT NULL" if col['notnull'] else ""
-                    output.append(f"      {col['name']}: {col['type']}{pk}{notnull}")
+                    output.append("   Columns:")
+                    for col in columns:
+                        pk = " (PRIMARY KEY)" if col['pk'] else ""
+                        notnull = " NOT NULL" if col['is_nullable'] == 'NO' else ""
+                        output.append(f"      {col['name']}: {col['type']}{pk}{notnull}")
+                else:
+                    cursor = conn.execute(f"PRAGMA table_info({table})")
+                    columns = cursor.fetchall()
+
+                    output.append("   Columns:")
+                    for col in columns:
+                        pk = " (PRIMARY KEY)" if col['pk'] else ""
+                        notnull = " NOT NULL" if col['notnull'] else ""
+                        output.append(f"      {col['name']}: {col['type']}{pk}{notnull}")
 
                 # Get row count
                 cursor = conn.execute(f"SELECT COUNT(*) as count FROM {table}")
@@ -6097,7 +6156,7 @@ async def context_dashboard(project: Optional[str] = None) -> str:
     # Get comprehensive statistics
     stats_query = """
         SELECT
-            json_extract(metadata, '$.priority') as priority,
+            metadata->>'priority' as priority,
             COUNT(*) as count,
             SUM(LENGTH(content)) as total_size,
             AVG(LENGTH(content)) as avg_size
@@ -7509,20 +7568,35 @@ async def scan_and_analyze_directory(
         if store_in_table:
             conn = _get_db_for_project(project)
 
-            # Create table if doesn't exist
-            conn.execute(f"""
-                CREATE TABLE IF NOT EXISTS {store_in_table} (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    file TEXT,
-                    size_bytes INTEGER,
-                    modified TEXT,
-                    lines INTEGER,
-                    words INTEGER,
-                    chars INTEGER,
-                    error TEXT,
-                    scanned_at REAL DEFAULT (strftime('%s', 'now'))
-                )
-            """)
+            # Create table if doesn't exist (PostgreSQL-compatible)
+            if is_postgresql_mode():
+                conn.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {store_in_table} (
+                        id SERIAL PRIMARY KEY,
+                        file TEXT,
+                        size_bytes INTEGER,
+                        modified TEXT,
+                        lines INTEGER,
+                        words INTEGER,
+                        chars INTEGER,
+                        error TEXT,
+                        scanned_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
+                    )
+                """)
+            else:
+                conn.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {store_in_table} (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        file TEXT,
+                        size_bytes INTEGER,
+                        modified TEXT,
+                        lines INTEGER,
+                        words INTEGER,
+                        chars INTEGER,
+                        error TEXT,
+                        scanned_at REAL DEFAULT (strftime('%s', 'now'))
+                    )
+                """)
 
             # Insert results
             for result in results:

@@ -206,7 +206,8 @@ class PostgreSQLAdapter:
                 last_active DOUBLE PRECISION,
                 project_fingerprint TEXT,
                 project_path TEXT,
-                project_name TEXT
+                project_name TEXT,
+                summary TEXT
             )
         """)
 
@@ -285,6 +286,7 @@ class PostgreSQLAdapter:
                 related_files TEXT,
                 last_scanned DOUBLE PRECISION,
                 scan_duration_ms INTEGER,
+                UNIQUE(session_id, file_path),
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             )
         """)
@@ -446,6 +448,36 @@ class PostgreSQLAdapter:
             if not cur.fetchone():
                 print("⚠️  Migrating memory_entries: adding category column", file=sys.stderr)
                 cur.execute("ALTER TABLE memory_entries ADD COLUMN category TEXT")
+        except Exception as e:
+            pass
+
+        # Migration 4: Add summary to sessions if missing
+        try:
+            cur.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                AND table_name = 'sessions'
+                AND column_name = 'summary'
+            """)
+            if not cur.fetchone():
+                print("⚠️  Migrating sessions: adding summary column", file=sys.stderr)
+                cur.execute("ALTER TABLE sessions ADD COLUMN summary TEXT")
+        except Exception as e:
+            pass
+
+        # Migration 5: Add UNIQUE constraint to file_semantic_model if missing
+        try:
+            cur.execute("""
+                SELECT constraint_name
+                FROM information_schema.table_constraints
+                WHERE table_schema = current_schema()
+                AND table_name = 'file_semantic_model'
+                AND constraint_type = 'UNIQUE'
+            """)
+            if not cur.fetchone():
+                print("⚠️  Migrating file_semantic_model: adding UNIQUE constraint", file=sys.stderr)
+                cur.execute("ALTER TABLE file_semantic_model ADD CONSTRAINT file_semantic_model_unique UNIQUE(session_id, file_path)")
         except Exception as e:
             pass
 
