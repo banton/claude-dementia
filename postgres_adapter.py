@@ -334,6 +334,40 @@ class PostgreSQLAdapter:
             )
         """)
 
+        # Decisions table (track key decisions made during session)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS decisions (
+                id SERIAL PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                timestamp DOUBLE PRECISION NOT NULL,
+                question TEXT NOT NULL,
+                context TEXT,
+                options TEXT,
+                decision TEXT,
+                rationale TEXT,
+                status TEXT DEFAULT 'OPEN',
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            )
+        """)
+
+        # Context archives table (safe archival of deleted contexts)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS context_archives (
+                id SERIAL PRIMARY KEY,
+                original_id INTEGER NOT NULL,
+                session_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                version TEXT NOT NULL,
+                content TEXT NOT NULL,
+                preview TEXT,
+                key_concepts TEXT,
+                metadata TEXT,
+                deleted_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM CURRENT_TIMESTAMP),
+                delete_reason TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            )
+        """)
+
         # Create indexes for performance
         cur.execute("CREATE INDEX IF NOT EXISTS idx_context_locks_session ON context_locks(session_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_context_locks_label ON context_locks(label)")
@@ -342,6 +376,9 @@ class PostgreSQLAdapter:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_file_changes_session ON file_change_history(session_id, timestamp DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_todos_session ON todos(session_id, status)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status, updated_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_decisions_session ON decisions(session_id, timestamp DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_context_archives_session ON context_archives(session_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_context_archives_label ON context_archives(label, deleted_at DESC)")
 
     def get_info(self) -> dict:
         """Get information about current database and schema."""
