@@ -3982,13 +3982,13 @@ async def _extract_critical_rules(path: str) -> Optional[Dict[str, str]]:
         return None
 
 @mcp.tool()
-async def batch_lock_contexts(contexts: str, project: Optional[str] = None) -> str:
+async def batch_lock_contexts(contexts: List[Dict[str, Any]], project: Optional[str] = None) -> str:
     """
     Lock multiple contexts in one operation (reduces round-trips for cloud).
 
     **Purpose:** Efficient bulk context locking
 
-    **Input:** JSON array of context objects
+    **Input:** Array of context objects
     Each object should have:
     - content: str (required) - The context content
     - topic: str (required) - Context label/name
@@ -3999,10 +3999,10 @@ async def batch_lock_contexts(contexts: str, project: Optional[str] = None) -> s
 
     **Example:**
     ```
-    batch_lock_contexts('[
+    batch_lock_contexts([
         {"topic": "api_v1", "content": "API spec...", "priority": "important"},
         {"topic": "database_schema", "content": "CREATE TABLE...", "tags": "database"}
-    ]')
+    ])
     ```
 
     **Benefits:**
@@ -4011,13 +4011,10 @@ async def batch_lock_contexts(contexts: str, project: Optional[str] = None) -> s
     - Atomic operation - all succeed or all fail rolled back
     - Returns detailed status for each context
     """
-    try:
-        contexts_list = json.loads(contexts)
-    except json.JSONDecodeError as e:
-        return f"❌ Invalid JSON: {str(e)}"
+    if not isinstance(contexts, list):
+        return "❌ Input must be an array of context objects"
 
-    if not isinstance(contexts_list, list):
-        return "❌ Input must be a JSON array of context objects"
+    contexts_list = contexts
 
     results = []
     successful = 0
@@ -4081,7 +4078,7 @@ async def batch_lock_contexts(contexts: str, project: Optional[str] = None) -> s
 
 
 @mcp.tool()
-async def batch_recall_contexts(topics: str, preview_only: bool = True, project: Optional[str] = None) -> str:
+async def batch_recall_contexts(topics: List[str], preview_only: bool = True, project: Optional[str] = None) -> str:
     """
     Recall multiple contexts in one operation.
 
@@ -4091,7 +4088,7 @@ async def batch_recall_contexts(topics: str, preview_only: bool = True, project:
 
     **Purpose:** Efficient bulk context retrieval
 
-    **Input:** JSON array of topic names
+    **Input:** Array of topic names
     ```
     ["api_spec", "database_schema", "auth_rules"]
     ```
@@ -4119,7 +4116,7 @@ async def batch_recall_contexts(topics: str, preview_only: bool = True, project:
     **Example workflow:**
     ```python
     # Step 1: Get previews of all related contexts
-    batch_recall_contexts('["api_v1", "database_schema", "auth_rules"]')
+    batch_recall_contexts(["api_v1", "database_schema", "auth_rules"])
     # Returns: 3 summaries (~300 tokens total)
 
     # Step 2: Load specific contexts fully as needed
@@ -4133,24 +4130,19 @@ async def batch_recall_contexts(topics: str, preview_only: bool = True, project:
     4. Avoid loading 5+ full contexts at once (context overflow)
 
     Args:
-        topics: JSON array of topic names
+        topics: Array of topic names
         preview_only: If True, return summaries (default); if False, full content
 
     Returns: JSON with summary and results for each topic
     """
-    try:
-        topics_list = json.loads(topics)
-    except json.JSONDecodeError as e:
-        return f"❌ Invalid JSON: {str(e)}"
-
-    if not isinstance(topics_list, list):
-        return "❌ Input must be a JSON array of topic names"
+    if not isinstance(topics, list):
+        return "❌ Input must be an array of topic names"
 
     results = []
     found = 0
     not_found = 0
 
-    for topic in topics_list:
+    for topic in topics:
         if not isinstance(topic, str):
             results.append({
                 "topic": str(topic),
@@ -4202,7 +4194,7 @@ async def batch_recall_contexts(topics: str, preview_only: bool = True, project:
 
     return json.dumps({
         "summary": {
-            "total": len(topics_list),
+            "total": len(topics),
             "found": found,
             "not_found": not_found,
             "mode": "preview" if preview_only else "full",
