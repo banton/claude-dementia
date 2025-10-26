@@ -6495,12 +6495,31 @@ async def scan_project_files(
     - Runs automatically during wake_up() (incremental)
     - Use full_scan=True after major changes (git pull, branch switch)
     - Results persist in database for fast future scans
+
+    **Note:** This tool requires filesystem access and may not work in
+    restricted environments like Claude Desktop without file permissions.
     """
+    # Check if we have filesystem access
+    project_root = os.getcwd()
+
+    try:
+        # Quick access test - try to list current directory
+        test_list = os.listdir(project_root)
+        if not test_list:
+            return json.dumps({
+                "error": "No filesystem access",
+                "message": "This tool requires filesystem access which may not be available in Claude Desktop",
+                "suggestion": "This tool is designed for local development environments"
+            }, indent=2)
+    except (PermissionError, OSError) as e:
+        return json.dumps({
+            "error": "Filesystem access denied",
+            "message": str(e),
+            "suggestion": "This tool requires filesystem permissions to scan project files"
+        }, indent=2)
+
     conn = _get_db_for_project(project)
     session_id = get_current_session_id()
-
-    # Get project root
-    project_root = os.getcwd()
 
     start_time = time.time()
 
