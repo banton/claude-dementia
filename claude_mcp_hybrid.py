@@ -6496,8 +6496,17 @@ async def scan_project_files(
     - Use full_scan=True after major changes (git pull, branch switch)
     - Results persist in database for fast future scans
 
-    **Note:** This tool requires filesystem access and may not work in
-    restricted environments like Claude Desktop without file permissions.
+    **IMPORTANT - Local Development Only:**
+    This tool uses direct Python filesystem access (os.walk) and is designed
+    for local development environments only. It will not work properly in:
+    - Claude Desktop (requires per-file permissions, causes timeout)
+    - Mobile devices (no filesystem access)
+    - Browser environments (restricted file access)
+
+    For Claude Desktop, use the filesystem MCP server instead:
+    - mcp__filesystem__list_directory() for file listing
+    - mcp__filesystem__read_file() for file contents
+    - Then use our semantic analysis tools on the results
     """
     # Check if we have filesystem access
     project_root = os.getcwd()
@@ -6739,6 +6748,10 @@ async def query_files(
     - Search broadly first, then filter with file_type/cluster
     - Empty query with cluster returns all files in that cluster
     - Results ordered by relevance (path match > imports/exports match)
+
+    **Note:** This tool queries the database (no direct file access).
+    Works in all environments. Run scan_project_files() first to build the model
+    (local dev only) or populate database manually.
     """
     conn = _get_db_for_project(project)
     session_id = get_current_session_id()
@@ -6855,6 +6868,9 @@ async def get_file_clusters(project: Optional[str] = None) -> str:
     - Find all files related to a feature
     - Navigate large codebases
     - Identify architectural patterns
+
+    **Note:** This tool queries the database (no direct file access).
+    Works in all environments. Requires file model built by scan_project_files() first.
     """
     conn = _get_db_for_project(project)
     session_id = get_current_session_id()
@@ -6937,6 +6953,9 @@ async def file_model_status(project: Optional[str] = None) -> str:
     - Understand project composition
     - Monitor standard file warnings
     - Verify scan performance
+
+    **Note:** This tool queries the database (no direct file access).
+    Works in all environments. Shows status of file model built by scan_project_files().
     """
     conn = _get_db_for_project(project)
     session_id = get_current_session_id()
@@ -7682,6 +7701,15 @@ async def scan_and_analyze_directory(
 
     This tool bridges the gap between filesystem access and database storage,
     enabling complex file analysis workflows.
+
+    **IMPORTANT - Local Development Only:**
+    This tool uses direct Python filesystem access (Path.glob, os.walk) and is
+    designed for local development environments only. It will not work in:
+    - Claude Desktop (requires per-file permissions)
+    - Mobile devices (no filesystem access)
+    - Browser environments (restricted file access)
+
+    For Claude Desktop, use filesystem MCP tools instead.
 
     Example:
         # Recursive scan (all subdirectories)
