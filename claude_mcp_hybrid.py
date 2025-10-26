@@ -3910,10 +3910,43 @@ async def unlock_context(
 # PROJECT MEMORY SYNCHRONIZATION
 # ============================================================
 
+def _get_scannable_py_files(path: str, limit: int = 50):
+    """
+    Get Python files for scanning, respecting ignore patterns.
+
+    Args:
+        path: Root directory to scan
+        limit: Maximum number of files to return (prevents permission spam)
+
+    Returns:
+        List of Path objects for Python files
+    """
+    skip_dirs = {
+        'node_modules', 'venv', 'env', '.venv', '.env',
+        '__pycache__', '.git', '.svn', '.hg',
+        'dist', 'build', '.tox', '.pytest_cache',
+        'site-packages', '.mypy_cache', '.eggs',
+        '.conda', 'htmlcov', '.coverage'
+    }
+
+    py_files = []
+    try:
+        for py_file in Path(path).rglob("*.py"):
+            # Skip if any parent directory is in skip list
+            if any(part in skip_dirs for part in py_file.parts):
+                continue
+            py_files.append(py_file)
+            if len(py_files) >= limit:
+                break
+    except Exception:
+        pass
+
+    return py_files
+
 async def _detect_project_type(path: str) -> str:
     """Detect project type by analyzing structure."""
     try:
-        py_files = list(Path(path).rglob("*.py"))
+        py_files = _get_scannable_py_files(path, limit=20)
         for py_file in py_files:
             try:
                 content = py_file.read_text(encoding='utf-8', errors='ignore')
@@ -3950,7 +3983,7 @@ This overview was automatically generated."""
 async def _extract_database_schema(path: str) -> Optional[Dict[str, str]]:
     """Extract database schema from code."""
     try:
-        py_files = list(Path(path).rglob("*.py"))
+        py_files = _get_scannable_py_files(path, limit=30)
         schemas = []
         for py_file in py_files:
             try:
@@ -3973,7 +4006,7 @@ async def _extract_database_schema(path: str) -> Optional[Dict[str, str]]:
 async def _extract_tool_contracts(path: str) -> Optional[Dict[str, str]]:
     """Extract @mcp.tool() definitions."""
     try:
-        py_files = list(Path(path).rglob("*.py"))
+        py_files = _get_scannable_py_files(path, limit=30)
         tools = []
         for py_file in py_files:
             try:
@@ -3996,7 +4029,7 @@ async def _extract_tool_contracts(path: str) -> Optional[Dict[str, str]]:
 async def _extract_critical_rules(path: str) -> Optional[Dict[str, str]]:
     """Extract IMPORTANT/WARNING rules from comments."""
     try:
-        py_files = list(Path(path).rglob("*.py"))
+        py_files = _get_scannable_py_files(path, limit=30)
         rules = []
         keywords = ['IMPORTANT:', 'WARNING:', 'NEVER:', 'ALWAYS:']
         for py_file in py_files:
