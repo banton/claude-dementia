@@ -368,6 +368,20 @@ class PostgreSQLAdapter:
             )
         """)
 
+        # File tags table (semantic file tagging)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS file_tags (
+                id SERIAL PRIMARY KEY,
+                path TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                comment TEXT,
+                created_at DOUBLE PRECISION,
+                created_by TEXT,
+                metadata TEXT,
+                UNIQUE(path, tag)
+            )
+        """)
+
         # Create indexes for performance
         cur.execute("CREATE INDEX IF NOT EXISTS idx_context_locks_session ON context_locks(session_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_context_locks_label ON context_locks(label)")
@@ -379,6 +393,8 @@ class PostgreSQLAdapter:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_decisions_session ON decisions(session_id, timestamp DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_context_archives_session ON context_archives(session_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_context_archives_label ON context_archives(label, deleted_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_file_tags_path ON file_tags(path)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_file_tags_created ON file_tags(created_at DESC)")
 
         # Run migrations for existing schemas
         self._run_migrations(cur)

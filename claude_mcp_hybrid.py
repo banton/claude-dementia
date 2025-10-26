@@ -2943,7 +2943,7 @@ async def sleep(project: Optional[str] = None) -> str:
     
     # 4. FILES BEING WORKED ON
     cursor = conn.execute("""
-        SELECT DISTINCT path, GROUP_CONCAT(tag) as tags
+        SELECT DISTINCT path, string_agg(tag, ', ') as tags
         FROM file_tags
         WHERE created_at > ?
         GROUP BY path
