@@ -2926,7 +2926,7 @@ async def sleep(project: Optional[str] = None) -> str:
         SELECT label, version, MAX(locked_at) as latest
         FROM context_locks
         WHERE session_id = ?
-        GROUP BY label
+        GROUP BY label, version
         ORDER BY latest DESC
         LIMIT 5
     """, (session_id,))
