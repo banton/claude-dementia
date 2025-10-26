@@ -482,13 +482,9 @@ See `~/.claude-dementia/path_mapping.json` for complete mapping.
 
 ## Database Validation (2024-10-26)
 
-### Verification Tool
+### Automatic Verification
 
-After implementing complete isolation, added comprehensive validation:
-
-```python
-dementia:validate_database_isolation()
-```
+After implementing complete isolation, added automatic validation to `wake_up()`:
 
 **Validates 8 Parameters of Database "Rightness":**
 1. ✅ Path Correctness - Database path from current directory
@@ -501,9 +497,21 @@ dementia:validate_database_isolation()
 8. ✅ Session Metadata - Session record matches runtime
 
 **Integration:**
-- Runs automatically during `wake_up()`
+- Runs automatically during every `wake_up()` call
 - Results included in session data
-- Available as standalone diagnostic tool
+- Shows errors/warnings if detected
+- Internal function (not exposed as MCP tool)
+
+**Example Output:**
+```json
+"database_validation": {
+  "status": "valid",
+  "checks_passed": 8,
+  "checks_total": 8,
+  "errors": [],
+  "warnings": []
+}
+```
 
 **See**: [DATABASE_VALIDATION.md](DATABASE_VALIDATION.md) for complete details
 

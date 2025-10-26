@@ -680,10 +680,9 @@ def update_session_activity():
     """, (time.time(), session_id))
     conn.commit()
 
-@mcp.tool()
-async def validate_database_isolation() -> str:
+def validate_database_isolation() -> dict:
     """
-    Validate that database is correctly isolated for current project.
+    Internal function to validate database isolation for current project.
 
     Checks 8 parameters of database "rightness":
     1. Path Correctness - Database path calculated from current directory
@@ -695,15 +694,8 @@ async def validate_database_isolation() -> str:
     7. No Orphaned Data - All contexts have valid sessions
     8. Session Metadata - Session record matches runtime parameters
 
-    Returns detailed validation report with all check results.
-
-    **Use Cases:**
-    - Verify no cross-project contamination
-    - Debug session isolation issues
-    - Confirm database initialization is correct
-
     Returns:
-        str: JSON validation report with status, checks, warnings, errors
+        dict: Validation report with status, checks, warnings, errors
     """
     conn = get_db()
     current_cwd = os.getcwd()
@@ -1076,7 +1068,7 @@ async def validate_database_isolation() -> str:
         "validated_at": time.time()
     }
 
-    return json.dumps(validation_report, indent=2)
+    return validation_report
 
 # ============================================================================
 # FILE ANALYSIS UTILITIES
@@ -1794,8 +1786,7 @@ async def wake_up() -> str:
     cleanup_expired_queries(conn)
 
     # Validate database isolation (critical security check)
-    validation_json = await validate_database_isolation()
-    validation_report = json.loads(validation_json)
+    validation_report = validate_database_isolation()
 
     # Get git status
     git_info = get_git_status()

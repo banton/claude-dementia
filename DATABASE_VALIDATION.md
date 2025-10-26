@@ -425,10 +425,10 @@ dementia:database_health_dashboard()
 - 🟢 Informational (2 checks) - Log and repair
 
 **Integration Points**:
-- Run automatically during `wake_up()`
-- Available as standalone tool: `dementia:validate_database_isolation()`
-- Results included in session data
-- Auto-fix capabilities for non-critical issues
+- Runs automatically during `wake_up()`
+- Results included in session data (summary only)
+- Internal function (not exposed as MCP tool)
+- Auto-fix capabilities for non-critical issues (future enhancement)
 
 ---
 
@@ -436,93 +436,37 @@ dementia:database_health_dashboard()
 
 **Completed Features** (2024-10-26):
 
-1. ✅ **Validation Function** (`validate_database_isolation()`)
+1. ✅ **Internal Validation Function** (`validate_database_isolation()`)
    - All 8 checks implemented
    - Comprehensive error detection
    - Detailed reporting with recommendations
+   - Internal only (not exposed as MCP tool)
 
 2. ✅ **Integration with wake_up()**
    - Automatic validation on session start
    - Summary included in wake_up() output
    - Non-blocking (informational only)
+   - Shows errors/warnings if detected
 
-3. ✅ **MCP Tool Exposure**
-   - Available as: `dementia:validate_database_isolation()`
-   - Returns full detailed report
-   - JSON formatted output
-
-4. ✅ **Testing**
+3. ✅ **Testing**
    - Validated on claude-dementia project (project-local DB)
    - Validated on LinkedIn project (user cache DB)
    - Correctly detects contamination and schema issues
 
 ---
 
-## Usage Examples
+## Usage
 
-### Check Database Health
-```python
-# In Claude Desktop:
-dementia:validate_database_isolation()
-```
+### Automatic Validation
 
-**Example Output (Healthy Database):**
-```json
-{
-  "valid": true,
-  "level": "valid",
-  "checks": {
-    "path_correctness": {"passed": true, "level": "important"},
-    "hash_consistency": {"passed": true, "level": "critical"},
-    "session_alignment": {"passed": true, "level": "critical"},
-    "context_isolation": {"passed": true, "level": "critical"},
-    ...
-  },
-  "warnings": [],
-  "errors": [],
-  "summary": {
-    "checks_passed": 8,
-    "checks_total": 8
-  }
-}
-```
+Database validation runs automatically during `wake_up()`:
 
-**Example Output (Contaminated Database):**
-```json
-{
-  "valid": false,
-  "level": "critical",
-  "checks": {
-    "context_isolation": {
-      "passed": false,
-      "current_session": "link_12345678",
-      "foreign_sessions": ["innk_87654321"],
-      "foreign_count": 1,
-      "level": "critical"
-    }
-  },
-  "errors": [
-    "CONTEXT CONTAMINATION DETECTED: Found 1 foreign sessions in database!"
-  ],
-  "recommendations": [
-    "Your database contains contexts from other projects. This is a critical isolation violation.",
-    "  - Session innk_87654321: 42 contexts"
-  ],
-  "summary": {
-    "checks_passed": 5,
-    "checks_total": 8,
-    "errors_count": 1
-  }
-}
-```
-
-### View Validation in wake_up()
 ```python
 # In Claude Desktop:
 dementia:wake_up()
 ```
 
-**wake_up() Output Includes:**
+**wake_up() Output - Healthy Database:**
 ```json
 {
   "session": {
@@ -540,6 +484,33 @@ dementia:wake_up()
   ...
 }
 ```
+
+**wake_up() Output - Contaminated Database:**
+```json
+{
+  "session": {
+    "id": "link_12345678",
+    "project_name": "linkedin",
+    "database": "~/.claude-dementia/832c1a38.db"
+  },
+  "database_validation": {
+    "status": "critical",
+    "checks_passed": 5,
+    "checks_total": 8,
+    "errors": [
+      "CONTEXT CONTAMINATION DETECTED: Found 1 foreign sessions in database!"
+    ],
+    "warnings": [],
+    "recommendations": [
+      "Your database contains contexts from other projects. This is a critical isolation violation.",
+      "  - Session innk_87654321: 42 contexts"
+    ]
+  },
+  ...
+}
+```
+
+The validation summary shows immediately if there are any isolation issues. No need to call a separate tool.
 
 ---
 
