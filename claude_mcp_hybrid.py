@@ -4617,7 +4617,7 @@ async def sync_project_memory(
     confirm: bool = False,
     dry_run: bool = False,
     priorities: Optional[List[str]] = None
-) -> str:
+, project: Optional[str] = None) -> str:
     """
     Synchronize project memory with current codebase state - make memory match reality.
 
@@ -4729,7 +4729,7 @@ async def query_database(
     params: Optional[List[str]] = None,
     format: str = "table",
     db_path: Optional[str] = None
-) -> str:
+, project: Optional[str] = None) -> str:
     """
     Execute read-only SQL queries against ANY SQLite database for debugging and inspection.
 
@@ -6289,7 +6289,7 @@ async def scan_project_files(
     full_scan: bool = False,
     max_files: int = 10000,
     respect_gitignore: bool = True
-) -> str:
+, project: Optional[str] = None) -> str:
     """
     Scan project files and build/update semantic model.
 
@@ -6534,7 +6534,7 @@ async def query_files(
     file_type: Optional[str] = None,
     cluster: Optional[str] = None,
     limit: int = 20
-) -> str:
+, project: Optional[str] = None) -> str:
     """
     Search file semantic model by content, path, imports, or exports.
 
@@ -6658,7 +6658,7 @@ async def query_files(
 
 
 @mcp.tool()
-async def get_file_clusters() -> str:
+async def get_file_clusters(project: Optional[str] = None) -> str:
     """
     Get semantic file clusters showing how files are grouped.
 
@@ -6751,7 +6751,7 @@ async def get_file_clusters() -> str:
 
 
 @mcp.tool()
-async def file_model_status() -> str:
+async def file_model_status(project: Optional[str] = None) -> str:
     """
     Get file semantic model statistics and health.
 
@@ -6858,7 +6858,7 @@ async def file_model_status() -> str:
 async def generate_embeddings(
     context_ids: Optional[str] = None,
     regenerate: bool = False
-) -> str:
+, project: Optional[str] = None) -> str:
     """
     Generate embeddings for contexts to enable semantic search.
 
@@ -6982,7 +6982,8 @@ async def semantic_search_contexts(
     limit: int = 10,
     threshold: float = 0.7,
     priority: Optional[str] = None,
-    tags: Optional[str] = None
+    tags: Optional[str] = None,
+    project: Optional[str] = None
 ) -> str:
     """
     Search contexts using semantic similarity (embeddings).
@@ -7078,7 +7079,7 @@ Model: {embedding_service.model}
 
 
 @mcp.tool()
-async def ai_summarize_context(topic: str) -> str:
+async def ai_summarize_context(topic: str, project: Optional[str] = None) -> str:
     """
     Generate AI-powered summary of a context using local LLM.
 
@@ -7166,7 +7167,7 @@ Cost: FREE (local)
 
 
 @mcp.tool()
-async def embedding_status() -> str:
+async def embedding_status(project: Optional[str] = None) -> str:
     """
     Check status of embedding and AI features.
 
@@ -7457,7 +7458,7 @@ async def scan_and_analyze_directory(
     recursive: bool = True,
     store_in_table: Optional[str] = None,
     max_files: int = 1000
-) -> str:
+, project: Optional[str] = None) -> str:
     """
     Scan directory and analyze text files with metadata extraction.
 
@@ -7681,7 +7682,7 @@ Average per file:
 
 
 @mcp.tool()
-async def usage_statistics(days: int = 30) -> str:
+async def usage_statistics(days: int = 30, project: Optional[str] = None) -> str:
     """
     Get detailed token usage statistics for cost analysis.
 
@@ -7732,7 +7733,7 @@ Total Tokens: {total_tokens:,}
 
 
 @mcp.tool()
-async def cost_comparison(days: int = 30) -> str:
+async def cost_comparison(days: int = 30, project: Optional[str] = None) -> str:
     """
     Compare actual costs (FREE with Ollama) vs OpenAI API costs.
 
