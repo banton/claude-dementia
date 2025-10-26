@@ -4503,11 +4503,11 @@ async def memory_analytics(project: Optional[str] = None) -> str:
 
     if overview and overview['total'] > 0:
         analytics["overview"] = {
-            "total_contexts": overview['total'],
-            "total_size_mb": round(overview['total_bytes'] / (1024*1024), 2),
-            "average_size_kb": round(overview['avg_bytes'] / 1024, 2),
-            "oldest_context_age_days": round((time.time() - overview['oldest']) / 86400, 1),
-            "newest_context_age_days": round((time.time() - overview['newest']) / 86400, 1)
+            "total_contexts": int(overview['total']),
+            "total_size_mb": round(float(overview['total_bytes']) / (1024*1024), 2),
+            "average_size_kb": round(float(overview['avg_bytes']) / 1024, 2),
+            "oldest_context_age_days": round((time.time() - float(overview['oldest'])) / 86400, 1),
+            "newest_context_age_days": round((time.time() - float(overview['newest'])) / 86400, 1)
         }
     else:
         return json.dumps({
@@ -4529,9 +4529,9 @@ async def memory_analytics(project: Optional[str] = None) -> str:
         {
             "label": row['label'],
             "version": row['version'],
-            "access_count": row['access_count'],
-            "size_kb": round(row['size_bytes'] / 1024, 2),
-            "last_accessed_days_ago": round((time.time() - row['last_accessed']) / 86400, 1) if row['last_accessed'] else None
+            "access_count": int(row['access_count']),
+            "size_kb": round(float(row['size_bytes']) / 1024, 2),
+            "last_accessed_days_ago": round((time.time() - float(row['last_accessed'])) / 86400, 1) if row['last_accessed'] else None
         }
         for row in cursor.fetchall()
     ]
@@ -4549,8 +4549,8 @@ async def memory_analytics(project: Optional[str] = None) -> str:
         {
             "label": row['label'],
             "version": row['version'],
-            "locked_days_ago": round((time.time() - row['locked_at']) / 86400, 1),
-            "size_kb": round(row['size_bytes'] / 1024, 2)
+            "locked_days_ago": round((time.time() - float(row['locked_at'])) / 86400, 1),
+            "size_kb": round(float(row['size_bytes']) / 1024, 2)
         }
         for row in cursor.fetchall()
     ]
@@ -4568,8 +4568,8 @@ async def memory_analytics(project: Optional[str] = None) -> str:
         {
             "label": row['label'],
             "version": row['version'],
-            "size_kb": round(row['size_bytes'] / 1024, 2),
-            "access_count": row['access_count'] or 0
+            "size_kb": round(float(row['size_bytes']) / 1024, 2),
+            "access_count": int(row['access_count']) if row['access_count'] else 0
         }
         for row in cursor.fetchall()
     ]
@@ -4588,8 +4588,8 @@ async def memory_analytics(project: Optional[str] = None) -> str:
         {
             "label": row['label'],
             "version": row['version'],
-            "days_since_access": round((time.time() - row['last_accessed']) / 86400, 1) if row['last_accessed'] else "never",
-            "size_kb": round(row['size_bytes'] / 1024, 2)
+            "days_since_access": round((time.time() - float(row['last_accessed'])) / 86400, 1) if row['last_accessed'] else "never",
+            "size_kb": round(float(row['size_bytes']) / 1024, 2)
         }
         for row in cursor.fetchall()
     ]
@@ -4609,8 +4609,8 @@ async def memory_analytics(project: Optional[str] = None) -> str:
     for row in cursor.fetchall():
         priority = row['priority'] or 'reference'
         analytics["by_priority"][priority] = {
-            "count": row['count'],
-            "size_mb": round(row['total_bytes'] / (1024*1024), 2)
+            "count": int(row['count']),
+            "size_mb": round(float(row['total_bytes']) / (1024*1024), 2)
         }
 
     # Generate recommendations
