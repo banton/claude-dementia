@@ -3982,7 +3982,7 @@ async def _extract_critical_rules(path: str) -> Optional[Dict[str, str]]:
         return None
 
 @mcp.tool()
-async def batch_lock_contexts(contexts: str, project: Optional[str] = None) -> str:
+async def batch_lock_contexts(contexts: list[dict], project: Optional[str] = None) -> str:
     """
     Lock multiple contexts in one operation (reduces round-trips for cloud).
 
@@ -4081,7 +4081,7 @@ async def batch_lock_contexts(contexts: str, project: Optional[str] = None) -> s
 
 
 @mcp.tool()
-async def batch_recall_contexts(topics: str, preview_only: bool = True, project: Optional[str] = None) -> str:
+async def batch_recall_contexts(topics: list[str], preview_only: bool = True, project: Optional[str] = None) -> str:
     """
     Recall multiple contexts in one operation.
 
@@ -4138,15 +4138,8 @@ async def batch_recall_contexts(topics: str, preview_only: bool = True, project:
 
     Returns: JSON with summary and results for each topic
     """
-    try:
-        topics_list = json.loads(topics)
-    except json.JSONDecodeError as e:
-        return f"❌ Invalid JSON: {str(e)}"
-
-    if not isinstance(topics_list, list):
-        return "❌ Input must be a JSON array of topic names"
-
-    topics = topics_list  # Use parsed list for the rest of the function
+    if not isinstance(topics, list):
+        return "❌ Input must be an array of topic names"
 
     results = []
     found = 0
