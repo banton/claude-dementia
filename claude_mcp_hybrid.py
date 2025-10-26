@@ -4004,10 +4004,13 @@ async def batch_lock_contexts(contexts: str, project: Optional[str] = None) -> s
                 priority=ctx.get('priority'),
                 project=project
             )
+            # Check if embedding was generated
+            embedded = "[embedded]" in result
             results.append({
                 "topic": ctx['topic'],
                 "status": "success",
-                "message": "Context locked successfully"
+                "message": "Context locked successfully",
+                "embedded": embedded
             })
             successful += 1
         except Exception as e:
@@ -4018,11 +4021,15 @@ async def batch_lock_contexts(contexts: str, project: Optional[str] = None) -> s
             })
             failed += 1
 
+    # Count embedded contexts
+    embedded_count = sum(1 for r in results if r.get("embedded", False))
+
     return json.dumps({
         "summary": {
             "total": len(contexts_list),
             "successful": successful,
-            "failed": failed
+            "failed": failed,
+            "embedded": embedded_count
         },
         "results": results
     }, indent=2)
@@ -4167,10 +4174,11 @@ async def search_contexts(
     query: str,
     priority: Optional[str] = None,
     tags: Optional[str] = None,
-    limit: int = 10
+    limit: int = 10,
+    use_semantic: bool = True
 ) -> str:
     """
-    Search locked contexts by content (full-text search).
+    Search locked contexts using hybrid semantic + keyword search.
 
     **Purpose:** Find contexts by what they contain, not just their label
 
@@ -4179,10 +4187,16 @@ async def search_contexts(
     - priority: Filter by priority (always_check/important/reference)
     - tags: Filter by tags (comma-separated)
     - limit: Max results to return (default: 10)
+    - use_semantic: Try semantic search first (default: True)
 
-    **Returns:** JSON with matching contexts sorted by relevance score
+    **Returns:** JSON with matching contexts sorted by relevance/similarity
 
-    **Relevance scoring:**
+    **Hybrid Search:**
+    - If use_semantic=True: Tries semantic search first, falls back to keyword
+    - Semantic search: Uses embeddings for meaning-based matching
+    - Keyword search: Traditional text matching with relevance scoring
+
+    **Relevance scoring (keyword mode):**
     - Exact label match: 1.0 points
     - Key concepts match: 0.7 points
     - Content match: 0.5 points
@@ -4190,8 +4204,8 @@ async def search_contexts(
 
     **Example:**
     ```
-    search_contexts("authentication")
-    search_contexts("JWT", priority="important")
+    search_contexts("authentication")  # Semantic + keyword hybrid
+    search_contexts("JWT", priority="important", use_semantic=False)  # Keyword only
     search_contexts("database", tags="schema,migration", limit=5)
     ```
 
@@ -4204,6 +4218,43 @@ async def search_contexts(
     conn = get_db(project)
     session_id = get_current_session_id()
 
+    # Try semantic search first if enabled
+    semantic_results = []
+    if use_semantic:
+        try:
+            from src.services import embedding_service
+            from src.services.semantic_search import SemanticSearch
+
+            if embedding_service and embedding_service.enabled:
+                semantic_search = SemanticSearch(conn, embedding_service)
+
+                # Check if any contexts have embeddings
+                cursor = conn.execute("SELECT COUNT(*) as count FROM context_locks WHERE embedding IS NOT NULL")
+                embedded_count = cursor.fetchone()['count']
+
+                if embedded_count > 0:
+                    # Use semantic search with filters
+                    results = semantic_search.search_similar(
+                        query=query,
+                        limit=limit,
+                        threshold=0.6,  # Slightly lower threshold for search
+                        priority_filter=priority,
+                        tags_filter=tags
+                    )
+
+                    if results:
+                        return json.dumps({
+                            "search_mode": "semantic",
+                            "query": query,
+                            "total_results": len(results),
+                            "results": results,
+                            "note": "Results ranked by semantic similarity (0-1)"
+                        }, indent=2)
+        except Exception as e:
+            # Fall back to keyword search
+            print(f"⚠️  Semantic search unavailable: {e}", file=sys.stderr)
+
+    # Fall back to keyword search
     # Build SQL query
     sql = """
         SELECT
@@ -4293,6 +4344,7 @@ async def search_contexts(
         scored_results.sort(key=lambda x: x['score'], reverse=True)
 
         return json.dumps({
+            "search_mode": "keyword",
             "query": query,
             "filters": {
                 "priority": priority,
@@ -4300,7 +4352,8 @@ async def search_contexts(
                 "limit": limit
             },
             "total_found": len(scored_results),
-            "results": scored_results
+            "results": scored_results,
+            "note": "Results ranked by keyword relevance (0-3.5 max)"
         }, indent=2)
 
     except Exception as e:
