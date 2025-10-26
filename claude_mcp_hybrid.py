@@ -2289,8 +2289,17 @@ async def create_project(name: str) -> str:
                     "error": f"Project '{name}' already exists (schema: {safe_name})",
                     "schema": safe_name
                 })
-        finally:
+
+            # Return connection before proceeding
             adapter.pool.putconn(conn)
+        except Exception:
+            # If error, try to return connection before closing
+            try:
+                adapter.pool.putconn(conn)
+            except:
+                pass
+            adapter.close()
+            raise
 
         # Create schema and tables
         adapter.ensure_schema_exists()
