@@ -2801,12 +2801,15 @@ async def wake_up(project: Optional[str] = None) -> str:
 
 
 @mcp.tool()
-async def sleep() -> str:
+async def sleep(project: Optional[str] = None) -> str:
     """
     Create comprehensive handover package for next session.
     Documents everything needed to resume work seamlessly.
+
+    Args:
+        project: Project name (default: auto-detect or active project)
     """
-    conn = get_db()
+    conn = get_db(project)
     session_id = get_current_session_id()
     
     # Get session info
@@ -3068,7 +3071,7 @@ async def sleep() -> str:
     return "\n".join(output)
 
 @mcp.tool()
-async def get_last_handover() -> str:
+async def get_last_handover(project: Optional[str] = None) -> str:
     """
     Retrieve the last session handover package.
 
@@ -3079,6 +3082,9 @@ async def get_last_handover() -> str:
     **Token efficiency:** Returns full handover (~2-5KB). Use only when needed.
     wake_up() only shows availability - use this tool to get full details.
 
+    Args:
+        project: Project name (default: auto-detect or active project)
+
     **Example:**
     ```python
     # wake_up() shows: "handover": {"available": true, "hours_ago": 2.5}
@@ -3087,7 +3093,7 @@ async def get_last_handover() -> str:
     # Returns: {work_done, next_steps, important_context, ...}
     ```
     """
-    conn = get_db()
+    conn = get_db(project)
 
     cursor = conn.execute("""
         SELECT content, metadata, timestamp FROM memory_entries
@@ -3931,7 +3937,7 @@ async def _extract_critical_rules(path: str) -> Optional[Dict[str, str]]:
         return None
 
 @mcp.tool()
-async def batch_lock_contexts(contexts: str) -> str:
+async def batch_lock_contexts(contexts: str, project: Optional[str] = None) -> str:
     """
     Lock multiple contexts in one operation (reduces round-trips for cloud).
 
@@ -3995,7 +4001,8 @@ async def batch_lock_contexts(contexts: str) -> str:
                 content=ctx['content'],
                 topic=ctx['topic'],
                 tags=ctx.get('tags'),
-                priority=ctx.get('priority')
+                priority=ctx.get('priority'),
+                project=project
             )
             results.append({
                 "topic": ctx['topic'],
@@ -4022,7 +4029,7 @@ async def batch_lock_contexts(contexts: str) -> str:
 
 
 @mcp.tool()
-async def batch_recall_contexts(topics: str, preview_only: bool = True) -> str:
+async def batch_recall_contexts(topics: str, preview_only: bool = True, project: Optional[str] = None) -> str:
     """
     Recall multiple contexts in one operation.
 
@@ -4102,7 +4109,7 @@ async def batch_recall_contexts(topics: str, preview_only: bool = True) -> str:
             continue
 
         try:
-            content = await recall_context(topic, preview_only=preview_only)
+            content = await recall_context(topic, preview_only=preview_only, project=project)
             if "❌" in content:  # recall_context returns error message
                 results.append({
                     "topic": topic,
@@ -4194,7 +4201,7 @@ async def search_contexts(
     - Discover relevant contexts for current work
     - Filter contexts by priority/tags
     """
-    conn = get_db()
+    conn = get_db(project)
     session_id = get_current_session_id()
 
     # Build SQL query
@@ -4302,7 +4309,7 @@ async def search_contexts(
 
 
 @mcp.tool()
-async def memory_analytics() -> str:
+async def memory_analytics(project: Optional[str] = None) -> str:
     """
     Analyze memory system usage and health.
 
@@ -4339,7 +4346,7 @@ async def memory_analytics() -> str:
     }
     ```
     """
-    conn = get_db()
+    conn = get_db(project)
     session_id = get_current_session_id()
 
     analytics = {
@@ -4570,7 +4577,7 @@ async def sync_project_memory(
                     )
 
                     # Update metadata to mark as auto-generated
-                    conn = get_db()
+                    conn = get_db(project)
                     session_id = get_current_session_id()
                     conn.execute("""
                         UPDATE context_locks
@@ -4728,7 +4735,7 @@ async def query_database(
             conn.row_factory = sqlite3.Row
         else:
             # Use default dementia database
-            conn = get_db()
+            conn = get_db(project)
             conn.row_factory = sqlite3.Row
 
         start_time = time.time()
@@ -4910,7 +4917,7 @@ async def inspect_database(
         session_id = None  # Custom DB won't have session_id
     else:
         # Use default dementia database
-        conn = get_db()
+        conn = get_db(project)
         conn.row_factory = sqlite3.Row
         session_id = get_current_session_id()
 
@@ -5216,7 +5223,7 @@ async def execute_sql(
             conn = sqlite3.connect(abs_db_path)
         else:
             # Use default dementia database
-            conn = get_db()
+            conn = get_db(project)
 
         conn.row_factory = sqlite3.Row
 
@@ -5469,7 +5476,7 @@ async def manage_workspace_table(
                 "valid_operations": valid_operations
             }, indent=2)
 
-        conn = get_db()
+        conn = get_db(project)
 
         # Handle LIST operation
         if operation == 'list':
@@ -5810,7 +5817,7 @@ async def check_contexts(text: str, project: Optional[str] = None) -> str:
     return "\n".join(output)
 
 @mcp.tool()
-async def explore_context_tree(flat: bool = True, confirm_full: bool = False) -> str:
+async def explore_context_tree(flat: bool = True, confirm_full: bool = False, project: Optional[str] = None) -> str:
     """
     Browse all your locked contexts organized by priority and tags.
 
@@ -5879,7 +5886,7 @@ async def explore_context_tree(flat: bool = True, confirm_full: bool = False) ->
 
     Returns: Tree structure of all contexts with previews (or simple list if flat=True)
     """
-    conn = get_db()
+    conn = get_db(project)
     session_id = get_current_session_id()
 
     # Get all contexts with previews (not full content - RLM optimization!)
@@ -6003,7 +6010,7 @@ async def explore_context_tree(flat: bool = True, confirm_full: bool = False) ->
 # ============================================================================
 
 @mcp.tool()
-async def context_dashboard() -> str:
+async def context_dashboard(project: Optional[str] = None) -> str:
     """
     Get comprehensive overview of all contexts with statistics and insights.
 
@@ -6019,7 +6026,7 @@ async def context_dashboard() -> str:
 
     Perfect for getting a bird's-eye view of your context library.
     """
-    conn = get_db()
+    conn = get_db(project)
     session_id = get_current_session_id()
 
     # Get comprehensive statistics
@@ -6205,7 +6212,7 @@ async def scan_project_files(
     - Use full_scan=True after major changes (git pull, branch switch)
     - Results persist in database for fast future scans
     """
-    conn = get_db()
+    conn = get_db(project)
     session_id = get_current_session_id()
 
     # Get project root
@@ -6429,7 +6436,7 @@ async def query_files(
     - Empty query with cluster returns all files in that cluster
     - Results ordered by relevance (path match > imports/exports match)
     """
-    conn = get_db()
+    conn = get_db(project)
     session_id = get_current_session_id()
 
     try:
@@ -6545,7 +6552,7 @@ async def get_file_clusters() -> str:
     - Navigate large codebases
     - Identify architectural patterns
     """
-    conn = get_db()
+    conn = get_db(project)
     session_id = get_current_session_id()
 
     try:
@@ -6627,7 +6634,7 @@ async def file_model_status() -> str:
     - Monitor standard file warnings
     - Verify scan performance
     """
-    conn = get_db()
+    conn = get_db(project)
     session_id = get_current_session_id()
 
     try:
@@ -6762,7 +6769,7 @@ async def generate_embeddings(
             "setup": "1. Start Ollama\n2. Run: ollama pull nomic-embed-text"
         }, indent=2)
 
-    conn = get_db()
+    conn = get_db(project)
 
     # Initialize token tracker
     init_token_tracker(conn)
@@ -6881,7 +6888,7 @@ async def semantic_search_contexts(
             "fallback": "Use search_contexts() for keyword-based search"
         }, indent=2)
 
-    conn = get_db()
+    conn = get_db(project)
     semantic_search = SemanticSearch(conn, embedding_service)
 
     # Perform semantic search
@@ -6976,7 +6983,7 @@ async def ai_summarize_context(topic: str) -> str:
             "fallback": "Use recall_context(topic, preview_only=True) for extract-based summary"
         }, indent=2)
 
-    conn = get_db()
+    conn = get_db(project)
 
     # Get context content
     cursor = conn.execute("""
@@ -7045,7 +7052,7 @@ async def embedding_status() -> str:
             }
         }, indent=2)
 
-    conn = get_db()
+    conn = get_db(project)
     semantic_search = SemanticSearch(conn, embedding_service)
 
     status = {
@@ -7225,7 +7232,7 @@ async def diagnose_ollama() -> str:
 
 
 @mcp.tool()
-async def test_single_embedding(text: str = "Test embedding") -> str:
+async def test_single_embedding(text: str = "Test embedding", project: Optional[str] = None) -> str:
     """
     Test embedding generation with a single text and capture detailed debug output.
 
@@ -7435,7 +7442,7 @@ async def scan_and_analyze_directory(
 
         # Store in workspace table if requested
         if store_in_table:
-            conn = get_db()
+            conn = get_db(project)
 
             # Create table if doesn't exist
             conn.execute(f"""
@@ -7551,7 +7558,7 @@ async def usage_statistics(days: int = 30) -> str:
             "reason": str(e)
         }, indent=2)
 
-    conn = get_db()
+    conn = get_db(project)
     tracker = init_token_tracker(conn)
 
     stats = tracker.get_usage_stats(days=days)
@@ -7608,7 +7615,7 @@ async def cost_comparison(days: int = 30) -> str:
             "reason": str(e)
         }, indent=2)
 
-    conn = get_db()
+    conn = get_db(project)
     tracker = init_token_tracker(conn)
 
     comparison = tracker.get_cost_comparison(days=days)
