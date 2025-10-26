@@ -916,6 +916,43 @@ def get_current_session_id() -> str:
     
     return session_id
 
+def _get_session_id_for_project(conn, project_name: Optional[str] = None) -> str:
+    """
+    Get the most recent session ID for a given project from the correct schema.
+
+    Args:
+        conn: Database connection (already connected to correct schema)
+        project_name: Project name (optional, uses current project if None)
+
+    Returns:
+        Session ID for the project, or creates one if none exists
+    """
+    # Get project name if not provided
+    if not project_name:
+        project_name = get_project_name()
+
+    # Find most recent session for this project in the current schema
+    cursor = conn.execute("""
+        SELECT id
+        FROM sessions
+        ORDER BY last_active DESC
+        LIMIT 1
+    """)
+
+    row = cursor.fetchone()
+    if row:
+        return row['id']
+
+    # No session exists - create one
+    session_id = f"{project_name[:4]}_{str(uuid.uuid4())[:8]}"
+    conn.execute("""
+        INSERT INTO sessions (id, started_at, last_active, project_name)
+        VALUES (?, ?, ?, ?)
+    """, (session_id, time.time(), time.time(), project_name))
+    conn.commit()
+
+    return session_id
+
 def update_session_activity():
     """Update last active time for current session"""
     conn = get_db()
@@ -3219,7 +3256,7 @@ async def memory_status(project: Optional[str] = None) -> str:
     Show memory system status and statistics.
     """
     conn = _get_db_for_project(project)
-    session_id = get_current_session_id()
+    session_id = _get_session_id_for_project(conn, project)
     
     output = []
     output.append("🧠 Memory System Status")
@@ -3386,7 +3423,7 @@ async def lock_context(
     # Use project-aware database connection
     target_project = _get_project_for_context(project)
     conn = _get_db_for_project(project)
-    session_id = get_current_session_id()
+    session_id = _get_session_id_for_project(conn, project)
 
     # Ensure session exists in this project database
     try:
@@ -3629,7 +3666,7 @@ async def recall_context(
     # Use project-aware database connection
     target_project = _get_project_for_context(project)
     conn = _get_db_for_project(project)
-    session_id = get_current_session_id()
+    session_id = _get_session_id_for_project(conn, project)
 
     if version == "latest":
         cursor = conn.execute("""
@@ -3765,7 +3802,7 @@ async def unlock_context(
     """
     update_session_activity()
     conn = _get_db_for_project(project)
-    session_id = get_current_session_id()
+    session_id = _get_session_id_for_project(conn, project)
 
     # 1. Find contexts to delete
     if version == "all":
@@ -4258,7 +4295,7 @@ async def search_contexts(
     - Filter contexts by priority/tags
     """
     conn = _get_db_for_project(project)
-    session_id = get_current_session_id()
+    session_id = _get_session_id_for_project(conn, project)
 
     # Try semantic search first if enabled
     semantic_results = []
@@ -4442,7 +4479,7 @@ async def memory_analytics(project: Optional[str] = None) -> str:
     ```
     """
     conn = _get_db_for_project(project)
-    session_id = get_current_session_id()
+    session_id = _get_session_id_for_project(conn, project)
 
     analytics = {
         "overview": {},
@@ -4673,7 +4710,7 @@ async def sync_project_memory(
 
                     # Update metadata to mark as auto-generated
                     conn = _get_db_for_project(project)
-                    session_id = get_current_session_id()
+                    session_id = _get_session_id_for_project(conn, project)
                     conn.execute("""
                         UPDATE context_locks
                         SET metadata = ?
@@ -6017,7 +6054,7 @@ async def explore_context_tree(flat: bool = True, confirm_full: bool = False, pr
     Returns: Tree structure of all contexts with previews (or simple list if flat=True)
     """
     conn = _get_db_for_project(project)
-    session_id = get_current_session_id()
+    session_id = _get_session_id_for_project(conn, project)
 
     # Get all contexts with previews (not full content - RLM optimization!)
     # Flat mode: alphabetical order, Tree mode: most recent first
@@ -6157,7 +6194,7 @@ async def context_dashboard(project: Optional[str] = None) -> str:
     Perfect for getting a bird's-eye view of your context library.
     """
     conn = _get_db_for_project(project)
-    session_id = get_current_session_id()
+    session_id = _get_session_id_for_project(conn, project)
 
     # Get comprehensive statistics
     stats_query = """
