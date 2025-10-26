@@ -369,3 +369,144 @@ dementia:list_projects()
 ---
 
 *Last updated: 2024-10-25 (v3.2 - Multi-Project Isolation)*
+
+---
+
+## UPDATE: Complete Database Isolation (2024-10-26)
+
+### The Missing Piece
+
+The initial fix (commit 86b1af5) made `session_id` dynamic, but **database path was still static**. This caused:
+- All projects using the same database file (6666cd76.db - root database)
+- LinkedIn project database (832c1a38.db) existed but was never used
+- 94 contexts accumulated in root database, mixed across all projects
+
+### Complete Solution (commit 95ef83f)
+
+**Made database path dynamic too:**
+
+```python
+# Before (incomplete):
+DB_PATH = get_database_path()  # Set once at module load
+
+def get_db():
+    return sqlite3.connect(DB_PATH)  # Always connects to same file
+
+# After (complete):
+def get_current_db_path() -> str:
+    """Recalculates database path for current directory."""
+    return get_database_path()
+
+def get_db():
+    current_db_path = get_current_db_path()  # ← Recalculated each time!
+    return sqlite3.connect(current_db_path)
+```
+
+### How It Works Now
+
+**Each project gets its own database file:**
+
+```
+~/Sites/linkedin:
+  - Database: ~/.claude-dementia/832c1a38.db
+  - Session: link_12345678
+  - Contexts: LinkedIn-specific only
+
+~/Sites/innkeeper-claude:
+  - Database: ~/.claude-dementia/de464f97.db  
+  - Session: innk_87654321
+  - Contexts: Screenplay-specific only
+
+Root directory (/):
+  - Database: ~/.claude-dementia/6666cd76.db
+  - Session: Clau_12121212
+  - Contexts: Old mixed contexts (legacy)
+```
+
+### Verification Test
+
+Run the test script:
+```bash
+./test_database_isolation.sh
+```
+
+**Expected output:**
+- LinkedIn database: 832c1a38.db (empty initially)
+- Root database: 6666cd76.db (94 old mixed contexts)
+- Innkeeper database: de464f97.db (empty initially)
+
+### In Claude Desktop
+
+```
+1. Open LinkedIn project
+   dementia:wake_up()
+   → session.database = "832c1a38.db" ✅
+
+2. Lock a context
+   dementia:lock_context(
+       content="LinkedIn-specific rule",
+       topic="linkedin_test"
+   )
+
+3. Verify isolation
+   sqlite3 ~/.claude-dementia/832c1a38.db \
+     "SELECT COUNT(*) FROM context_locks"
+   → Returns: 1 ✅
+
+4. Switch to innkeeper project
+   dementia:wake_up()
+   → session.database = "de464f97.db" ✅
+   
+   dementia:explore_context_tree(flat=True)
+   → Should NOT show "linkedin_test" ✅
+```
+
+### Migration Notes
+
+**Old contexts in root database (6666cd76.db):**
+- Contain mixed contexts from all projects before fix
+- Remain accessible only when working from root directory
+- New projects start with clean databases
+- To clean up: manually move contexts to correct project databases
+
+**Database file mapping:**
+```
+6666cd76 = md5("/")[:8]                           → root
+832c1a38 = md5("/Users/banton/Sites/linkedin")[:8] → linkedin  
+de464f97 = md5("/Users/banton/Sites/innkeeper-claude")[:8] → innkeeper
+```
+
+See `~/.claude-dementia/path_mapping.json` for complete mapping.
+
+---
+
+## Database Validation (2024-10-26)
+
+### Verification Tool
+
+After implementing complete isolation, added comprehensive validation:
+
+```python
+dementia:validate_database_isolation()
+```
+
+**Validates 8 Parameters of Database "Rightness":**
+1. ✅ Path Correctness - Database path from current directory
+2. ✅ Hash Consistency - Filename hash matches directory MD5
+3. ✅ Session Alignment - Session fingerprint matches project
+4. ✅ Path Mapping - Entry in path_mapping.json accurate
+5. ✅ Context Isolation - No foreign session contexts
+6. ✅ Schema Integrity - All required tables/columns exist
+7. ⚠️ No Orphaned Data - All contexts have valid sessions
+8. ✅ Session Metadata - Session record matches runtime
+
+**Integration:**
+- Runs automatically during `wake_up()`
+- Results included in session data
+- Available as standalone diagnostic tool
+
+**See**: [DATABASE_VALIDATION.md](DATABASE_VALIDATION.md) for complete details
+
+---
+
+*Last updated: 2024-10-26 (v3.4 - Database Validation Added)*

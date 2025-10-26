@@ -674,11 +674,409 @@ def update_session_activity():
     conn = get_db()
     session_id = get_current_session_id()
     conn.execute("""
-        UPDATE sessions 
+        UPDATE sessions
         SET last_active = ?
         WHERE id = ?
     """, (time.time(), session_id))
     conn.commit()
+
+@mcp.tool()
+async def validate_database_isolation() -> str:
+    """
+    Validate that database is correctly isolated for current project.
+
+    Checks 8 parameters of database "rightness":
+    1. Path Correctness - Database path calculated from current directory
+    2. Hash Consistency - Database filename hash matches directory MD5
+    3. Session Alignment - Session fingerprint matches current project
+    4. Path Mapping - Entry in path_mapping.json is accurate
+    5. Context Isolation - No contexts from other projects
+    6. Schema Integrity - All required tables/columns exist
+    7. No Orphaned Data - All contexts have valid sessions
+    8. Session Metadata - Session record matches runtime parameters
+
+    Returns detailed validation report with all check results.
+
+    **Use Cases:**
+    - Verify no cross-project contamination
+    - Debug session isolation issues
+    - Confirm database initialization is correct
+
+    Returns:
+        str: JSON validation report with status, checks, warnings, errors
+    """
+    conn = get_db()
+    current_cwd = os.getcwd()
+    validation_report = {
+        "valid": True,
+        "level": "valid",  # valid | warning | critical
+        "checks": {},
+        "warnings": [],
+        "errors": [],
+        "recommendations": []
+    }
+
+    # Check 1: Path Correctness
+    try:
+        expected_hash = hashlib.md5(current_cwd.encode()).hexdigest()[:8]
+        actual_db_path = get_current_db_path()
+        expected_db_path = os.path.expanduser(f"~/.claude-dementia/{expected_hash}.db")
+
+        # Normalize paths for comparison
+        actual_normalized = os.path.normpath(actual_db_path)
+        expected_normalized = os.path.normpath(expected_db_path)
+
+        path_correct = actual_normalized == expected_normalized
+
+        validation_report["checks"]["path_correctness"] = {
+            "passed": path_correct,
+            "expected": expected_db_path,
+            "actual": actual_db_path,
+            "level": "important"
+        }
+
+        if not path_correct:
+            validation_report["valid"] = False
+            validation_report["level"] = "warning"
+            validation_report["warnings"].append(
+                f"Database path mismatch. Expected: {expected_db_path}, Actual: {actual_db_path}"
+            )
+    except Exception as e:
+        validation_report["checks"]["path_correctness"] = {
+            "passed": False,
+            "error": str(e),
+            "level": "important"
+        }
+        validation_report["valid"] = False
+        validation_report["level"] = "warning"
+
+    # Check 2: Hash Consistency
+    try:
+        calculated_hash = hashlib.md5(current_cwd.encode()).hexdigest()[:8]
+        db_filename = os.path.basename(actual_db_path)
+        db_hash = db_filename.replace('.db', '')
+
+        hash_consistent = db_hash == calculated_hash
+
+        validation_report["checks"]["hash_consistency"] = {
+            "passed": hash_consistent,
+            "expected_hash": calculated_hash,
+            "actual_hash": db_hash,
+            "directory": current_cwd,
+            "level": "critical"
+        }
+
+        if not hash_consistent:
+            validation_report["valid"] = False
+            validation_report["level"] = "critical"
+            validation_report["errors"].append(
+                f"DATABASE ISOLATION VIOLATION: Hash mismatch! "
+                f"Expected {calculated_hash} for {current_cwd}, got {db_hash}"
+            )
+            validation_report["recommendations"].append(
+                "This indicates you may be using a database from a different project. "
+                "Check if you're in the correct directory."
+            )
+    except Exception as e:
+        validation_report["checks"]["hash_consistency"] = {
+            "passed": False,
+            "error": str(e),
+            "level": "critical"
+        }
+        validation_report["valid"] = False
+        validation_report["level"] = "critical"
+
+    # Check 3: Session Alignment
+    try:
+        current_project_root = get_project_root()
+        current_project_name = get_project_name()
+        expected_fingerprint = hashlib.md5(
+            f"{current_project_root}:{current_project_name}".encode()
+        ).hexdigest()[:8]
+
+        session_id = get_current_session_id()
+        cursor = conn.execute(
+            "SELECT project_fingerprint, project_path, project_name FROM sessions WHERE id = ?",
+            (session_id,)
+        )
+        session = cursor.fetchone()
+
+        if session:
+            actual_fingerprint = session['project_fingerprint']
+            session_aligned = actual_fingerprint == expected_fingerprint
+
+            validation_report["checks"]["session_alignment"] = {
+                "passed": session_aligned,
+                "expected_fingerprint": expected_fingerprint,
+                "actual_fingerprint": actual_fingerprint,
+                "session_id": session_id,
+                "level": "critical"
+            }
+
+            if not session_aligned:
+                validation_report["valid"] = False
+                validation_report["level"] = "critical"
+                validation_report["errors"].append(
+                    f"SESSION ISOLATION VIOLATION: Session fingerprint mismatch! "
+                    f"Expected {expected_fingerprint}, got {actual_fingerprint}"
+                )
+                validation_report["recommendations"].append(
+                    f"Session {session_id} belongs to a different project. "
+                    f"This should never happen with proper isolation."
+                )
+        else:
+            validation_report["checks"]["session_alignment"] = {
+                "passed": False,
+                "error": "Session not found in database",
+                "level": "critical"
+            }
+            validation_report["valid"] = False
+            validation_report["level"] = "critical"
+    except Exception as e:
+        validation_report["checks"]["session_alignment"] = {
+            "passed": False,
+            "error": str(e),
+            "level": "critical"
+        }
+        validation_report["valid"] = False
+        validation_report["level"] = "critical"
+
+    # Check 4: Path Mapping Accuracy
+    try:
+        mapping_file = os.path.expanduser("~/.claude-dementia/path_mapping.json")
+        if os.path.exists(mapping_file):
+            with open(mapping_file, 'r') as f:
+                mappings = json.load(f)
+
+            if db_hash in mappings:
+                mapping_entry = mappings[db_hash]
+                mapping_accurate = mapping_entry['path'] == current_cwd
+
+                validation_report["checks"]["path_mapping"] = {
+                    "passed": mapping_accurate,
+                    "expected_path": current_cwd,
+                    "mapped_path": mapping_entry['path'],
+                    "mapped_name": mapping_entry['name'],
+                    "level": "important"
+                }
+
+                if not mapping_accurate:
+                    validation_report["valid"] = False
+                    validation_report["level"] = "warning"
+                    validation_report["warnings"].append(
+                        f"Path mapping mismatch. Mapped to {mapping_entry['path']}, "
+                        f"current directory is {current_cwd}"
+                    )
+            else:
+                validation_report["checks"]["path_mapping"] = {
+                    "passed": False,
+                    "error": f"No mapping entry found for hash {db_hash}",
+                    "level": "informational"
+                }
+                validation_report["warnings"].append(
+                    "Path mapping entry missing (will be created automatically)"
+                )
+        else:
+            validation_report["checks"]["path_mapping"] = {
+                "passed": False,
+                "error": "Path mapping file does not exist",
+                "level": "informational"
+            }
+    except Exception as e:
+        validation_report["checks"]["path_mapping"] = {
+            "passed": False,
+            "error": str(e),
+            "level": "informational"
+        }
+
+    # Check 5: Context Isolation (Critical!)
+    try:
+        cursor = conn.execute("SELECT DISTINCT session_id FROM context_locks")
+        all_sessions = [row['session_id'] for row in cursor.fetchall()]
+        current_session_id = get_current_session_id()
+
+        foreign_sessions = [s for s in all_sessions if s != current_session_id]
+
+        validation_report["checks"]["context_isolation"] = {
+            "passed": len(foreign_sessions) == 0,
+            "current_session": current_session_id,
+            "foreign_sessions": foreign_sessions,
+            "foreign_count": len(foreign_sessions),
+            "level": "critical"
+        }
+
+        if len(foreign_sessions) > 0:
+            validation_report["valid"] = False
+            validation_report["level"] = "critical"
+            validation_report["errors"].append(
+                f"CONTEXT CONTAMINATION DETECTED: Found {len(foreign_sessions)} foreign sessions in database!"
+            )
+            validation_report["recommendations"].append(
+                "Your database contains contexts from other projects. "
+                "This is a critical isolation violation. "
+                "Each project should have its own database file."
+            )
+
+            # Get details about foreign sessions
+            for foreign_session in foreign_sessions[:5]:  # Limit to first 5
+                cursor = conn.execute(
+                    "SELECT COUNT(*) as count FROM context_locks WHERE session_id = ?",
+                    (foreign_session,)
+                )
+                count = cursor.fetchone()['count']
+                validation_report["recommendations"].append(
+                    f"  - Session {foreign_session}: {count} contexts"
+                )
+    except Exception as e:
+        validation_report["checks"]["context_isolation"] = {
+            "passed": False,
+            "error": str(e),
+            "level": "critical"
+        }
+        validation_report["valid"] = False
+        validation_report["level"] = "critical"
+
+    # Check 6: Schema Integrity
+    try:
+        required_tables = [
+            'sessions',
+            'context_locks',
+            'audit_trail',
+            'handovers',
+            'file_model',
+            'file_change_history'
+        ]
+
+        missing_tables = []
+        for table in required_tables:
+            cursor = conn.execute(
+                f"SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)
+            )
+            if cursor.fetchone() is None:
+                missing_tables.append(table)
+
+        # Check critical columns in sessions table
+        cursor = conn.execute("PRAGMA table_info(sessions)")
+        session_columns = [col[1] for col in cursor.fetchall()]
+        required_columns = ['project_fingerprint', 'project_path', 'project_name']
+        missing_columns = [col for col in required_columns if col not in session_columns]
+
+        schema_valid = len(missing_tables) == 0 and len(missing_columns) == 0
+
+        validation_report["checks"]["schema_integrity"] = {
+            "passed": schema_valid,
+            "missing_tables": missing_tables,
+            "missing_columns": missing_columns,
+            "level": "informational"
+        }
+
+        if not schema_valid:
+            validation_report["warnings"].append(
+                f"Schema incomplete: {len(missing_tables)} missing tables, "
+                f"{len(missing_columns)} missing columns (will auto-migrate)"
+            )
+    except Exception as e:
+        validation_report["checks"]["schema_integrity"] = {
+            "passed": False,
+            "error": str(e),
+            "level": "informational"
+        }
+
+    # Check 7: No Orphaned Data
+    try:
+        cursor = conn.execute("""
+            SELECT cl.id, cl.label, cl.session_id
+            FROM context_locks cl
+            LEFT JOIN sessions s ON cl.session_id = s.id
+            WHERE s.id IS NULL
+        """)
+        orphaned = cursor.fetchall()
+
+        validation_report["checks"]["orphaned_data"] = {
+            "passed": len(orphaned) == 0,
+            "orphaned_count": len(orphaned),
+            "orphaned_contexts": [
+                {"id": o['id'], "label": o['label'], "session_id": o['session_id']}
+                for o in orphaned[:5]  # Limit to first 5
+            ],
+            "level": "informational"
+        }
+
+        if len(orphaned) > 0:
+            validation_report["warnings"].append(
+                f"Found {len(orphaned)} orphaned contexts (no valid session)"
+            )
+            validation_report["recommendations"].append(
+                "Run cleanup to remove orphaned contexts"
+            )
+    except Exception as e:
+        validation_report["checks"]["orphaned_data"] = {
+            "passed": False,
+            "error": str(e),
+            "level": "informational"
+        }
+
+    # Check 8: Session Metadata Consistency
+    try:
+        session_id = get_current_session_id()
+        cursor = conn.execute(
+            "SELECT project_path, project_name, last_active FROM sessions WHERE id = ?",
+            (session_id,)
+        )
+        session = cursor.fetchone()
+
+        if session:
+            metadata_consistent = (
+                session['project_path'] == get_project_root() and
+                session['project_name'] == get_project_name()
+            )
+
+            time_since_active = time.time() - session['last_active']
+
+            validation_report["checks"]["session_metadata"] = {
+                "passed": metadata_consistent,
+                "expected_path": get_project_root(),
+                "actual_path": session['project_path'],
+                "expected_name": get_project_name(),
+                "actual_name": session['project_name'],
+                "time_since_active": round(time_since_active, 2),
+                "level": "important"
+            }
+
+            if not metadata_consistent:
+                validation_report["valid"] = False
+                validation_report["level"] = "warning"
+                validation_report["warnings"].append(
+                    "Session metadata out of sync with current project "
+                    "(will be updated automatically)"
+                )
+        else:
+            validation_report["checks"]["session_metadata"] = {
+                "passed": False,
+                "error": "Session not found",
+                "level": "important"
+            }
+    except Exception as e:
+        validation_report["checks"]["session_metadata"] = {
+            "passed": False,
+            "error": str(e),
+            "level": "important"
+        }
+
+    # Calculate summary stats
+    checks_passed = sum(1 for check in validation_report["checks"].values() if check.get("passed", False))
+    checks_total = len(validation_report["checks"])
+
+    validation_report["summary"] = {
+        "checks_passed": checks_passed,
+        "checks_total": checks_total,
+        "warnings_count": len(validation_report["warnings"]),
+        "errors_count": len(validation_report["errors"]),
+        "validated_at": time.time()
+    }
+
+    return json.dumps(validation_report, indent=2)
 
 # ============================================================================
 # FILE ANALYSIS UTILITIES
@@ -1395,6 +1793,10 @@ async def wake_up() -> str:
     # Cleanup expired queries (maintenance)
     cleanup_expired_queries(conn)
 
+    # Validate database isolation (critical security check)
+    validation_json = await validate_database_isolation()
+    validation_report = json.loads(validation_json)
+
     # Get git status
     git_info = get_git_status()
 
@@ -1506,6 +1908,15 @@ async def wake_up() -> str:
             "database_location": get_db_location_type(),  # Dynamic detection
             "database_size_mb": round(db_size_mb, 2),
             "initialized_at": time.time()
+        },
+        "database_validation": {
+            "status": validation_report["level"],
+            "checks_passed": validation_report["summary"]["checks_passed"],
+            "checks_total": validation_report["summary"]["checks_total"],
+            "errors": validation_report["errors"],
+            "warnings": validation_report["warnings"],
+            "recommendations": validation_report["recommendations"]
+            # NOTE: Use validate_database_isolation() for detailed report
         },
         "git": git_info if git_info else {
             "available": False,
