@@ -4644,8 +4644,9 @@ async def sync_project_memory(
     path: Optional[str] = None,
     confirm: bool = False,
     dry_run: bool = False,
-    priorities: Optional[List[str]] = None
-, project: Optional[str] = None) -> str:
+    priorities: Optional[List[str]] = None,
+    project: Optional[str] = None
+) -> str:
     """
     Synchronize project memory with current codebase state - make memory match reality.
 
@@ -4756,8 +4757,9 @@ async def query_database(
     query: str,
     params: Optional[List[str]] = None,
     format: str = "table",
-    db_path: Optional[str] = None
-, project: Optional[str] = None) -> str:
+    db_path: Optional[str] = None,
+    project: Optional[str] = None
+) -> str:
     """
     Execute read-only SQL queries against ANY SQLite database for debugging and inspection.
 
@@ -6316,8 +6318,9 @@ Versioned Contexts: {len(version_stats)}
 async def scan_project_files(
     full_scan: bool = False,
     max_files: int = 10000,
-    respect_gitignore: bool = True
-, project: Optional[str] = None) -> str:
+    respect_gitignore: bool = True,
+    project: Optional[str] = None
+) -> str:
     """
     Scan project files and build/update semantic model.
 
@@ -6561,8 +6564,9 @@ async def query_files(
     query: str,
     file_type: Optional[str] = None,
     cluster: Optional[str] = None,
-    limit: int = 20
-, project: Optional[str] = None) -> str:
+    limit: int = 20,
+    project: Optional[str] = None
+) -> str:
     """
     Search file semantic model by content, path, imports, or exports.
 
@@ -6885,8 +6889,9 @@ async def file_model_status(project: Optional[str] = None) -> str:
 @mcp.tool()
 async def generate_embeddings(
     context_ids: Optional[str] = None,
-    regenerate: bool = False
-, project: Optional[str] = None) -> str:
+    regenerate: bool = False,
+    project: Optional[str] = None
+) -> str:
     """
     Generate embeddings for contexts to enable semantic search.
 
@@ -7485,8 +7490,9 @@ async def scan_and_analyze_directory(
     pattern: str = "*.md",
     recursive: bool = True,
     store_in_table: Optional[str] = None,
-    max_files: int = 1000
-, project: Optional[str] = None) -> str:
+    max_files: int = 1000,
+    project: Optional[str] = None
+) -> str:
     """
     Scan directory and analyze text files with metadata extraction.
 
