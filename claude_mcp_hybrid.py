@@ -4049,13 +4049,10 @@ async def batch_lock_contexts(contexts: list[dict], project: Optional[str] = Non
     - Atomic operation - all succeed or all fail rolled back
     - Returns detailed status for each context
     """
-    try:
-        contexts_list = json.loads(contexts)
-    except json.JSONDecodeError as e:
-        return f"❌ Invalid JSON: {str(e)}"
+    if not isinstance(contexts, list):
+        return "❌ Input must be an array of context objects"
 
-    if not isinstance(contexts_list, list):
-        return "❌ Input must be a JSON array of context objects"
+    contexts_list = contexts
 
     results = []
     successful = 0
