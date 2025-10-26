@@ -481,6 +481,36 @@ class PostgreSQLAdapter:
         except Exception as e:
             pass
 
+        # Migration 6: Add preview to context_locks if missing
+        try:
+            cur.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                AND table_name = 'context_locks'
+                AND column_name = 'preview'
+            """)
+            if not cur.fetchone():
+                print("⚠️  Migrating context_locks: adding preview column", file=sys.stderr)
+                cur.execute("ALTER TABLE context_locks ADD COLUMN preview TEXT")
+        except Exception as e:
+            pass
+
+        # Migration 7: Add key_concepts to context_locks if missing
+        try:
+            cur.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                AND table_name = 'context_locks'
+                AND column_name = 'key_concepts'
+            """)
+            if not cur.fetchone():
+                print("⚠️  Migrating context_locks: adding key_concepts column", file=sys.stderr)
+                cur.execute("ALTER TABLE context_locks ADD COLUMN key_concepts TEXT")
+        except Exception as e:
+            pass
+
     def get_info(self) -> dict:
         """Get information about current database and schema."""
         conn = self.get_connection()
