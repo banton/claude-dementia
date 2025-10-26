@@ -430,7 +430,9 @@ def get_db(project: Optional[str] = None):
     Get PostgreSQL database connection with auto-cleanup.
 
     Args:
-        project: Project name for schema isolation. If None, uses default project.
+        project: Project name for schema isolation. If None, uses global adapter's default.
+                 IMPORTANT: Use _get_db_for_project() for full project resolution logic.
+                 This function is for internal use and simple cases only.
 
     Returns AutoClosingPostgreSQLConnection with:
     - Schema isolation via search_path
@@ -438,10 +440,8 @@ def get_db(project: Optional[str] = None):
     - Automatic placeholder conversion (? to %s)
     - Connection pooling (returned to pool on close)
     """
-    # Resolve project name
-    if not project:
-        project = _active_projects.get(get_user_id()) or auto_detect_project() or "default"
-
+    # Simple pass-through to global adapter
+    # For proper project resolution, callers should use _get_db_for_project()
     conn = _postgres_adapter.get_connection(project)
     return AutoClosingPostgreSQLConnection(conn, _postgres_adapter)
 
@@ -2816,7 +2816,7 @@ async def sleep(project: Optional[str] = None) -> str:
     Args:
         project: Project name (default: auto-detect or active project)
     """
-    conn = get_db(project)
+    conn = _get_db_for_project(project)
     session_id = get_current_session_id()
     
     # Get session info
@@ -3100,7 +3100,7 @@ async def get_last_handover(project: Optional[str] = None) -> str:
     # Returns: {work_done, next_steps, important_context, ...}
     ```
     """
-    conn = get_db(project)
+    conn = _get_db_for_project(project)
 
     cursor = conn.execute("""
         SELECT content, metadata, timestamp FROM memory_entries
@@ -4222,7 +4222,7 @@ async def search_contexts(
     - Discover relevant contexts for current work
     - Filter contexts by priority/tags
     """
-    conn = get_db(project)
+    conn = _get_db_for_project(project)
     session_id = get_current_session_id()
 
     # Try semantic search first if enabled
@@ -4406,7 +4406,7 @@ async def memory_analytics(project: Optional[str] = None) -> str:
     }
     ```
     """
-    conn = get_db(project)
+    conn = _get_db_for_project(project)
     session_id = get_current_session_id()
 
     analytics = {
@@ -4637,7 +4637,7 @@ async def sync_project_memory(
                     )
 
                     # Update metadata to mark as auto-generated
-                    conn = get_db(project)
+                    conn = _get_db_for_project(project)
                     session_id = get_current_session_id()
                     conn.execute("""
                         UPDATE context_locks
@@ -4795,7 +4795,7 @@ async def query_database(
             conn.row_factory = sqlite3.Row
         else:
             # Use default dementia database
-            conn = get_db(project)
+            conn = _get_db_for_project(project)
             conn.row_factory = sqlite3.Row
 
         start_time = time.time()
@@ -4979,7 +4979,7 @@ async def inspect_database(
         session_id = None  # Custom DB won't have session_id
     else:
         # Use default dementia database
-        conn = get_db(project)
+        conn = _get_db_for_project(project)
         conn.row_factory = sqlite3.Row
         session_id = get_current_session_id()
 
@@ -5287,7 +5287,7 @@ async def execute_sql(
             conn = sqlite3.connect(abs_db_path)
         else:
             # Use default dementia database
-            conn = get_db(project)
+            conn = _get_db_for_project(project)
 
         conn.row_factory = sqlite3.Row
 
@@ -5542,7 +5542,7 @@ async def manage_workspace_table(
                 "valid_operations": valid_operations
             }, indent=2)
 
-        conn = get_db(project)
+        conn = _get_db_for_project(project)
 
         # Handle LIST operation
         if operation == 'list':
@@ -5952,7 +5952,7 @@ async def explore_context_tree(flat: bool = True, confirm_full: bool = False, pr
 
     Returns: Tree structure of all contexts with previews (or simple list if flat=True)
     """
-    conn = get_db(project)
+    conn = _get_db_for_project(project)
     session_id = get_current_session_id()
 
     # Get all contexts with previews (not full content - RLM optimization!)
@@ -6092,7 +6092,7 @@ async def context_dashboard(project: Optional[str] = None) -> str:
 
     Perfect for getting a bird's-eye view of your context library.
     """
-    conn = get_db(project)
+    conn = _get_db_for_project(project)
     session_id = get_current_session_id()
 
     # Get comprehensive statistics
@@ -6278,7 +6278,7 @@ async def scan_project_files(
     - Use full_scan=True after major changes (git pull, branch switch)
     - Results persist in database for fast future scans
     """
-    conn = get_db(project)
+    conn = _get_db_for_project(project)
     session_id = get_current_session_id()
 
     # Get project root
@@ -6502,7 +6502,7 @@ async def query_files(
     - Empty query with cluster returns all files in that cluster
     - Results ordered by relevance (path match > imports/exports match)
     """
-    conn = get_db(project)
+    conn = _get_db_for_project(project)
     session_id = get_current_session_id()
 
     try:
@@ -6618,7 +6618,7 @@ async def get_file_clusters() -> str:
     - Navigate large codebases
     - Identify architectural patterns
     """
-    conn = get_db(project)
+    conn = _get_db_for_project(project)
     session_id = get_current_session_id()
 
     try:
@@ -6700,7 +6700,7 @@ async def file_model_status() -> str:
     - Monitor standard file warnings
     - Verify scan performance
     """
-    conn = get_db(project)
+    conn = _get_db_for_project(project)
     session_id = get_current_session_id()
 
     try:
@@ -6835,7 +6835,7 @@ async def generate_embeddings(
             "setup": "1. Start Ollama\n2. Run: ollama pull nomic-embed-text"
         }, indent=2)
 
-    conn = get_db(project)
+    conn = _get_db_for_project(project)
 
     # Initialize token tracker
     init_token_tracker(conn)
@@ -6954,7 +6954,7 @@ async def semantic_search_contexts(
             "fallback": "Use search_contexts() for keyword-based search"
         }, indent=2)
 
-    conn = get_db(project)
+    conn = _get_db_for_project(project)
     semantic_search = SemanticSearch(conn, embedding_service)
 
     # Perform semantic search
@@ -7049,7 +7049,7 @@ async def ai_summarize_context(topic: str) -> str:
             "fallback": "Use recall_context(topic, preview_only=True) for extract-based summary"
         }, indent=2)
 
-    conn = get_db(project)
+    conn = _get_db_for_project(project)
 
     # Get context content
     cursor = conn.execute("""
@@ -7118,7 +7118,7 @@ async def embedding_status() -> str:
             }
         }, indent=2)
 
-    conn = get_db(project)
+    conn = _get_db_for_project(project)
     semantic_search = SemanticSearch(conn, embedding_service)
 
     status = {
@@ -7508,7 +7508,7 @@ async def scan_and_analyze_directory(
 
         # Store in workspace table if requested
         if store_in_table:
-            conn = get_db(project)
+            conn = _get_db_for_project(project)
 
             # Create table if doesn't exist
             conn.execute(f"""
@@ -7624,7 +7624,7 @@ async def usage_statistics(days: int = 30) -> str:
             "reason": str(e)
         }, indent=2)
 
-    conn = get_db(project)
+    conn = _get_db_for_project(project)
     tracker = init_token_tracker(conn)
 
     stats = tracker.get_usage_stats(days=days)
@@ -7681,7 +7681,7 @@ async def cost_comparison(days: int = 30) -> str:
             "reason": str(e)
         }, indent=2)
 
-    conn = get_db(project)
+    conn = _get_db_for_project(project)
     tracker = init_token_tracker(conn)
 
     comparison = tracker.get_cost_comparison(days=days)
