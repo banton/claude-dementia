@@ -3982,13 +3982,13 @@ async def _extract_critical_rules(path: str) -> Optional[Dict[str, str]]:
         return None
 
 @mcp.tool()
-async def batch_lock_contexts(contexts: List[Dict[str, Any]], project: Optional[str] = None) -> str:
+async def batch_lock_contexts(contexts: str, project: Optional[str] = None) -> str:
     """
     Lock multiple contexts in one operation (reduces round-trips for cloud).
 
     **Purpose:** Efficient bulk context locking
 
-    **Input:** Array of context objects
+    **Input:** JSON string containing array of context objects
     Each object should have:
     - content: str (required) - The context content
     - topic: str (required) - Context label/name
@@ -3999,10 +3999,10 @@ async def batch_lock_contexts(contexts: List[Dict[str, Any]], project: Optional[
 
     **Example:**
     ```
-    batch_lock_contexts([
+    batch_lock_contexts('[
         {"topic": "api_v1", "content": "API spec...", "priority": "important"},
         {"topic": "database_schema", "content": "CREATE TABLE...", "tags": "database"}
-    ])
+    ]')
     ```
 
     **Benefits:**
@@ -4011,10 +4011,13 @@ async def batch_lock_contexts(contexts: List[Dict[str, Any]], project: Optional[
     - Atomic operation - all succeed or all fail rolled back
     - Returns detailed status for each context
     """
-    if not isinstance(contexts, list):
-        return "❌ Input must be an array of context objects"
+    try:
+        contexts_list = json.loads(contexts)
+    except json.JSONDecodeError as e:
+        return f"❌ Invalid JSON: {str(e)}"
 
-    contexts_list = contexts
+    if not isinstance(contexts_list, list):
+        return "❌ Input must be a JSON array of context objects"
 
     results = []
     successful = 0
@@ -4078,7 +4081,7 @@ async def batch_lock_contexts(contexts: List[Dict[str, Any]], project: Optional[
 
 
 @mcp.tool()
-async def batch_recall_contexts(topics: List[str], preview_only: bool = True, project: Optional[str] = None) -> str:
+async def batch_recall_contexts(topics: str, preview_only: bool = True, project: Optional[str] = None) -> str:
     """
     Recall multiple contexts in one operation.
 
@@ -4088,9 +4091,9 @@ async def batch_recall_contexts(topics: List[str], preview_only: bool = True, pr
 
     **Purpose:** Efficient bulk context retrieval
 
-    **Input:** Array of topic names
+    **Input:** JSON string containing array of topic names
     ```
-    ["api_spec", "database_schema", "auth_rules"]
+    '["api_spec", "database_schema", "auth_rules"]'
     ```
 
     **Preview Mode (preview_only=True, DEFAULT):**
@@ -4116,7 +4119,7 @@ async def batch_recall_contexts(topics: List[str], preview_only: bool = True, pr
     **Example workflow:**
     ```python
     # Step 1: Get previews of all related contexts
-    batch_recall_contexts(["api_v1", "database_schema", "auth_rules"])
+    batch_recall_contexts('["api_v1", "database_schema", "auth_rules"]')
     # Returns: 3 summaries (~300 tokens total)
 
     # Step 2: Load specific contexts fully as needed
@@ -4130,13 +4133,20 @@ async def batch_recall_contexts(topics: List[str], preview_only: bool = True, pr
     4. Avoid loading 5+ full contexts at once (context overflow)
 
     Args:
-        topics: Array of topic names
+        topics: JSON string containing array of topic names
         preview_only: If True, return summaries (default); if False, full content
 
     Returns: JSON with summary and results for each topic
     """
-    if not isinstance(topics, list):
-        return "❌ Input must be an array of topic names"
+    try:
+        topics_list = json.loads(topics)
+    except json.JSONDecodeError as e:
+        return f"❌ Invalid JSON: {str(e)}"
+
+    if not isinstance(topics_list, list):
+        return "❌ Input must be a JSON array of topic names"
+
+    topics = topics_list  # Use parsed list for the rest of the function
 
     results = []
     found = 0
