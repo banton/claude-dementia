@@ -4316,7 +4316,7 @@ async def search_contexts(
 
     # Add priority filter
     if priority:
-        sql += " AND metadata->>'priority' = ?"
+        sql += " AND (metadata::json)->>'priority' = ?"
         params.append(priority)
 
     # Add tags filter
@@ -4324,7 +4324,7 @@ async def search_contexts(
         tag_conditions = []
         for tag in tags.split(','):
             tag = tag.strip()
-            tag_conditions.append("metadata->>'tags' LIKE ?")
+            tag_conditions.append("(metadata::json)->>'tags' LIKE ?")
             params.append(f'%{tag}%')
         sql += f" AND ({' OR '.join(tag_conditions)})"
 
@@ -4563,12 +4563,12 @@ async def memory_analytics(project: Optional[str] = None) -> str:
     # By priority distribution
     cursor = conn.execute("""
         SELECT
-            metadata->>'priority' as priority,
+            (metadata::json)->>'priority' as priority,
             COUNT(*) as count,
             SUM(LENGTH(content)) as total_bytes
         FROM context_locks
         WHERE session_id = ?
-        GROUP BY metadata->>'priority'
+        GROUP BY (metadata::json)->>'priority'
     """, (session_id,))
 
     analytics["by_priority"] = {}
@@ -5052,7 +5052,7 @@ async def inspect_database(
             # Locked contexts by priority
             cursor = conn.execute("""
                 SELECT
-                    metadata->>'priority' as priority,
+                    (metadata::json)->>'priority' as priority,
                     COUNT(*) as count
                 FROM context_locks
                 WHERE session_id = ?
@@ -6162,7 +6162,7 @@ async def context_dashboard(project: Optional[str] = None) -> str:
     # Get comprehensive statistics
     stats_query = """
         SELECT
-            metadata->>'priority' as priority,
+            (metadata::json)->>'priority' as priority,
             COUNT(*) as count,
             SUM(LENGTH(content)) as total_size,
             AVG(LENGTH(content)) as avg_size
@@ -6225,8 +6225,8 @@ async def context_dashboard(project: Optional[str] = None) -> str:
         FROM context_locks
         WHERE session_id = ?
         GROUP BY label
-        HAVING version_count > 1
-        ORDER BY version_count DESC
+        HAVING COUNT(*) > 1
+        ORDER BY COUNT(*) DESC
         LIMIT 5
     """, (session_id,)).fetchall()
 
