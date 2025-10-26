@@ -4900,14 +4900,27 @@ async def query_database(
         else:
             # Use default dementia database
             conn = _get_db_for_project(project)
-            conn.row_factory = sqlite3.Row
+
+            # Set row factory for SQLite (PostgreSQL already returns dicts)
+            if hasattr(conn, 'row_factory'):
+                conn.row_factory = sqlite3.Row
 
         start_time = time.time()
 
-        if params:
-            cursor = conn.execute(query, params)
+        # Execute query (handle both SQLite and PostgreSQL)
+        if hasattr(conn, 'execute'):
+            # SQLite connection
+            if params:
+                cursor = conn.execute(query, params)
+            else:
+                cursor = conn.execute(query)
         else:
-            cursor = conn.execute(query)
+            # PostgreSQL connection - need to use cursor
+            cursor = conn.cursor()
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
 
         rows = cursor.fetchall()
         execution_time = (time.time() - start_time) * 1000  # Convert to ms
