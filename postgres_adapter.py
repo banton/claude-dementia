@@ -1,0 +1,413 @@
+"""
+PostgreSQL Adapter for Claude Dementia
+
+Implements project-based schema isolation for cloud-hosted PostgreSQL.
+Each project automatically gets its own schema based on directory/git repo name.
+
+Schema naming: {project_name}
+- Auto-detects from git repository name or directory basename
+- No manual configuration needed
+- One MCP server = One user, schemas separate projects
+
+Examples:
+    /Users/banton/Sites/innkeeper/        → Schema: innkeeper
+    /Users/banton/Sites/linkedin-posts/   → Schema: linkedin_posts
+    /Users/banton/Sites/claude-dementia/  → Schema: claude_dementia
+
+Usage:
+    # Set environment variable in .env
+    DATABASE_URL=postgresql://user:pass@host/dbname
+
+    # Adapter auto-detects project from working directory
+    from postgres_adapter import PostgreSQLAdapter
+    adapter = PostgreSQLAdapter()
+    conn = adapter.get_connection()
+
+    # Optional override for testing
+    DEMENTIA_SCHEMA=test_schema
+"""
+
+import os
+import sys
+import hashlib
+import psycopg2
+from psycopg2 import pool, sql
+from psycopg2.extras import RealDictCursor
+from dotenv import load_dotenv
+from typing import Optional
+import json
+
+# Load environment variables
+load_dotenv()
+
+
+class PostgreSQLAdapter:
+    """
+    PostgreSQL database adapter with schema-based multi-tenancy.
+
+    Features:
+    - Connection pooling for performance
+    - Automatic schema creation and migration
+    - Schema-based isolation (set search_path per connection)
+    - Compatible with existing SQLite-based code (dict-like rows)
+    """
+
+    def __init__(self, database_url: Optional[str] = None, schema: Optional[str] = None):
+        """
+        Initialize PostgreSQL adapter.
+
+        Args:
+            database_url: PostgreSQL connection URL (default: from DATABASE_URL env var)
+            schema: Schema name for isolation (default: auto-generated from project)
+        """
+        self.database_url = database_url or os.getenv('DATABASE_URL')
+        if not self.database_url:
+            raise ValueError("DATABASE_URL environment variable not set")
+
+        # Determine schema name
+        self.schema = schema or self._get_schema_name()
+
+        # Initialize connection pool (min 1, max 10 connections)
+        try:
+            self.pool = psycopg2.pool.SimpleConnectionPool(
+                1, 10,
+                self.database_url,
+                cursor_factory=RealDictCursor  # Returns dict-like rows (compatible with SQLite)
+            )
+            print(f"✅ PostgreSQL connection pool initialized (schema: {self.schema})", file=sys.stderr)
+        except Exception as e:
+            raise ConnectionError(f"Failed to create connection pool: {e}")
+
+    def _get_schema_name(self) -> str:
+        """
+        Generate schema name for project isolation.
+
+        Auto-detects project name from:
+        1. DEMENTIA_SCHEMA environment variable (explicit override for testing)
+        2. Git repository name (if in a git repo)
+        3. Current directory basename (fallback)
+
+        Returns:
+            str: Schema name (e.g., "innkeeper" or "my_project")
+        """
+        # Priority 1: Explicit schema name (for testing/debugging)
+        if os.getenv('DEMENTIA_SCHEMA'):
+            return os.getenv('DEMENTIA_SCHEMA')
+
+        # Priority 2: Detect and sanitize project name
+        project_name = self._detect_project_name()
+        return self._sanitize_identifier(project_name)
+
+    def _detect_project_name(self) -> str:
+        """
+        Auto-detect project name from git repo or directory.
+
+        Returns:
+            str: Project name (e.g., "innkeeper", "linkedin-posts")
+        """
+        cwd = os.getcwd()
+
+        # Try to get git repo name
+        try:
+            git_dir = cwd
+            while git_dir != '/':
+                if os.path.exists(os.path.join(git_dir, '.git')):
+                    # Found git root - use this directory name
+                    return os.path.basename(git_dir)
+                git_dir = os.path.dirname(git_dir)
+        except:
+            pass
+
+        # Fallback: use current directory basename
+        return os.path.basename(cwd) or 'default'
+
+    def _sanitize_identifier(self, name: str) -> str:
+        """
+        Sanitize string for use as PostgreSQL identifier.
+
+        Rules:
+        - Lowercase
+        - Replace spaces/special chars with underscores
+        - Remove consecutive underscores
+        - Limit length to 32 chars
+        """
+        import re
+        # Lowercase and replace non-alphanumeric with underscore
+        safe = re.sub(r'[^a-z0-9]', '_', name.lower())
+        # Remove consecutive underscores
+        safe = re.sub(r'_+', '_', safe)
+        # Remove leading/trailing underscores
+        safe = safe.strip('_')
+        # Limit length
+        return safe[:32]
+
+    def get_connection(self):
+        """
+        Get a connection from the pool with schema isolation applied.
+
+        Returns:
+            psycopg2.connection: Database connection with search_path set to schema
+        """
+        conn = self.pool.getconn()
+
+        # Set search_path to isolate this connection to the schema
+        with conn.cursor() as cur:
+            # Use sql.Identifier to prevent SQL injection
+            cur.execute(
+                sql.SQL("SET search_path TO {}, public").format(
+                    sql.Identifier(self.schema)
+                )
+            )
+
+        return conn
+
+    def release_connection(self, conn):
+        """Return connection to the pool."""
+        self.pool.putconn(conn)
+
+    def ensure_schema_exists(self):
+        """
+        Ensure schema exists and has required tables.
+        Creates schema and runs migrations if needed.
+        """
+        conn = self.pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                # Create schema if not exists
+                cur.execute(
+                    sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                        sql.Identifier(self.schema)
+                    )
+                )
+
+                # Set search_path for this session
+                cur.execute(
+                    sql.SQL("SET search_path TO {}, public").format(
+                        sql.Identifier(self.schema)
+                    )
+                )
+
+                # Create tables (PostgreSQL syntax)
+                self._create_tables(cur)
+
+                conn.commit()
+                print(f"✅ Schema '{self.schema}' ready with all tables", file=sys.stderr)
+        finally:
+            self.pool.putconn(conn)
+
+    def _create_tables(self, cur):
+        """Create all required tables in current schema."""
+
+        # Sessions table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                started_at DOUBLE PRECISION,
+                last_active DOUBLE PRECISION,
+                project_fingerprint TEXT,
+                project_path TEXT,
+                project_name TEXT
+            )
+        """)
+
+        # Context locks table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS context_locks (
+                id SERIAL PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                version TEXT,
+                content TEXT,
+                content_hash TEXT,
+                metadata TEXT,
+                tags TEXT,
+                locked_at DOUBLE PRECISION,
+                last_accessed DOUBLE PRECISION,
+                access_count INTEGER DEFAULT 0,
+                preview TEXT,
+                key_concepts TEXT,
+                embedding BYTEA,
+                embedding_model TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            )
+        """)
+
+        # Audit trail table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS audit_trail (
+                id SERIAL PRIMARY KEY,
+                timestamp DOUBLE PRECISION,
+                session_id TEXT,
+                action TEXT,
+                target_type TEXT,
+                target_id TEXT,
+                details TEXT,
+                user_id TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            )
+        """)
+
+        # Memory entries table (for handovers)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS memory_entries (
+                id SERIAL PRIMARY KEY,
+                session_id TEXT,
+                timestamp DOUBLE PRECISION,
+                category TEXT,
+                content TEXT,
+                metadata TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            )
+        """)
+
+        # File semantic model table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS file_semantic_model (
+                id SERIAL PRIMARY KEY,
+                session_id TEXT,
+                file_path TEXT,
+                file_size INTEGER,
+                content_hash TEXT,
+                modified_time DOUBLE PRECISION,
+                hash_method TEXT,
+                file_type TEXT,
+                language TEXT,
+                purpose TEXT,
+                imports TEXT,
+                exports TEXT,
+                dependencies TEXT,
+                used_by TEXT,
+                contains TEXT,
+                is_standard INTEGER,
+                standard_type TEXT,
+                warnings TEXT,
+                cluster_name TEXT,
+                related_files TEXT,
+                last_scanned DOUBLE PRECISION,
+                scan_duration_ms INTEGER,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            )
+        """)
+
+        # File change history table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS file_change_history (
+                id SERIAL PRIMARY KEY,
+                session_id TEXT,
+                file_path TEXT,
+                change_type TEXT,
+                timestamp DOUBLE PRECISION,
+                old_hash TEXT,
+                new_hash TEXT,
+                size_delta INTEGER,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            )
+        """)
+
+        # Query results cache table (for pagination)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS query_results_cache (
+                query_id TEXT PRIMARY KEY,
+                query_type TEXT,
+                params TEXT,
+                results TEXT,
+                created_at DOUBLE PRECISION,
+                expires_at DOUBLE PRECISION
+            )
+        """)
+
+        # Todos table (permanent task tracking)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS todos (
+                id SERIAL PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                active_form TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('pending', 'in_progress', 'completed')),
+                created_at DOUBLE PRECISION NOT NULL,
+                updated_at DOUBLE PRECISION NOT NULL,
+                completed_at DOUBLE PRECISION,
+                priority TEXT,
+                tags TEXT,
+                metadata TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            )
+        """)
+
+        # Create indexes for performance
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_context_locks_session ON context_locks(session_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_context_locks_label ON context_locks(label)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_trail_session ON audit_trail(session_id, timestamp DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_file_model_session ON file_semantic_model(session_id, file_path)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_file_changes_session ON file_change_history(session_id, timestamp DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_todos_session ON todos(session_id, status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status, updated_at DESC)")
+
+    def get_info(self) -> dict:
+        """Get information about current database and schema."""
+        conn = self.get_connection()
+        try:
+            with conn.cursor() as cur:
+                # Get PostgreSQL version
+                cur.execute("SELECT version()")
+                version = cur.fetchone()['version']
+
+                # Get current database
+                cur.execute("SELECT current_database()")
+                database = cur.fetchone()['current_database']
+
+                # Get current schema
+                cur.execute("SELECT current_schema()")
+                current_schema = cur.fetchone()['current_schema']
+
+                # Get table count in current schema
+                cur.execute("""
+                    SELECT COUNT(*) as count
+                    FROM information_schema.tables
+                    WHERE table_schema = %s
+                """, (self.schema,))
+                table_count = cur.fetchone()['count']
+
+                return {
+                    "type": "postgresql",
+                    "version": version.split('(')[0].strip(),
+                    "database": database,
+                    "schema": current_schema,
+                    "configured_schema": self.schema,
+                    "table_count": table_count,
+                    "connection_pool": {
+                        "min": 1,
+                        "max": 10
+                    }
+                }
+        finally:
+            self.release_connection(conn)
+
+    def close(self):
+        """Close all connections in the pool."""
+        if self.pool:
+            self.pool.closeall()
+            print(f"✅ PostgreSQL connection pool closed", file=sys.stderr)
+
+
+# Convenience function for testing
+def test_connection():
+    """Test PostgreSQL connection and display info."""
+    try:
+        adapter = PostgreSQLAdapter()
+        adapter.ensure_schema_exists()
+
+        info = adapter.get_info()
+        print("\n📊 Database Information:")
+        print(json.dumps(info, indent=2))
+
+        adapter.close()
+        return True
+    except Exception as e:
+        print(f"❌ Test failed: {e}")
+        return False
+
+
+if __name__ == "__main__":
+    # Run test when executed directly
+    test_connection()

@@ -25,7 +25,10 @@
       "Read(//var/folders/lp/y8m8sn3s4d1bp2959n1cpqx40000gn/T/TemporaryItems/NSIRD_screencaptureui_OfRBZC/**)",
       "Read(//Users/banton/Sites/linkedin/**)",
       "Bash(./test_database_isolation.sh:*)",
-      "Bash(timeout:*)"
+      "Bash(timeout:*)",
+      "WebFetch(domain:support.claude.com)",
+      "Bash(DEMENTIA_USER_ID=user_abc123 DEMENTIA_PROJECT_NAME=innkeeper-claude python3 postgres_adapter.py)",
+      "Bash(DATABASE_MODE=sqlite python3 -c \"\nimport os\nos.environ[''DEMENTIA_USER_ID''] = ''test_user''\nos.environ[''DEMENTIA_PROJECT_NAME''] = ''test_local_mode''\n\nprint(''Testing SQLite mode...'')\nfrom src.config import config\nprint(f''Database Mode: {config.database_mode}'')\n\nimport claude_mcp_hybrid\n\nprint(''\\nTesting get_db()...'')\nconn = claude_mcp_hybrid.get_db()\nprint(f''Connection type: {type(conn).__name__}'')\n\n# Test a simple query\ncur = conn.cursor()\ncur.execute(''SELECT 1 as test'')\nresult = cur.fetchone()\nprint(f''Query result: {dict(result)}'')\n\nconn.close()\nprint(''\\n✅ SQLite mode working!'')\n\")"
     ],
     "deny": [],
     "ask": [],

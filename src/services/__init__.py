@@ -16,18 +16,19 @@ def init_token_tracker(conn):
 
 
 def get_embedding_service():
-    """Get embedding service based on configuration."""
-    if config.embedding_provider == "ollama":
-        from src.services.ollama_embedding_service import OllamaEmbeddingService
-        service = OllamaEmbeddingService(
-            base_url=config.ollama_base_url,
-            model=config.embedding_model,
-            token_tracker=_token_tracker
-        )
-        if service.enabled:
-            return service
+    """Get embedding service based on configuration - Voyage AI only."""
+    # DISABLED: Ollama embedding service (commented out, code preserved)
+    # if config.embedding_provider == "ollama":
+    #     from src.services.ollama_embedding_service import OllamaEmbeddingService
+    #     service = OllamaEmbeddingService(
+    #         base_url=config.ollama_base_url,
+    #         model=config.embedding_model,
+    #         token_tracker=_token_tracker
+    #     )
+    #     if service.enabled:
+    #         return service
 
-    elif config.embedding_provider == "voyage_ai":
+    if config.embedding_provider == "voyage_ai":
         from src.services.voyage_ai_embedding_service import VoyageAIEmbeddingService
         if config.voyageai_api_key:
             service = VoyageAIEmbeddingService(
@@ -62,18 +63,19 @@ def get_embedding_service():
 
 
 def get_llm_service():
-    """Get LLM service based on configuration."""
-    if config.llm_provider == "ollama":
-        from src.services.ollama_llm_service import OllamaLLMService
-        service = OllamaLLMService(
-            base_url=config.ollama_base_url,
-            default_model=config.llm_model,
-            token_tracker=_token_tracker
-        )
-        if service.enabled:
-            return service
+    """Get LLM service based on configuration - OpenRouter only."""
+    # DISABLED: Ollama LLM service (commented out, code preserved)
+    # if config.llm_provider == "ollama":
+    #     from src.services.ollama_llm_service import OllamaLLMService
+    #     service = OllamaLLMService(
+    #         base_url=config.ollama_base_url,
+    #         default_model=config.llm_model,
+    #         token_tracker=_token_tracker
+    #     )
+    #     if service.enabled:
+    #         return service
 
-    elif config.llm_provider == "openrouter":
+    if config.llm_provider == "openrouter":
         from src.services.openrouter_llm_service import OpenRouterLLMService
         if config.openrouter_api_key:
             service = OpenRouterLLMService(

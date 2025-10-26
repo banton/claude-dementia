@@ -47,13 +47,106 @@ from file_semantic_model import (
 # Initialize MCP server
 mcp = FastMCP("claude-dementia")
 
-# Database configuration - smart detection of where to store memory
+# Import configuration
+from src.config import config
+
+# ============================================================================
+# POSTGRESQL/NEON DATABASE SETUP (ONLY MODE)
+# ============================================================================
+# Initialize PostgreSQL adapter - NO FALLBACK to SQLite
+from postgres_adapter import PostgreSQLAdapter
+
+# Global: Default adapter (for backward compatibility and auto-detection)
+_postgres_adapter = PostgreSQLAdapter(
+    database_url=config.database_url,
+    schema=os.getenv('DEMENTIA_SCHEMA')  # Will auto-detect if not set
+)
+_postgres_adapter.ensure_schema_exists()
+print(f"✅ PostgreSQL/Neon connected (schema: {_postgres_adapter.schema})", file=sys.stderr)
+
+# Session-level active project tracking (per conversation)
+_active_projects = {}  # {session_id: project_name}
+
+def _get_project_for_context(project: str = None) -> str:
+    """
+    Determine which project to use for this operation.
+
+    Priority:
+    1. Explicit project parameter
+    2. Session active project (set via switch_project)
+    3. Auto-detect from filesystem (Claude Code with git repo)
+    4. Fall back to "default"
+
+    Returns:
+        str: Project name/schema to use
+    """
+    # Priority 1: Explicit parameter
+    if project:
+        return project
+
+    # Priority 2: Session active project
+    try:
+        session_id = get_current_session_id()
+        if session_id in _active_projects:
+            return _active_projects[session_id]
+    except:
+        pass
+
+    # Priority 3: Auto-detect from filesystem (Claude Code only)
+    # This uses the global adapter's auto-detection
+    # Only works if we're in a project directory
+    if _postgres_adapter.schema and _postgres_adapter.schema != 'default':
+        return _postgres_adapter.schema
+
+    # Priority 4: Default project
+    return "default"
+
+def _get_db_for_project(project: str = None):
+    """
+    Get database connection for a specific project.
+
+    Args:
+        project: Project name (uses fallback logic if not provided)
+
+    Returns:
+        Database connection for the specified project
+    """
+    target_project = _get_project_for_context(project)
+
+    # If it's the same as our global adapter, reuse it
+    if target_project == _postgres_adapter.schema:
+        return get_db()
+
+    # Create new adapter for different project
+    adapter = PostgreSQLAdapter(
+        database_url=config.database_url,
+        schema=target_project
+    )
+
+    # Ensure schema exists (auto-create on first use)
+    try:
+        adapter.ensure_schema_exists()
+    except:
+        pass  # Schema might already exist
+
+    conn = adapter.get_connection()
+    return AutoClosingPostgreSQLConnection(conn, adapter)
+
+# ============================================================================
+# DISABLED: SQLite Database Configuration (code preserved, commented out)
+# ============================================================================
+# All SQLite-related code is commented out. PostgreSQL is the ONLY database mode.
+# This code is preserved for future local mode re-implementation.
+# ============================================================================
+
 import os
 import hashlib
 from pathlib import Path
 
+# DISABLED: SQLite database path detection (commented out)
+"""
 def get_database_path():
-    """Determine the best location for the memory database"""
+    # Determine the best location for the memory database
     
     # Option 1: Environment variable override (highest priority)
     if os.environ.get('CLAUDE_MEMORY_DB'):
@@ -106,54 +199,123 @@ def get_database_path():
         f.write(json.dumps(mappings, indent=2))
     
     return os.path.join(cache_dir, f'{context_hash}.db')
+"""
+# End of disabled get_database_path()
 
-# DEPRECATED: Static DB_PATH set at module load
-# This is kept for backwards compatibility but should not be used directly
-# Use get_current_db_path() instead for dynamic database selection
-try:
-    DB_PATH = get_database_path()
-    # Ensure parent directory exists
-    db_dir = os.path.dirname(DB_PATH)
-    if db_dir and not os.path.exists(db_dir):
-        os.makedirs(db_dir, exist_ok=True)
-except Exception as e:
-    # Fallback to a safe location if there's any error
-    fallback_dir = tempfile.gettempdir()
-    DB_PATH = os.path.join(fallback_dir, 'claude-memory-fallback.db')
-    # Don't print during module initialization - it can break MCP
-    # print(f"Warning: Using fallback database location due to error: {e}", file=sys.stderr)
-
-def get_current_db_path() -> str:
-    """
-    Dynamically get database path for CURRENT working directory.
-    CRITICAL: This recalculates on every call for proper multi-project isolation.
-
-    Returns:
-        str: Path to database file for current project
-    """
+# ============================================================================
+# DISABLED: SQLite database initialization and helpers (commented out)
+# ============================================================================
+if False:  # Disabled code preserved
+    # DEPRECATED: Static DB_PATH set at module load
+    # This is kept for backwards compatibility but should not be used directly
+    # Use get_current_db_path() instead for dynamic database selection
     try:
-        return get_database_path()
+        DB_PATH = get_database_path()
+        # Ensure parent directory exists
+        db_dir = os.path.dirname(DB_PATH)
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
     except Exception as e:
-        # Fallback to temp location if there's any error
+        # Fallback to a safe location if there's any error
         fallback_dir = tempfile.gettempdir()
-        return os.path.join(fallback_dir, 'claude-memory-fallback.db')
+        DB_PATH = os.path.join(fallback_dir, 'claude-memory-fallback.db')
+        # Don't print during module initialization - it can break MCP
+        # print(f"Warning: Using fallback database location due to error: {e}", file=sys.stderr)
 
-def get_db_location_type() -> str:
-    """Get human-readable description of database location."""
-    db_path = get_current_db_path()
-    if 'claude-dementia' in db_path or '/tmp/' in db_path or '/var/folders/' in db_path:
-        return 'user cache'
+    def get_current_db_path() -> str:
+        """
+        Dynamically get database path for CURRENT working directory.
+        CRITICAL: This recalculates on every call for proper multi-project isolation.
+
+        Returns:
+            str: Path to database file for current project
+        """
+        try:
+            return get_database_path()
+        except Exception as e:
+            # Fallback to temp location if there's any error
+            fallback_dir = tempfile.gettempdir()
+            return os.path.join(fallback_dir, 'claude-memory-fallback.db')
+
+    def get_db_location_type() -> str:
+        """Get human-readable description of database location."""
+        db_path = get_current_db_path()
+        if 'claude-dementia' in db_path or '/tmp/' in db_path or '/var/folders/' in db_path:
+            return 'user cache'
+        else:
+            return 'project local'
+
+    # DEPRECATED: These are kept for backwards compatibility but should not be used directly
+    # Use get_project_root() and get_project_name() instead for dynamic project detection
+    if os.environ.get('CLAUDE_PROJECT_DIR'):
+        PROJECT_ROOT = os.environ['CLAUDE_PROJECT_DIR']
     else:
-        return 'project local'
+        PROJECT_ROOT = os.getcwd()
 
-# DEPRECATED: These are kept for backwards compatibility but should not be used directly
-# Use get_project_root() and get_project_name() instead for dynamic project detection
-if os.environ.get('CLAUDE_PROJECT_DIR'):
-    PROJECT_ROOT = os.environ['CLAUDE_PROJECT_DIR']
-else:
-    PROJECT_ROOT = os.getcwd()
+    PROJECT_NAME = os.path.basename(PROJECT_ROOT) or 'Claude Desktop'
 
-PROJECT_NAME = os.path.basename(PROJECT_ROOT) or 'Claude Desktop'
+    def get_project_root() -> str:
+        """
+        Dynamically get current project root.
+        IMPORTANT: Returns CURRENT working directory, not cached value.
+        This enables proper project isolation in long-running MCP servers.
+        """
+        if os.environ.get('CLAUDE_PROJECT_DIR'):
+            return os.environ['CLAUDE_PROJECT_DIR']
+        return os.getcwd()
+
+    def get_project_name() -> str:
+        """Get current project name from dynamic project root."""
+        return os.path.basename(get_project_root()) or 'Claude Desktop'
+
+    # For testing: allow SESSION_ID override
+    SESSION_ID = None
+
+    # DEPRECATED: Static DB_LOCATION based on initial DB_PATH
+    # Use get_db_location_type() instead for dynamic location
+    if 'claude-dementia' in DB_PATH or '/tmp/' in DB_PATH or '/var/folders/' in DB_PATH:
+        DB_LOCATION = 'user cache'
+    else:
+        DB_LOCATION = 'project local'
+
+    @contextmanager
+    def get_db_context():
+        """Context manager for database connections - ensures proper cleanup"""
+        conn = None
+        try:
+            conn = get_db()
+            yield conn
+            conn.commit()
+        except Exception:
+            if conn:
+                conn.rollback()
+            raise
+        finally:
+            if conn:
+                conn.close()
+
+    class AutoClosingConnection:
+        """Wrapper that automatically closes connection when done"""
+        def __init__(self, conn):
+            self.conn = conn
+            self._closed = False
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+        def __del__(self):
+            if not self._closed:
+                try:
+                    self.conn.close()
+                    self._closed = True
+                except:
+                    pass
+    pass  # End of disabled block
+# End of disabled SQLite database initialization and helpers
+
+# ============================================================================
+# UTILITY: Project information functions (used by both PostgreSQL and SQLite)
+# ============================================================================
 
 def get_project_root() -> str:
     """
@@ -169,92 +331,8 @@ def get_project_name() -> str:
     """Get current project name from dynamic project root."""
     return os.path.basename(get_project_root()) or 'Claude Desktop'
 
-# For testing: allow SESSION_ID override
-SESSION_ID = None
-
-# DEPRECATED: Static DB_LOCATION based on initial DB_PATH
-# Use get_db_location_type() instead for dynamic location
-if 'claude-dementia' in DB_PATH or '/tmp/' in DB_PATH or '/var/folders/' in DB_PATH:
-    DB_LOCATION = 'user cache'
-else:
-    DB_LOCATION = 'project local'
-
-@contextmanager
-def get_db_context():
-    """Context manager for database connections - ensures proper cleanup"""
-    conn = None
-    try:
-        conn = get_db()
-        yield conn
-        conn.commit()
-    except Exception:
-        if conn:
-            conn.rollback()
-        raise
-    finally:
-        if conn:
-            conn.close()
-
-class AutoClosingConnection:
-    """Wrapper that automatically closes connection when done"""
-    def __init__(self, conn):
-        self.conn = conn
-        self._closed = False
-    
-    def __getattr__(self, name):
-        return getattr(self.conn, name)
-    
-    def __del__(self):
-        if not self._closed:
-            try:
-                self.conn.close()
-                self._closed = True
-            except:
-                pass
-
-def get_db():
-    """
-    Get database connection with row factory and auto-cleanup.
-    IMPORTANT: Uses dynamic database path for proper multi-project isolation.
-    """
-    # Get current database path (recalculated each time for project isolation)
-    current_db_path = get_current_db_path()
-
-    # Ensure the directory exists
-    db_dir = os.path.dirname(current_db_path)
-    if db_dir and not os.path.exists(db_dir):
-        os.makedirs(db_dir, exist_ok=True)
-
-    # Connect with better error handling and concurrency support
-    try:
-        # Use a timeout to avoid hanging on locked databases
-        conn = sqlite3.connect(current_db_path, timeout=10.0, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        
-        # Enable WAL mode for better concurrency (multiple readers, one writer)
-        conn.execute("PRAGMA journal_mode=WAL")
-        
-        # Set busy timeout to wait if database is locked
-        conn.execute("PRAGMA busy_timeout=5000")  # 5 seconds
-        
-        # Initialize database schema if needed
-        initialize_database(conn)
-        
-        # Return auto-closing wrapper
-        return AutoClosingConnection(conn)
-    except sqlite3.Error as e:
-        # Provide detailed error information
-        print(f"Database connection error: {e}", file=sys.stderr)
-        print(f"Database path: {current_db_path}", file=sys.stderr)
-        print(f"Database directory: {db_dir}", file=sys.stderr)
-        print(f"Directory exists: {os.path.exists(db_dir) if db_dir else 'N/A'}", file=sys.stderr)
-        print(f"Database file exists: {os.path.exists(current_db_path)}", file=sys.stderr)
-        if os.path.exists(current_db_path):
-            print(f"File permissions: {oct(os.stat(current_db_path).st_mode)}", file=sys.stderr)
-        raise
-
 def is_project_directory(path: str) -> bool:
-    """Check if path is a project directory (has .git, package.json, requirements.txt, etc)"""
+    """Check if path is a project directory (has .git, package.json, etc)."""
     project_markers = [
         '.git',
         'package.json',
@@ -273,80 +351,247 @@ def is_project_directory(path: str) -> bool:
 
     return False
 
-def initialize_database(conn):
-    """Create database tables if they don't exist and migrate existing schemas"""
-    cursor = conn.cursor()
-    
-    # Create sessions table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY,
-            started_at REAL NOT NULL,
-            ended_at REAL,
-            last_active REAL,
-            summary TEXT,
-            project_fingerprint TEXT,
-            project_path TEXT,
-            project_name TEXT
-        )
-    ''')
-    
-    # Migrate existing sessions table if needed
-    cursor.execute("PRAGMA table_info(sessions)")
-    columns = {row[1] for row in cursor.fetchall()}
-    
-    if 'project_fingerprint' not in columns:
-        cursor.execute('ALTER TABLE sessions ADD COLUMN project_fingerprint TEXT')
-    if 'project_path' not in columns:
-        cursor.execute('ALTER TABLE sessions ADD COLUMN project_path TEXT')
-    if 'project_name' not in columns:
-        cursor.execute('ALTER TABLE sessions ADD COLUMN project_name TEXT')
-    
-    # Create memory_entries table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS memory_entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            category TEXT NOT NULL,
-            content TEXT NOT NULL,
-            metadata TEXT,
-            timestamp REAL NOT NULL,
-            session_id TEXT,
-            FOREIGN KEY (session_id) REFERENCES sessions(id)
-        )
-    ''')
-    
-    # Create context_locks table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS context_locks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            label TEXT NOT NULL,
-            version TEXT NOT NULL DEFAULT '1.0',
-            content TEXT NOT NULL CHECK(length(content) <= 51200),
-            content_hash TEXT NOT NULL,
-            locked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            lock_source TEXT DEFAULT 'user',
-            is_persistent BOOLEAN DEFAULT 0,
-            parent_version TEXT,
-            metadata TEXT,
-            UNIQUE(session_id, label, version),
-            CHECK(version GLOB '[0-9]*.[0-9]*')
-        )
-    ''')
-    
-    # Migrate context_locks to v4.1 RLM schema if needed
-    cursor.execute("PRAGMA table_info(context_locks)")
-    columns = {row[1] for row in cursor.fetchall()}
+def get_current_db_path() -> str:
+    """Get current database path (PostgreSQL returns schema name, not file path)."""
+    if is_postgresql_mode():
+        return f"postgresql://{_postgres_adapter.schema}"
+    # SQLite mode disabled
+    return "N/A"
 
-    if 'preview' not in columns:
-        cursor.execute('ALTER TABLE context_locks ADD COLUMN preview TEXT')
-    if 'key_concepts' not in columns:
-        cursor.execute('ALTER TABLE context_locks ADD COLUMN key_concepts TEXT')
-    if 'related_contexts' not in columns:
-        cursor.execute('ALTER TABLE context_locks ADD COLUMN related_contexts TEXT')
-    if 'last_accessed' not in columns:
-        cursor.execute('ALTER TABLE context_locks ADD COLUMN last_accessed TIMESTAMP')
-        # Migrate existing contexts: set last_accessed = locked_at
+def get_db_location_type() -> str:
+    """Get human-readable description of database location."""
+    if is_postgresql_mode():
+        return "cloud (PostgreSQL/Neon)"
+    return "unknown"
+
+# ============================================================================
+# POSTGRESQL: Connection wrapper for connection pooling
+# ============================================================================
+
+class AutoClosingPostgreSQLConnection:
+    """Wrapper for PostgreSQL connections that returns them to pool"""
+    def __init__(self, conn, adapter):
+        self.conn = conn
+        self.adapter = adapter
+        self._closed = False
+
+    def __getattr__(self, name):
+        return getattr(self.conn, name)
+
+    def _convert_sql_placeholders(self, sql):
+        """Convert SQLite placeholders (?) to PostgreSQL placeholders (%s)"""
+        return sql.replace('?', '%s')
+
+    def execute(self, sql, parameters=None):
+        """Execute SQL with cursor (SQLite compatibility)"""
+        # Convert SQLite placeholders to PostgreSQL
+        sql = self._convert_sql_placeholders(sql)
+
+        try:
+            cur = self.conn.cursor()
+            if parameters:
+                cur.execute(sql, parameters)
+            else:
+                cur.execute(sql)
+            return cur
+        except Exception as e:
+            # PostgreSQL requires rollback on error
+            print(f"⚠️  SQL Error: {e}", file=sys.stderr)
+            print(f"   SQL: {sql[:200]}...", file=sys.stderr)
+            self.conn.rollback()
+            raise
+
+    def cursor(self):
+        """Get cursor from connection"""
+        return self.conn.cursor()
+
+    def close(self):
+        """Return connection to pool instead of closing"""
+        if not self._closed:
+            try:
+                self.adapter.release_connection(self.conn)
+                self._closed = True
+            except:
+                pass
+
+    def __del__(self):
+        self.close()
+
+# ============================================================================
+# POSTGRESQL-ONLY DATABASE FUNCTIONS
+# ============================================================================
+
+def is_postgresql_mode():
+    """Always returns True - PostgreSQL is the only mode."""
+    return True
+
+def get_db():
+    """
+    Get PostgreSQL database connection with auto-cleanup.
+
+    Returns AutoClosingPostgreSQLConnection with:
+    - Schema isolation via search_path
+    - Dict-like rows via RealDictCursor
+    - Automatic placeholder conversion (? to %s)
+    - Connection pooling (returned to pool on close)
+    """
+    conn = _postgres_adapter.get_connection()
+    return AutoClosingPostgreSQLConnection(conn, _postgres_adapter)
+
+# ============================================================================
+# DISABLED: SQLite get_db() Implementation (commented out, code preserved)
+# ============================================================================
+"""
+# OLD SQLite/Dual-mode get_db() - DISABLED
+def get_db():
+    # Get current database path (recalculated each time for project isolation)
+    current_db_path = get_current_db_path()
+
+    # Ensure the directory exists
+    db_dir = os.path.dirname(current_db_path)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
+
+    # Connect with better error handling and concurrency support
+    try:
+        # Use a timeout to avoid hanging on locked databases
+        conn = sqlite3.connect(current_db_path, timeout=10.0, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+
+        # Enable WAL mode for better concurrency (multiple readers, one writer)
+        conn.execute("PRAGMA journal_mode=WAL")
+
+        # Set busy timeout to wait if database is locked
+        conn.execute("PRAGMA busy_timeout=5000")  # 5 seconds
+
+        # Initialize database schema if needed
+        initialize_database(conn)
+
+        # Return auto-closing wrapper
+        return AutoClosingConnection(conn)
+    except sqlite3.Error as e:
+        # Provide detailed error information
+        print(f"Database connection error: {e}", file=sys.stderr)
+        print(f"Database path: {current_db_path}", file=sys.stderr)
+        print(f"Database directory: {db_dir}", file=sys.stderr)
+        print(f"Directory exists: {os.path.exists(db_dir) if db_dir else 'N/A'}", file=sys.stderr)
+        print(f"Database file exists: {os.path.exists(current_db_path)}", file=sys.stderr)
+        if os.path.exists(current_db_path):
+            print(f"File permissions: {oct(os.stat(current_db_path).st_mode)}", file=sys.stderr)
+        raise
+"""
+# End of disabled SQLite get_db()
+
+# ============================================================================
+# DISABLED: SQLite Helper Functions (commented out, code preserved)
+# ============================================================================
+if False:  # Disabled code preserved
+    def is_project_directory(path: str) -> bool:
+        # Check if path is a project directory (has .git, package.json, requirements.txt, etc)
+        project_markers = [
+            '.git',
+            'package.json',
+            'requirements.txt',
+            'pyproject.toml',
+            'Cargo.toml',
+            'go.mod',
+            'pom.xml',
+            'build.gradle',
+            'Makefile'
+        ]
+
+        for marker in project_markers:
+            if os.path.exists(os.path.join(path, marker)):
+                return True
+
+        return False
+
+    def initialize_database(conn):
+        """Create database tables if they don't exist and migrate existing schemas"""
+        cursor = conn.cursor()
+    
+        # Create sessions table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                started_at REAL NOT NULL,
+                ended_at REAL,
+                last_active REAL,
+                summary TEXT,
+                project_fingerprint TEXT,
+                project_path TEXT,
+                project_name TEXT
+            )
+        ''')
+    
+        # Migrate existing sessions table if needed
+        cursor.execute("PRAGMA table_info(sessions)")
+        columns = {row[1] for row in cursor.fetchall()}
+    
+        if 'project_fingerprint' not in columns:
+            cursor.execute('ALTER TABLE sessions ADD COLUMN project_fingerprint TEXT')
+        if 'project_path' not in columns:
+            cursor.execute('ALTER TABLE sessions ADD COLUMN project_path TEXT')
+        if 'project_name' not in columns:
+            cursor.execute('ALTER TABLE sessions ADD COLUMN project_name TEXT')
+    
+        # Create memory_entries table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS memory_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL,
+                content TEXT NOT NULL,
+                metadata TEXT,
+                timestamp REAL NOT NULL,
+                session_id TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            )
+        ''')
+    
+        # Create context_locks table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS context_locks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                version TEXT NOT NULL DEFAULT '1.0',
+                content TEXT NOT NULL CHECK(length(content) <= 51200),
+                content_hash TEXT NOT NULL,
+                locked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                lock_source TEXT DEFAULT 'user',
+                is_persistent BOOLEAN DEFAULT 0,
+                parent_version TEXT,
+                metadata TEXT,
+                UNIQUE(session_id, label, version),
+                CHECK(version GLOB '[0-9]*.[0-9]*')
+            )
+        ''')
+    
+        # Migrate context_locks to v4.1 RLM schema if needed
+        cursor.execute("PRAGMA table_info(context_locks)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        if 'preview' not in columns:
+            cursor.execute('ALTER TABLE context_locks ADD COLUMN preview TEXT')
+        if 'key_concepts' not in columns:
+            cursor.execute('ALTER TABLE context_locks ADD COLUMN key_concepts TEXT')
+        if 'related_contexts' not in columns:
+            cursor.execute('ALTER TABLE context_locks ADD COLUMN related_contexts TEXT')
+        if 'last_accessed' not in columns:
+            cursor.execute('ALTER TABLE context_locks ADD COLUMN last_accessed TIMESTAMP')
+            # Migrate existing contexts: set last_accessed = locked_at
+            cursor.execute("""
+                UPDATE context_locks
+                SET last_accessed = locked_at
+                WHERE last_accessed IS NULL
+            """)
+            conn.commit()
+
+        if 'access_count' not in columns:
+            cursor.execute('ALTER TABLE context_locks ADD COLUMN access_count INTEGER DEFAULT 0')
+
+        # Set last_accessed = locked_at for any contexts that still have NULL
+        # (handles contexts created after column added but before this migration)
         cursor.execute("""
             UPDATE context_locks
             SET last_accessed = locked_at
@@ -354,252 +599,246 @@ def initialize_database(conn):
         """)
         conn.commit()
 
-    if 'access_count' not in columns:
-        cursor.execute('ALTER TABLE context_locks ADD COLUMN access_count INTEGER DEFAULT 0')
+        # If we just added RLM columns, generate previews for existing contexts
+        if 'preview' not in columns:
+            cursor.execute("SELECT COUNT(*) FROM context_locks WHERE preview IS NULL")
+            needs_preview = cursor.fetchone()[0]
 
-    # Set last_accessed = locked_at for any contexts that still have NULL
-    # (handles contexts created after column added but before this migration)
-    cursor.execute("""
-        UPDATE context_locks
-        SET last_accessed = locked_at
-        WHERE last_accessed IS NULL
-    """)
-    conn.commit()
+            if needs_preview > 0:
+                # Import preview generation
+                from migrate_v4_1_rlm import generate_preview, extract_key_concepts
 
-    # If we just added RLM columns, generate previews for existing contexts
-    if 'preview' not in columns:
-        cursor.execute("SELECT COUNT(*) FROM context_locks WHERE preview IS NULL")
-        needs_preview = cursor.fetchone()[0]
+                # Generate previews for existing contexts
+                cursor.execute("SELECT id, content, metadata, locked_at FROM context_locks WHERE preview IS NULL")
+                rows = cursor.fetchall()
 
-        if needs_preview > 0:
-            # Import preview generation
-            from migrate_v4_1_rlm import generate_preview, extract_key_concepts
+                for row in rows:
+                    row_id = row[0]
+                    content = row[1]
+                    metadata = json.loads(row[2]) if row[2] else {}
+                    locked_at = row[3]
+                    tags = metadata.get('tags', [])
 
-            # Generate previews for existing contexts
-            cursor.execute("SELECT id, content, metadata, locked_at FROM context_locks WHERE preview IS NULL")
-            rows = cursor.fetchall()
+                    preview = generate_preview(content, max_length=500)
+                    key_concepts = extract_key_concepts(content, tags)
 
-            for row in rows:
-                row_id = row[0]
-                content = row[1]
-                metadata = json.loads(row[2]) if row[2] else {}
-                locked_at = row[3]
-                tags = metadata.get('tags', [])
+                    cursor.execute("""
+                        UPDATE context_locks
+                        SET preview = ?, key_concepts = ?, last_accessed = ?
+                        WHERE id = ?
+                    """, (preview, json.dumps(key_concepts), locked_at, row_id))
 
-                preview = generate_preview(content, max_length=500)
-                key_concepts = extract_key_concepts(content, tags)
+                conn.commit()
 
-                cursor.execute("""
-                    UPDATE context_locks
-                    SET preview = ?, key_concepts = ?, last_accessed = ?
-                    WHERE id = ?
-                """, (preview, json.dumps(key_concepts), locked_at, row_id))
+        # Create context_archives table for safe deletion
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS context_archives (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_id INTEGER NOT NULL,
+                session_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                version TEXT NOT NULL,
+                content TEXT NOT NULL,
+                preview TEXT,
+                key_concepts TEXT,
+                metadata TEXT,
+                deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                delete_reason TEXT
+            )
+        ''')
 
+        # Create file_tags table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS file_tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                comment TEXT,
+                created_at REAL,
+                created_by TEXT,
+                metadata TEXT,
+                UNIQUE(path, tag)
+            )
+        ''')
+    
+        # Create todos table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS todos (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at REAL,
+                completed_at REAL,
+                priority INTEGER DEFAULT 0
+            )
+        ''')
+    
+        # Create project_variables table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS project_variables (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at REAL NOT NULL
+            )
+        ''')
+    
+        # Create session_updates table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS session_updates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                message TEXT NOT NULL,
+                category TEXT,
+                metadata TEXT
+            )
+        ''')
+    
+        # Create memory table (for backward compatibility)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS memory (
+                id INTEGER PRIMARY KEY,
+                session_id TEXT,
+                timestamp REAL,
+                category TEXT,
+                topic TEXT,
+                importance REAL DEFAULT 0.5,
+                content TEXT,
+                summary TEXT,
+                metadata TEXT,
+                parent_id INTEGER,
+                related_ids TEXT,
+                token_count INTEGER,
+                last_accessed REAL,
+                access_count INTEGER DEFAULT 0,
+                archived BOOLEAN DEFAULT 0
+            )
+        ''')
+    
+        # Create fixes table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS fixes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                problem TEXT NOT NULL,
+                cause TEXT,
+                solution TEXT NOT NULL,
+                prevention TEXT,
+                file_path TEXT
+            )
+        ''')
+    
+        # Create decisions table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                question TEXT NOT NULL,
+                context TEXT,
+                options TEXT,
+                decision TEXT,
+                rationale TEXT,
+                status TEXT DEFAULT 'OPEN'
+            )
+        ''')
+
+        # Create file_semantic_model table (v4.2.0)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS file_semantic_model (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+
+                -- Change detection (mtime + size + hash)
+                file_size INTEGER NOT NULL,
+                content_hash TEXT NOT NULL,
+                modified_time REAL NOT NULL,
+                hash_method TEXT DEFAULT 'full',
+
+                -- Basic metadata
+                file_type TEXT,
+                language TEXT,
+                purpose TEXT,
+
+                -- Semantic understanding (JSON)
+                imports TEXT,
+                exports TEXT,
+                dependencies TEXT,
+                used_by TEXT,
+                contains TEXT,
+
+                -- Standard file recognition
+                is_standard BOOLEAN DEFAULT 0,
+                standard_type TEXT,
+                warnings TEXT,
+
+                -- Semantic clustering
+                cluster_name TEXT,
+                related_files TEXT,
+
+                -- Tracking
+                last_scanned REAL NOT NULL,
+                scan_duration_ms INTEGER,
+
+                UNIQUE(session_id, file_path)
+            )
+        ''')
+
+        # Create indexes for file_semantic_model
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_hash ON file_semantic_model(session_id, content_hash)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_mtime ON file_semantic_model(session_id, modified_time)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_cluster ON file_semantic_model(session_id, cluster_name)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_type ON file_semantic_model(session_id, file_type)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_standard ON file_semantic_model(session_id, is_standard)')
+
+        # Create query_results_cache table (v4.3.0 - pagination support)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS query_results_cache (
+                query_id TEXT PRIMARY KEY,
+                query_type TEXT NOT NULL,
+                query_params TEXT,
+                total_results INTEGER NOT NULL,
+                result_data TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                session_id TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_qrc_expires ON query_results_cache(expires_at)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_qrc_session ON query_results_cache(session_id)')
+
+        # Create file_change_history table (optional, for tracking changes over time)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS file_change_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                change_type TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                old_hash TEXT,
+                new_hash TEXT,
+                size_delta INTEGER
+            )
+        ''')
+
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_fch_session ON file_change_history(session_id, timestamp DESC)')
+
+        # Check and add embedding columns to context_locks if they don't exist (v4.4.0)
+        cursor = conn.execute("PRAGMA table_info(context_locks)")
+        columns = [row[1] for row in cursor.fetchall()]
+
+        if 'embedding' not in columns:
+            conn.execute('ALTER TABLE context_locks ADD COLUMN embedding BLOB')
+            conn.execute('ALTER TABLE context_locks ADD COLUMN embedding_model TEXT')
             conn.commit()
 
-    # Create context_archives table for safe deletion
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS context_archives (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            original_id INTEGER NOT NULL,
-            session_id TEXT NOT NULL,
-            label TEXT NOT NULL,
-            version TEXT NOT NULL,
-            content TEXT NOT NULL,
-            preview TEXT,
-            key_concepts TEXT,
-            metadata TEXT,
-            deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            delete_reason TEXT
-        )
-    ''')
-
-    # Create file_tags table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS file_tags (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            path TEXT NOT NULL,
-            tag TEXT NOT NULL,
-            comment TEXT,
-            created_at REAL,
-            created_by TEXT,
-            metadata TEXT,
-            UNIQUE(path, tag)
-        )
-    ''')
-    
-    # Create todos table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS todos (
-            id TEXT PRIMARY KEY,
-            content TEXT NOT NULL,
-            status TEXT NOT NULL,
-            created_at REAL,
-            completed_at REAL,
-            priority INTEGER DEFAULT 0
-        )
-    ''')
-    
-    # Create project_variables table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS project_variables (
-            key TEXT PRIMARY KEY,
-            value TEXT,
-            updated_at REAL NOT NULL
-        )
-    ''')
-    
-    # Create session_updates table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS session_updates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp REAL NOT NULL,
-            message TEXT NOT NULL,
-            category TEXT,
-            metadata TEXT
-        )
-    ''')
-    
-    # Create memory table (for backward compatibility)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS memory (
-            id INTEGER PRIMARY KEY,
-            session_id TEXT,
-            timestamp REAL,
-            category TEXT,
-            topic TEXT,
-            importance REAL DEFAULT 0.5,
-            content TEXT,
-            summary TEXT,
-            metadata TEXT,
-            parent_id INTEGER,
-            related_ids TEXT,
-            token_count INTEGER,
-            last_accessed REAL,
-            access_count INTEGER DEFAULT 0,
-            archived BOOLEAN DEFAULT 0
-        )
-    ''')
-    
-    # Create fixes table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS fixes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp REAL NOT NULL,
-            problem TEXT NOT NULL,
-            cause TEXT,
-            solution TEXT NOT NULL,
-            prevention TEXT,
-            file_path TEXT
-        )
-    ''')
-    
-    # Create decisions table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS decisions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp REAL NOT NULL,
-            question TEXT NOT NULL,
-            context TEXT,
-            options TEXT,
-            decision TEXT,
-            rationale TEXT,
-            status TEXT DEFAULT 'OPEN'
-        )
-    ''')
-
-    # Create file_semantic_model table (v4.2.0)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS file_semantic_model (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            file_path TEXT NOT NULL,
-
-            -- Change detection (mtime + size + hash)
-            file_size INTEGER NOT NULL,
-            content_hash TEXT NOT NULL,
-            modified_time REAL NOT NULL,
-            hash_method TEXT DEFAULT 'full',
-
-            -- Basic metadata
-            file_type TEXT,
-            language TEXT,
-            purpose TEXT,
-
-            -- Semantic understanding (JSON)
-            imports TEXT,
-            exports TEXT,
-            dependencies TEXT,
-            used_by TEXT,
-            contains TEXT,
-
-            -- Standard file recognition
-            is_standard BOOLEAN DEFAULT 0,
-            standard_type TEXT,
-            warnings TEXT,
-
-            -- Semantic clustering
-            cluster_name TEXT,
-            related_files TEXT,
-
-            -- Tracking
-            last_scanned REAL NOT NULL,
-            scan_duration_ms INTEGER,
-
-            UNIQUE(session_id, file_path)
-        )
-    ''')
-
-    # Create indexes for file_semantic_model
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_hash ON file_semantic_model(session_id, content_hash)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_mtime ON file_semantic_model(session_id, modified_time)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_cluster ON file_semantic_model(session_id, cluster_name)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_type ON file_semantic_model(session_id, file_type)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fsm_standard ON file_semantic_model(session_id, is_standard)')
-
-    # Create query_results_cache table (v4.3.0 - pagination support)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS query_results_cache (
-            query_id TEXT PRIMARY KEY,
-            query_type TEXT NOT NULL,
-            query_params TEXT,
-            total_results INTEGER NOT NULL,
-            result_data TEXT NOT NULL,
-            created_at REAL NOT NULL,
-            expires_at REAL NOT NULL,
-            session_id TEXT,
-            FOREIGN KEY (session_id) REFERENCES sessions(id)
-        )
-    ''')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_qrc_expires ON query_results_cache(expires_at)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_qrc_session ON query_results_cache(session_id)')
-
-    # Create file_change_history table (optional, for tracking changes over time)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS file_change_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            file_path TEXT NOT NULL,
-            change_type TEXT NOT NULL,
-            timestamp REAL NOT NULL,
-            old_hash TEXT,
-            new_hash TEXT,
-            size_delta INTEGER
-        )
-    ''')
-
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fch_session ON file_change_history(session_id, timestamp DESC)')
-
-    # Check and add embedding columns to context_locks if they don't exist (v4.4.0)
-    cursor = conn.execute("PRAGMA table_info(context_locks)")
-    columns = [row[1] for row in cursor.fetchall()]
-
-    if 'embedding' not in columns:
-        conn.execute('ALTER TABLE context_locks ADD COLUMN embedding BLOB')
-        conn.execute('ALTER TABLE context_locks ADD COLUMN embedding_model TEXT')
         conn.commit()
+    pass  # End of disabled block
+# End of disabled SQLite helper functions (is_project_directory, initialize_database)
 
-    conn.commit()
+# ============================================================================
+# ACTIVE: Utility Functions (work with both SQLite and PostgreSQL)
+# ============================================================================
 
 def estimate_tokens(text: str) -> int:
     """Estimate token count (rough approximation)"""
@@ -652,14 +891,16 @@ def get_current_session_id() -> str:
     # Create new session for this project
     session_id = f"{current_project_name[:4]}_{str(uuid.uuid4())[:8]}"
 
-    # First add columns if they don't exist (migration)
-    cursor.execute("PRAGMA table_info(sessions)")
-    columns = [col[1] for col in cursor.fetchall()]
-    if 'project_fingerprint' not in columns:
-        conn.execute("ALTER TABLE sessions ADD COLUMN project_fingerprint TEXT")
-        conn.execute("ALTER TABLE sessions ADD COLUMN project_path TEXT")
-        conn.execute("ALTER TABLE sessions ADD COLUMN project_name TEXT")
-        conn.commit()
+    # First add columns if they don't exist (migration - SQLite only)
+    # PostgreSQL schema is already complete from ensure_schema_exists()
+    if not is_postgresql_mode():
+        cursor.execute("PRAGMA table_info(sessions)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'project_fingerprint' not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN project_fingerprint TEXT")
+            conn.execute("ALTER TABLE sessions ADD COLUMN project_path TEXT")
+            conn.execute("ALTER TABLE sessions ADD COLUMN project_name TEXT")
+            conn.commit()
 
     conn.execute("""
         INSERT INTO sessions (id, started_at, last_active, project_fingerprint, project_path, project_name)
@@ -932,29 +1173,38 @@ def validate_database_isolation(conn) -> dict:
 
     # Check 6: Schema Integrity
     try:
-        required_tables = [
-            'sessions',
-            'context_locks',
-            'audit_trail',
-            'handovers',
-            'file_model',
-            'file_change_history'
-        ]
+        # Skip SQLite-specific schema checks in PostgreSQL mode
+        if not is_postgresql_mode():
+            required_tables = [
+                'sessions',
+                'context_locks',
+                'audit_trail',
+                'handovers',
+                'file_model',
+                'file_change_history'
+            ]
 
-        missing_tables = []
-        for table in required_tables:
-            cursor = conn.execute(
-                f"SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                (table,)
-            )
-            if cursor.fetchone() is None:
-                missing_tables.append(table)
+            missing_tables = []
+            for table in required_tables:
+                cursor = conn.execute(
+                    f"SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,)
+                )
+                if cursor.fetchone() is None:
+                    missing_tables.append(table)
+        else:
+            # PostgreSQL mode - schema is managed by postgres_adapter
+            missing_tables = []
 
-        # Check critical columns in sessions table
-        cursor = conn.execute("PRAGMA table_info(sessions)")
-        session_columns = [col[1] for col in cursor.fetchall()]
-        required_columns = ['project_fingerprint', 'project_path', 'project_name']
-        missing_columns = [col for col in required_columns if col not in session_columns]
+        # Check critical columns in sessions table (SQLite only)
+        if not is_postgresql_mode():
+            cursor = conn.execute("PRAGMA table_info(sessions)")
+            session_columns = [col[1] for col in cursor.fetchall()]
+            required_columns = ['project_fingerprint', 'project_path', 'project_name']
+            missing_columns = [col for col in required_columns if col not in session_columns]
+        else:
+            # PostgreSQL - assume schema is correct (managed by postgres_adapter)
+            missing_columns = []
 
         schema_valid = len(missing_tables) == 0 and len(missing_columns) == 0
 
@@ -1764,16 +2014,544 @@ def cleanup_expired_queries(conn):
 
 
 # ============================================================================
+# PROJECT MANAGEMENT (CRUD operations for multi-project support)
+# ============================================================================
+
+@mcp.tool()
+async def switch_project(name: str) -> str:
+    """
+    Switch to a different project for this conversation.
+
+    All subsequent memory operations (lock_context, recall_context, etc.)
+    will use this project unless explicitly overridden.
+
+    Args:
+        name: Project name to switch to
+
+    Returns:
+        JSON with switch status and project info
+
+    Example:
+        User: "Switch to my innkeeper project"
+        Claude: switch_project(name="innkeeper")
+        Claude: "Switched to innkeeper project!"
+
+        User: "Switch to linkedin"
+        Claude: switch_project(name="linkedin")
+        Claude: "Switched! (Project will be created if it doesn't exist)"
+    """
+    import json
+    import re
+
+    try:
+        # Sanitize project name
+        safe_name = re.sub(r'[^a-z0-9]', '_', name.lower())
+        safe_name = re.sub(r'_+', '_', safe_name).strip('_')[:32]
+
+        # Get session ID
+        try:
+            session_id = get_current_session_id()
+        except:
+            return json.dumps({
+                "success": False,
+                "error": "Could not determine session ID"
+            })
+
+        # Set active project for this session
+        _active_projects[session_id] = safe_name
+
+        # Check if project exists
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+
+        conn = psycopg2.connect(config.database_url)
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        cur.execute("""
+            SELECT schema_name
+            FROM information_schema.schemata
+            WHERE schema_name = %s
+        """, (safe_name,))
+
+        exists = cur.fetchone() is not None
+
+        if exists:
+            # Get project stats
+            cur.execute(f'SELECT COUNT(*) as count FROM "{safe_name}".sessions')
+            sessions = cur.fetchone()['count']
+
+            cur.execute(f'SELECT COUNT(*) as count FROM "{safe_name}".context_locks')
+            contexts = cur.fetchone()['count']
+
+            conn.close()
+
+            return json.dumps({
+                "success": True,
+                "message": f"✅ Switched to project '{name}'",
+                "project": name,
+                "schema": safe_name,
+                "exists": True,
+                "stats": {
+                    "sessions": sessions,
+                    "contexts": contexts
+                },
+                "note": "All memory operations will now use this project"
+            })
+        else:
+            conn.close()
+
+            return json.dumps({
+                "success": True,
+                "message": f"✅ Switched to project '{name}' (will be created on first use)",
+                "project": name,
+                "schema": safe_name,
+                "exists": False,
+                "note": "Project schema will be created automatically when you use memory tools"
+            })
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e)
+        })
+
+
+@mcp.tool()
+async def get_active_project() -> str:
+    """
+    Show which project is currently active for this conversation.
+
+    Returns:
+        JSON with active project name and stats
+
+    Example:
+        User: "Which project am I using?"
+        Claude: get_active_project()
+    """
+    import json
+
+    try:
+        # Get current project using fallback logic
+        current_project = _get_project_for_context()
+
+        # Check if it exists
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+
+        conn = psycopg2.connect(config.database_url)
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        cur.execute("""
+            SELECT schema_name
+            FROM information_schema.schemata
+            WHERE schema_name = %s
+        """, (current_project,))
+
+        exists = cur.fetchone() is not None
+
+        if exists:
+            # Get stats
+            cur.execute(f'SELECT COUNT(*) as count FROM "{current_project}".sessions')
+            sessions = cur.fetchone()['count']
+
+            cur.execute(f'SELECT COUNT(*) as count FROM "{current_project}".context_locks')
+            contexts = cur.fetchone()['count']
+
+            cur.execute(f'SELECT COUNT(*) as count FROM "{current_project}".memory_entries')
+            memories = cur.fetchone()['count']
+
+            conn.close()
+
+            return json.dumps({
+                "success": True,
+                "project": current_project,
+                "exists": True,
+                "stats": {
+                    "sessions": sessions,
+                    "contexts": contexts,
+                    "memories": memories
+                },
+                "detection": _get_detection_source()
+            })
+        else:
+            conn.close()
+
+            return json.dumps({
+                "success": True,
+                "project": current_project,
+                "exists": False,
+                "message": "Project will be created on first use",
+                "detection": _get_detection_source()
+            })
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e)
+        })
+
+
+def _get_detection_source() -> str:
+    """Helper to explain how current project was determined."""
+    try:
+        session_id = get_current_session_id()
+        if session_id in _active_projects:
+            return "session_switch"
+    except:
+        pass
+
+    if _postgres_adapter.schema and _postgres_adapter.schema != 'default':
+        return "auto_detected_from_directory"
+
+    return "default_fallback"
+
+
+@mcp.tool()
+async def create_project(name: str) -> str:
+    """
+    Create a new project with isolated PostgreSQL schema.
+
+    Args:
+        name: Project name (e.g., "innkeeper", "linkedin-posts")
+
+    Returns:
+        JSON with project creation status and schema name
+
+    Example:
+        User: "Create a project called innkeeper"
+        Claude: create_project(name="innkeeper")
+    """
+    import json
+
+    try:
+        # Sanitize project name for PostgreSQL
+        import re
+        safe_name = re.sub(r'[^a-z0-9]', '_', name.lower())
+        safe_name = re.sub(r'_+', '_', safe_name).strip('_')[:32]
+
+        # Create adapter with explicit schema
+        adapter = PostgreSQLAdapter(
+            database_url=config.database_url,
+            schema=safe_name
+        )
+
+        # Check if schema already exists
+        conn = adapter.pool.getconn()
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT schema_name
+                FROM information_schema.schemata
+                WHERE schema_name = %s
+            """, (safe_name,))
+
+            if cur.fetchone():
+                adapter.pool.putconn(conn)
+                adapter.close()
+                return json.dumps({
+                    "success": False,
+                    "error": f"Project '{name}' already exists (schema: {safe_name})",
+                    "schema": safe_name
+                })
+        finally:
+            adapter.pool.putconn(conn)
+
+        # Create schema and tables
+        adapter.ensure_schema_exists()
+        adapter.close()
+
+        return json.dumps({
+            "success": True,
+            "message": f"✅ Project '{name}' created successfully!",
+            "project": name,
+            "schema": safe_name,
+            "usage": f"Use project='{name}' parameter in wake_up() and other tools"
+        })
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e)
+        })
+
+
+@mcp.tool()
+async def list_projects() -> str:
+    """
+    List all available projects with statistics.
+
+    Returns:
+        JSON with list of projects, each with session/context counts
+
+    Example:
+        User: "What projects do I have?"
+        Claude: list_projects()
+    """
+    import json
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+
+    try:
+        conn = psycopg2.connect(config.database_url)
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Get all schemas (excluding system schemas)
+        cur.execute("""
+            SELECT schema_name
+            FROM information_schema.schemata
+            WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'public')
+              AND schema_name NOT LIKE 'pg_%'
+            ORDER BY schema_name
+        """)
+
+        schemas = [row['schema_name'] for row in cur.fetchall()]
+
+        projects = []
+        for schema in schemas:
+            # Get stats for each project
+            try:
+                cur.execute(f'SELECT COUNT(*) as count FROM "{schema}".sessions')
+                sessions = cur.fetchone()['count']
+
+                cur.execute(f'SELECT COUNT(*) as count FROM "{schema}".context_locks')
+                contexts = cur.fetchone()['count']
+
+                cur.execute(f'SELECT COUNT(*) as count FROM "{schema}".memory_entries')
+                memories = cur.fetchone()['count']
+
+                projects.append({
+                    "name": schema,
+                    "sessions": sessions,
+                    "contexts": contexts,
+                    "memories": memories
+                })
+            except:
+                # Schema might not have tables yet
+                projects.append({
+                    "name": schema,
+                    "sessions": 0,
+                    "contexts": 0,
+                    "memories": 0,
+                    "note": "Schema exists but not initialized"
+                })
+
+        conn.close()
+
+        return json.dumps({
+            "success": True,
+            "projects": projects,
+            "total": len(projects)
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e)
+        })
+
+
+@mcp.tool()
+async def get_project_info(name: str) -> str:
+    """
+    Get detailed information about a specific project.
+
+    Args:
+        name: Project name
+
+    Returns:
+        JSON with project details, recent sessions, top contexts
+
+    Example:
+        User: "Show me info about innkeeper project"
+        Claude: get_project_info(name="innkeeper")
+    """
+    import json
+    import re
+
+    try:
+        # Sanitize name
+        safe_name = re.sub(r'[^a-z0-9]', '_', name.lower())
+        safe_name = re.sub(r'_+', '_', safe_name).strip('_')[:32]
+
+        # Connect to specific schema
+        adapter = PostgreSQLAdapter(
+            database_url=config.database_url,
+            schema=safe_name
+        )
+
+        conn = adapter.get_connection()
+        cur = conn.cursor()
+
+        # Check if schema exists
+        cur.execute("""
+            SELECT schema_name
+            FROM information_schema.schemata
+            WHERE schema_name = %s
+        """, (safe_name,))
+
+        if not cur.fetchone():
+            adapter.release_connection(conn)
+            adapter.close()
+            return json.dumps({
+                "success": False,
+                "error": f"Project '{name}' not found (schema: {safe_name})"
+            })
+
+        # Get project stats
+        cur.execute(f'SELECT COUNT(*) as count FROM "{safe_name}".sessions')
+        total_sessions = cur.fetchone()['count']
+
+        cur.execute(f'SELECT COUNT(*) as count FROM "{safe_name}".context_locks')
+        total_contexts = cur.fetchone()['count']
+
+        cur.execute(f'SELECT COUNT(*) as count FROM "{safe_name}".memory_entries')
+        total_memories = cur.fetchone()['count']
+
+        # Get recent sessions
+        cur.execute(f"""
+            SELECT id, started_at, project_name, last_active
+            FROM "{safe_name}".sessions
+            ORDER BY last_active DESC NULLS LAST, started_at DESC
+            LIMIT 5
+        """)
+        recent_sessions = []
+        for row in cur.fetchall():
+            recent_sessions.append({
+                "id": row['id'],
+                "project_name": row['project_name'],
+                "started_at": row['started_at'],
+                "last_active": row['last_active']
+            })
+
+        # Get top contexts
+        cur.execute(f"""
+            SELECT label, version, LENGTH(content) as size, locked_at
+            FROM "{safe_name}".context_locks
+            ORDER BY locked_at DESC
+            LIMIT 10
+        """)
+        top_contexts = []
+        for row in cur.fetchall():
+            top_contexts.append({
+                "label": row['label'],
+                "version": row['version'],
+                "size_bytes": row['size'],
+                "locked_at": row['locked_at']
+            })
+
+        adapter.release_connection(conn)
+        adapter.close()
+
+        return json.dumps({
+            "success": True,
+            "project": name,
+            "schema": safe_name,
+            "stats": {
+                "sessions": total_sessions,
+                "contexts": total_contexts,
+                "memories": total_memories
+            },
+            "recent_sessions": recent_sessions,
+            "recent_contexts": top_contexts
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e)
+        })
+
+
+@mcp.tool()
+async def delete_project(name: str, confirm: bool = False) -> str:
+    """
+    Delete a project and all its data (DESTRUCTIVE - requires confirmation).
+
+    Args:
+        name: Project name
+        confirm: Must be True to actually delete
+
+    Returns:
+        JSON with deletion status or confirmation prompt
+
+    Example:
+        User: "Delete the test project"
+        Claude: delete_project(name="test", confirm=True)
+
+    Security: Requires explicit confirm=True to prevent accidents
+    """
+    import json
+    import re
+
+    try:
+        # Sanitize name
+        safe_name = re.sub(r'[^a-z0-9]', '_', name.lower())
+        safe_name = re.sub(r'_+', '_', safe_name).strip('_')[:32]
+
+        if not confirm:
+            return json.dumps({
+                "success": False,
+                "requires_confirmation": True,
+                "message": f"⚠️  Deleting project '{name}' will permanently delete ALL data!",
+                "instruction": "Call delete_project(name='{name}', confirm=True) to proceed"
+            })
+
+        # Connect and delete schema
+        import psycopg2
+        conn = psycopg2.connect(config.database_url)
+        conn.autocommit = True
+        cur = conn.cursor()
+
+        # Check if schema exists
+        cur.execute("""
+            SELECT schema_name
+            FROM information_schema.schemata
+            WHERE schema_name = %s
+        """, (safe_name,))
+
+        if not cur.fetchone():
+            conn.close()
+            return json.dumps({
+                "success": False,
+                "error": f"Project '{name}' not found (schema: {safe_name})"
+            })
+
+        # Drop schema CASCADE (deletes all tables)
+        cur.execute(f'DROP SCHEMA "{safe_name}" CASCADE')
+
+        conn.close()
+
+        return json.dumps({
+            "success": True,
+            "message": f"✅ Project '{name}' deleted successfully",
+            "schema": safe_name,
+            "note": "All sessions, contexts, and memories have been permanently removed"
+        })
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e)
+        })
+
+
+# ============================================================================
 # SESSION MANAGEMENT (unchanged from before)
 # ============================================================================
 
 @mcp.tool()
-async def wake_up() -> str:
+async def wake_up(project: Optional[str] = None) -> str:
     """
     Initialize session and load available context for LLM orientation.
     Returns structured JSON with session info, git status, contexts, and staleness warnings.
 
     Purpose: Help LLM understand what data/tools are available to minimize confusion.
+
+    **Multi-project support:**
+    - project: Optional project name. If not specified, uses active project.
+    - Priority: explicit param > session active > auto-detect > "default"
+    - Shows which project is active and how it was determined
+    - Example: wake_up(project="innkeeper")
 
     **Token efficiency: SUMMARY** (~2-5KB)
     - Returns counts and summaries only
@@ -1781,7 +2559,10 @@ async def wake_up() -> str:
     - Use explore_context_tree() for context list
     """
     update_session_activity()
-    conn = get_db()
+
+    # Use project-aware database connection
+    target_project = _get_project_for_context(project)
+    conn = _get_db_for_project(project)
     session_id = get_current_session_id()
 
     # Cleanup expired queries (maintenance)
@@ -1890,12 +2671,27 @@ async def wake_up() -> str:
 
     # Build session info (using dynamic database path)
     current_db_path = get_current_db_path()
-    db_size_mb = os.path.getsize(current_db_path) / (1024 * 1024) if os.path.exists(current_db_path) else 0
+
+    # Calculate database size (only for SQLite local files)
+    if is_postgresql_mode():
+        db_size_mb = 0  # PostgreSQL size not calculated for remote DB
+    else:
+        db_size_mb = os.path.getsize(current_db_path) / (1024 * 1024) if os.path.exists(current_db_path) else 0
+
+    # Get project detection source for display
+    detection_source = _get_detection_source()
+    detection_label = {
+        "session_switch": "via switch_project()",
+        "auto_detected_from_directory": "auto-detected from git repo/directory",
+        "default_fallback": "default fallback"
+    }.get(detection_source, detection_source)
 
     session_data = {
         "session": {
             "id": session_id,
             "project_name": get_project_name(),  # Dynamic detection
+            "active_project": target_project,    # Active project for this session
+            "project_detection": detection_label,  # How project was determined
             "project_root": get_project_root(),  # Dynamic detection
             "database": current_db_path,         # Dynamic detection
             "database_location": get_db_location_type(),  # Dynamic detection
@@ -2391,44 +3187,71 @@ async def memory_status() -> str:
         output.append(f"Started: {start.strftime('%Y-%m-%d %H:%M')}")
         output.append(f"Last Active: {active.strftime('%H:%M')}")
     
-    # Memory stats
-    cursor = conn.execute("""
-        SELECT category, COUNT(*) as count 
-        FROM memory_entries 
-        WHERE session_id = ?
-        GROUP BY category
-    """, (session_id,))
+    # Memory stats (handle case where table might not have entries)
+    try:
+        cursor = conn.execute("""
+            SELECT category, COUNT(*) as count
+            FROM memory_entries
+            WHERE session_id = ?
+            GROUP BY category
+        """, (session_id,))
+
+        entries = cursor.fetchall()
+        if entries:
+            output.append("\n📊 Memory Entries (this session):")
+            for entry in entries:
+                output.append(f"   • {entry['category']}: {entry['count']}")
+    except Exception as e:
+        # Graceful handling if query fails
+        pass
     
-    entries = cursor.fetchall()
-    if entries:
-        output.append("\n📊 Memory Entries (this session):")
-        for entry in entries:
-            output.append(f"   • {entry['category']}: {entry['count']}")
-    
-    # Context locks
+    # Context locks with embedding stats
     cursor = conn.execute("""
-        SELECT COUNT(DISTINCT label) as topics, COUNT(*) as total
+        SELECT
+            COUNT(DISTINCT label) as topics,
+            COUNT(*) as total,
+            SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) as with_embedding,
+            SUM(CASE WHEN embedding IS NULL THEN 1 ELSE 0 END) as without_embedding
         FROM context_locks WHERE session_id = ?
     """, (session_id,))
     locks = cursor.fetchone()
     output.append(f"\n🔒 Locked Contexts: {locks['topics']} topics, {locks['total']} versions")
+
+    # Embedding status
+    if locks['total'] > 0:
+        embedded_pct = (locks['with_embedding'] / locks['total']) * 100
+        if locks['without_embedding'] > 0:
+            output.append(f"   📊 Embeddings: {locks['with_embedding']}/{locks['total']} ({embedded_pct:.0f}%)")
+            output.append(f"   ⚠️  {locks['without_embedding']} context(s) missing embeddings")
+            output.append(f"   💡 Run generate_embeddings() to enable semantic search")
+        else:
+            output.append(f"   ✅ All contexts have embeddings ({locks['with_embedding']})")
     
-    # TODOs
-    cursor = conn.execute("""
-        SELECT status, COUNT(*) as count FROM todos
-        GROUP BY status
-    """)
-    todos = cursor.fetchall()
-    if todos:
-        output.append("\n📋 TODOs:")
-        for todo in todos:
-            output.append(f"   • {todo['status']}: {todo['count']}")
+    # TODOs (if table exists)
+    try:
+        cursor = conn.execute("""
+            SELECT status, COUNT(*) as count FROM todos
+            GROUP BY status
+        """)
+        todos = cursor.fetchall()
+        if todos:
+            output.append("\n📋 TODOs:")
+            for todo in todos:
+                output.append(f"   • {todo['status']}: {todo['count']}")
+    except Exception:
+        # Table doesn't exist in this schema
+        pass
     
-    # File tags
-    cursor = conn.execute("SELECT COUNT(DISTINCT path) as files FROM file_tags")
-    tags = cursor.fetchone()
-    output.append(f"\n🏷️ Tagged Files: {tags['files']}")
-    
+    # File tags (if table exists)
+    try:
+        cursor = conn.execute("SELECT COUNT(DISTINCT path) as files FROM file_tags")
+        tags = cursor.fetchone()
+        if tags and tags['files'] > 0:
+            output.append(f"\n🏷️ Tagged Files: {tags['files']}")
+    except Exception:
+        # Table doesn't exist in this schema
+        pass
+
     return "\n".join(output)
 
 # ============================================================================
@@ -2436,7 +3259,13 @@ async def memory_status() -> str:
 # ============================================================================
 
 @mcp.tool()
-async def lock_context(content: str, topic: str, tags: Optional[str] = None, priority: Optional[str] = None) -> str:
+async def lock_context(
+    content: str,
+    topic: str,
+    tags: Optional[str] = None,
+    priority: Optional[str] = None,
+    project: Optional[str] = None
+) -> str:
     """
     Lock important context, rules, or decisions as immutable versioned snapshots for perfect recall.
 
@@ -2463,6 +3292,11 @@ async def lock_context(content: str, topic: str, tags: Optional[str] = None, pri
     - 'reference': Standard reference material, checked when relevant
       Use for: Documentation, examples, general information
 
+    **Multi-project support:**
+    - project: Optional project name. If not specified, uses active project.
+    - Priority: explicit param > session active > auto-detect > "default"
+    - Example: lock_context(..., project="innkeeper")
+
     **Best practices:**
     1. Lock specific, actionable information (not general knowledge)
     2. Include concrete examples in the content
@@ -2480,12 +3314,13 @@ async def lock_context(content: str, topic: str, tags: Optional[str] = None, pri
         priority="always_check"
     )
 
-    # Lock architecture decision
+    # Lock architecture decision for specific project
     lock_context(
         content="Database: Using PostgreSQL 14 with connection pooling (max 20 connections).",
         topic="database_config",
         tags="database,postgres,config",
-        priority="important"
+        priority="important",
+        project="innkeeper"
     )
     ```
 
@@ -2497,10 +3332,22 @@ async def lock_context(content: str, topic: str, tags: Optional[str] = None, pri
 
     Returns: Confirmation with version number and priority indicator
     """
-    update_session_activity()
-    conn = get_db()
+    # Use project-aware database connection
+    target_project = _get_project_for_context(project)
+    conn = _get_db_for_project(project)
     session_id = get_current_session_id()
-    
+
+    # Ensure session exists in this project database
+    try:
+        conn.execute("""
+            INSERT INTO sessions (id, started_at, last_active, project_name, project_path)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET last_active = EXCLUDED.last_active
+        """, (session_id, time.time(), time.time(), target_project, get_project_root() or ''))
+        conn.commit()
+    except Exception as e:
+        print(f"⚠️  Warning: Could not ensure session exists: {e}", file=sys.stderr)
+
     # Auto-detect priority if not specified
     if priority is None:
         content_lower = content.lower()
@@ -2570,13 +3417,18 @@ async def lock_context(content: str, topic: str, tags: Optional[str] = None, pri
     # Store lock
     try:
         current_time = time.time()
-        conn.execute("""
+
+        # Insert the context lock and get the ID
+        cursor = conn.execute("""
             INSERT INTO context_locks
             (session_id, label, version, content, content_hash, locked_at, metadata,
              preview, key_concepts, last_accessed)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
         """, (session_id, topic, version, content, content_hash, current_time, json.dumps(metadata),
               preview, json.dumps(key_concepts), current_time))
+
+        context_id = cursor.fetchone()['id']
 
         # Create audit trail entry
         priority_label = {
@@ -2594,13 +3446,46 @@ async def lock_context(content: str, topic: str, tags: Optional[str] = None, pri
 
         conn.commit()
 
+        # Generate embedding (non-blocking, graceful failure)
+        embedding_status = ""
+        try:
+            from src.services import embedding_service
+            if embedding_service and embedding_service.enabled:
+                # Use preview for embedding (optimized for 1020 char limit)
+                embedding_text = preview if len(preview) <= 1020 else preview[:1020]
+                embedding = embedding_service.generate_embedding(embedding_text)
+
+                if embedding:
+                    # Store embedding - convert to bytes for PostgreSQL BYTEA
+                    import pickle
+                    embedding_bytes = pickle.dumps(embedding)
+
+                    conn.execute("""
+                        UPDATE context_locks
+                        SET embedding = ?, embedding_model = ?
+                        WHERE id = ?
+                    """, (embedding_bytes, embedding_service.model, context_id))
+                    conn.commit()
+                    embedding_status = " [embedded]"
+                else:
+                    # Mark for manual embedding generation
+                    print(f"⚠️  Embedding generation returned None for context '{topic}'", file=sys.stderr)
+            else:
+                # Service not available - context will need manual embedding
+                print(f"⚠️  Embedding service not available for context '{topic}' - run generate_embeddings() later", file=sys.stderr)
+        except Exception as e:
+            # Graceful failure - context is saved, just without embedding
+            print(f"⚠️  Could not generate embedding for '{topic}': {e}", file=sys.stderr)
+            print(f"   Run generate_embeddings() to add embeddings later", file=sys.stderr)
+
         priority_indicator = {
             'always_check': ' ⚠️ [ALWAYS CHECK]',
             'important': ' 📌 [IMPORTANT]',
             'reference': ''
         }.get(priority, '')
 
-        return f"✅ Locked '{topic}' as v{version}{priority_indicator} ({len(content)} chars, hash: {content_hash[:8]})"
+        project_label = f" in project '{target_project}'" if target_project != "default" else ""
+        return f"✅ Locked '{topic}' as v{version}{priority_indicator}{project_label}{embedding_status} ({len(content)} chars, hash: {content_hash[:8]})"
         
     except sqlite3.IntegrityError:
         return f"❌ Version {version} of '{topic}' already exists"
@@ -2611,7 +3496,8 @@ async def lock_context(content: str, topic: str, tags: Optional[str] = None, pri
 async def recall_context(
     topic: str,
     version: Optional[str] = "latest",
-    preview_only: bool = False
+    preview_only: bool = False,
+    project: Optional[str] = None
 ) -> str:
     """
     Retrieve content of a previously locked context by topic name.
@@ -2644,6 +3530,11 @@ async def recall_context(
     - Contexts are immutable - each edit creates new version
     - Version history preserved forever
 
+    **Multi-project support:**
+    - project: Optional project name. If not specified, uses active project.
+    - Priority: explicit param > session active > auto-detect > "default"
+    - Example: recall_context("api_spec", project="innkeeper")
+
     **Best practices:**
     1. Use after check_contexts identifies relevant context
     2. Start with preview_only=True to assess relevance
@@ -2664,6 +3555,9 @@ async def recall_context(
     # Step 3: Load full content if needed
     recall_context("api_auth_rules")
     # Returns full API authentication specification (8.5KB)
+
+    # Recall from different project
+    recall_context("database_config", project="linkedin")
     ```
 
     **Performance note:**
@@ -2677,10 +3571,13 @@ async def recall_context(
         topic: Context label/name
         version: "latest" or specific version like "1.0"
         preview_only: If True, return summary instead of full content
+        project: Optional project name (uses active project if not specified)
 
     Returns: Context content (preview or full) with metadata, or error if not found
     """
-    conn = get_db()
+    # Use project-aware database connection
+    target_project = _get_project_for_context(project)
+    conn = _get_db_for_project(project)
     session_id = get_current_session_id()
 
     if version == "latest":
@@ -4758,7 +5655,7 @@ async def manage_workspace_table(
 
 
 @mcp.tool()
-async def check_contexts(text: str) -> str:
+async def check_contexts(text: str, project: Optional[str] = None) -> str:
     """
     Check what locked contexts are relevant to your current task and detect rule violations.
 
@@ -4787,6 +5684,11 @@ async def check_contexts(text: str) -> str:
     - Tags for each relevant context
     - Warning messages for potential rule violations
     - Suggestions to use recall_context() for full details
+
+    **Multi-project support:**
+    - project: Optional project name. If not specified, uses active project.
+    - Priority: explicit param > session active > auto-detect > "default"
+    - Example: check_contexts("deploying", project="innkeeper")
 
     **Best practices:**
     1. Check BEFORE implementing (not after)
@@ -4827,22 +5729,81 @@ async def check_contexts(text: str) -> str:
     Returns: List of relevant contexts, rule violations, and suggestions
     """
     session_id = get_current_session_id()
+
+    # Use project-aware database connection
+    target_project = _get_project_for_context(project)
+    conn = _get_db_for_project(project)
     current_db_path = get_current_db_path()  # Dynamic database path
 
-    # Get relevant contexts
-    relevant = get_relevant_contexts_for_text(text, session_id, current_db_path)
+    # Enhanced relevance detection: Try semantic search first, fall back to keyword matching
+    semantic_results = []
+    try:
+        from src.services import embedding_service
+        from src.services.semantic_search import SemanticSearch
 
-    # Check for violations
-    violations = check_command_context(text, session_id, current_db_path)
-    
+        if embedding_service and embedding_service.enabled:
+            semantic_search = SemanticSearch(conn, embedding_service)
+
+            # Check if any contexts have embeddings
+            cursor = conn.execute("SELECT COUNT(*) as count FROM context_locks WHERE embedding IS NOT NULL")
+            embedded_count = cursor.fetchone()['count']
+
+            if embedded_count > 0:
+                # Use semantic search for better relevance
+                results = semantic_search.search_similar(
+                    query=text,
+                    limit=5,
+                    threshold=0.5  # Lower threshold for check_contexts
+                )
+
+                if results:
+                    semantic_results.append("🔍 **Semantic Search Results:**\n")
+                    for result in results:
+                        priority_emoji = {
+                            'always_check': '⚠️',
+                            'important': '📌',
+                            'reference': '📄'
+                        }.get(result.get('priority', 'reference'), '📄')
+
+                        semantic_results.append(
+                            f"{priority_emoji} **{result['label']}** (similarity: {result['similarity']:.2f})\n"
+                            f"   {result['preview'][:150]}..."
+                        )
+
+                    semantic_results.append("\n💡 Use `recall_context(topic)` for full details")
+    except Exception as e:
+        # Graceful fallback - semantic search failed, use keyword matching
+        print(f"⚠️  Semantic search unavailable: {e}", file=sys.stderr)
+
+    # Get keyword-based relevant contexts (original logic - graceful fallback for SQLite)
+    relevant = None
+    violations = None
+    try:
+        relevant = get_relevant_contexts_for_text(text, session_id, current_db_path)
+        violations = check_command_context(text, session_id, current_db_path)
+    except Exception as fallback_error:
+        # Keyword matching unavailable (PostgreSQL mode)
+        print(f"⚠️  Keyword fallback unavailable: {fallback_error}", file=sys.stderr)
+
     output = []
+
+    # Add semantic results if available
+    if semantic_results:
+        output.extend(semantic_results)
+        if relevant or violations:
+            output.append("\n" + "─" * 50 + "\n")
+
+    # Add keyword-based results
     if relevant:
+        if semantic_results:
+            output.append("📝 **Keyword Matching Results:**\n")
         output.append(relevant)
+
     if violations:
         if output:
             output.append("")  # Add spacing
         output.append(violations)
-    
+
     if not output:
         return "No relevant locked contexts found."
 
@@ -6702,4 +7663,4 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.ERROR, stream=sys.stderr)
 
     # Run the MCP server silently
-    asyncio.run(mcp.run())
+    mcp.run()

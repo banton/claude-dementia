@@ -143,8 +143,9 @@ class SemanticSearch:
 
         results = []
         for row in cursor.fetchall():
-            # Convert binary back to array
-            context_embedding = np.frombuffer(row['embedding'], dtype=np.float32).tolist()
+            # Convert binary back to array (unpickle)
+            import pickle
+            context_embedding = pickle.loads(row['embedding'])
 
             # Calculate similarity
             similarity = self.embedding_service.cosine_similarity(

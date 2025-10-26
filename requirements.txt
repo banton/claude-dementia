@@ -1,2 +1,6 @@
 # Claude Dementia MCP Server Requirements
 mcp>=0.1.0
+
+# Database adapters
+psycopg2-binary>=2.9.9  # PostgreSQL adapter (binary for easier install)
+python-dotenv>=1.0.0     # Load .env files
