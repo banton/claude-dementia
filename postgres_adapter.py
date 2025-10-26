@@ -380,6 +380,59 @@ class PostgreSQLAdapter:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_context_archives_session ON context_archives(session_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_context_archives_label ON context_archives(label, deleted_at DESC)")
 
+        # Run migrations for existing schemas
+        self._run_migrations(cur)
+
+    def _run_migrations(self, cur):
+        """Apply schema migrations to existing tables."""
+
+        # Migration 1: Add session_id to memory_entries if missing
+        try:
+            cur.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                AND table_name = 'memory_entries'
+                AND column_name = 'session_id'
+            """)
+            if not cur.fetchone():
+                print("⚠️  Migrating memory_entries: adding session_id column", file=sys.stderr)
+                cur.execute("ALTER TABLE memory_entries ADD COLUMN session_id TEXT")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_memory_entries_session ON memory_entries(session_id)")
+        except Exception as e:
+            # Table might not exist yet, that's okay
+            pass
+
+        # Migration 2: Add timestamp to memory_entries if missing
+        try:
+            cur.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                AND table_name = 'memory_entries'
+                AND column_name = 'timestamp'
+            """)
+            if not cur.fetchone():
+                print("⚠️  Migrating memory_entries: adding timestamp column", file=sys.stderr)
+                cur.execute("ALTER TABLE memory_entries ADD COLUMN timestamp DOUBLE PRECISION")
+        except Exception as e:
+            pass
+
+        # Migration 3: Add category to memory_entries if missing
+        try:
+            cur.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                AND table_name = 'memory_entries'
+                AND column_name = 'category'
+            """)
+            if not cur.fetchone():
+                print("⚠️  Migrating memory_entries: adding category column", file=sys.stderr)
+                cur.execute("ALTER TABLE memory_entries ADD COLUMN category TEXT")
+        except Exception as e:
+            pass
+
     def get_info(self) -> dict:
         """Get information about current database and schema."""
         conn = self.get_connection()
