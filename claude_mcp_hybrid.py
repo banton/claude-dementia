@@ -4212,7 +4212,8 @@ async def search_contexts(
     priority: Optional[str] = None,
     tags: Optional[str] = None,
     limit: int = 10,
-    use_semantic: bool = True
+    use_semantic: bool = True,
+    project: Optional[str] = None
 ) -> str:
     """
     Search locked contexts using hybrid semantic + keyword search.
