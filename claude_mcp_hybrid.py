@@ -7152,6 +7152,7 @@ async def semantic_search_contexts(
     threshold: float = 0.7,
     priority: Optional[str] = None,
     tags: Optional[str] = None,
+    use_reranking: bool = True,
     project: Optional[str] = None
 ) -> str:
     """
@@ -7165,18 +7166,25 @@ async def semantic_search_contexts(
         threshold: Minimum similarity score 0-1 (default: 0.7)
         priority: Filter by priority ("always_check", "important", "reference")
         tags: Comma-separated tags to filter by
+        use_reranking: Use two-stage retrieval with reranking (default: True)
+                       When enabled: Gets top-50 candidates, reranks to top-N
+                       Improves precision for multi-concept queries
+                       Only works with Voyage AI provider
 
     Returns: Contexts ranked by semantic similarity with scores
 
     **Requirement:** Must run generate_embeddings() first
-    **Cost:** FREE (local)
-    **Performance:** ~30ms per query
+    **Cost:** FREE (local) or ~$0.0003/query (Voyage AI with reranking)
+    **Performance:** ~30ms (local) or ~200-500ms (with reranking)
 
     Example:
         semantic_search_contexts("How do we handle authentication?")
         # Returns contexts about JWT, OAuth, auth flows even without exact keywords
 
         semantic_search_contexts("database connection pooling", priority="important")
+
+        # Disable reranking for faster results
+        semantic_search_contexts("authentication", use_reranking=False)
     """
     try:
         from src.services import embedding_service
@@ -7197,14 +7205,40 @@ async def semantic_search_contexts(
     conn = _get_db_for_project(project)
     semantic_search = SemanticSearch(conn, embedding_service)
 
+    # Determine candidate limit for reranking
+    # If reranking enabled, get more candidates to rerank
+    candidate_limit = limit * 5 if use_reranking else limit
+
     # Perform semantic search
     results = semantic_search.search_similar(
         query=query,
-        limit=limit,
+        limit=candidate_limit,
         threshold=threshold,
         priority_filter=priority,
         tags_filter=tags
     )
+
+    # Apply reranking if enabled and using Voyage AI
+    reranked = False
+    if use_reranking and results and hasattr(embedding_service, 'rerank'):
+        try:
+            # Check if this is Voyage AI provider
+            provider = getattr(embedding_service, '__class__', None)
+            if provider and 'Voyage' in provider.__name__:
+                # Rerank the candidates
+                results = embedding_service.rerank(
+                    query=query,
+                    documents=results,
+                    top_k=limit
+                )
+                reranked = True
+        except Exception as e:
+            # Fallback: use original results
+            print(f"Reranking failed, using vector search results: {e}")
+            results = results[:limit]
+    else:
+        # No reranking: just take top-N
+        results = results[:limit]
 
     # Build user-friendly summary
     filters_text = []
@@ -7214,11 +7248,13 @@ async def semantic_search_contexts(
         filters_text.append(f"tags={tags}")
     filters = f" | Filters: {', '.join(filters_text)}" if filters_text else ""
 
+    rerank_info = " | Reranked ✨" if reranked else ""
+
     summary_text = f"""
 🔍 Semantic Search Results
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 Query: "{query}"
-Threshold: {threshold}{filters}
+Threshold: {threshold}{filters}{rerank_info}
 Found: {len(results)} contexts
 Model: {embedding_service.model}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
