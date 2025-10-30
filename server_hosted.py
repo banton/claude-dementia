@@ -109,11 +109,14 @@ async def list_tools(authorization: str = Header(None)):
     """List available MCP tools."""
     verify_api_key(authorization)
 
+    # Get tools from FastMCP tool manager
+    tools_list = await mcp.list_tools()
+
     tools = []
-    for name, func in mcp.tools.items():
+    for tool in tools_list:
         tools.append({
-            "name": name,
-            "description": (func.__doc__ or "").strip().split('\n')[0]
+            "name": tool.name,
+            "description": tool.description or "No description"
         })
 
     return {"tools": tools, "count": len(tools)}
@@ -131,12 +134,6 @@ async def execute_tool(
     # Track request
     metrics["requests_total"] += 1
 
-    # Validate tool exists
-    if body.tool not in mcp.tools:
-        metrics["requests_error"] += 1
-        log("tool_not_found", level="WARN", tool=body.tool)
-        raise HTTPException(404, f"Tool '{body.tool}' not found")
-
     # Initialize tool metrics
     if body.tool not in metrics["tools"]:
         metrics["tools"][body.tool] = {"count": 0, "total_ms": 0, "errors": 0}
@@ -144,9 +141,8 @@ async def execute_tool(
     log("tool_execute_start", tool=body.tool, arguments=body.arguments)
 
     try:
-        # Execute tool
-        tool_func = mcp.tools[body.tool]
-        result = await tool_func(**body.arguments)
+        # Execute tool via FastMCP
+        result = await mcp.call_tool(body.tool, body.arguments)
 
         # Calculate latency
         latency_ms = (time.time() - start_time) * 1000
@@ -205,7 +201,6 @@ if __name__ == "__main__":
     log("server_start",
         port=port,
         version=VERSION,
-        auth_enabled=bool(API_KEY),
-        tools_count=len(mcp.tools))
+        auth_enabled=bool(API_KEY))
 
     uvicorn.run(app, host="0.0.0.0", port=port)
