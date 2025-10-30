@@ -30,8 +30,9 @@ Usage:
 import os
 import sys
 import hashlib
+import time
 import psycopg2
-from psycopg2 import pool, sql
+from psycopg2 import pool, sql, OperationalError
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from typing import Optional
@@ -141,25 +142,66 @@ class PostgreSQLAdapter:
         # Limit length
         return safe[:32]
 
-    def get_connection(self):
+    def get_connection(self, max_retries=3, initial_delay=0.5):
         """
         Get a connection from the pool with schema isolation applied.
 
+        Implements retry logic for Neon database cold starts (compute autoscaling).
+        Neon databases "sleep" after inactivity and need 1-2s to wake up.
+
+        Args:
+            max_retries: Maximum connection attempts (default: 3)
+            initial_delay: Initial retry delay in seconds (doubles each retry)
+
         Returns:
             psycopg2.connection: Database connection with search_path set to schema
+
+        Raises:
+            OperationalError: If all retry attempts fail
         """
-        conn = self.pool.getconn()
+        last_error = None
+        delay = initial_delay
 
-        # Set search_path to isolate this connection to the schema
-        with conn.cursor() as cur:
-            # Use sql.Identifier to prevent SQL injection
-            cur.execute(
-                sql.SQL("SET search_path TO {}, public").format(
-                    sql.Identifier(self.schema)
-                )
-            )
+        for attempt in range(max_retries):
+            try:
+                conn = self.pool.getconn()
 
-        return conn
+                # Set search_path to isolate this connection to the schema
+                with conn.cursor() as cur:
+                    # Use sql.Identifier to prevent SQL injection
+                    cur.execute(
+                        sql.SQL("SET search_path TO {}, public").format(
+                            sql.Identifier(self.schema)
+                        )
+                    )
+
+                # Connection successful
+                if attempt > 0:
+                    print(f"✅ Connection established after {attempt + 1} attempts", file=sys.stderr)
+
+                return conn
+
+            except (OperationalError, Exception) as e:
+                last_error = e
+                error_msg = str(e).lower()
+
+                # Check if it's a cold start error (SSL, connection timeout, etc.)
+                is_cold_start = any(keyword in error_msg for keyword in [
+                    'ssl', 'timeout', 'connection refused', 'temporarily unavailable',
+                    'could not connect', 'server closed the connection'
+                ])
+
+                if is_cold_start and attempt < max_retries - 1:
+                    print(f"⏳ Neon cold start detected (attempt {attempt + 1}/{max_retries}), retrying in {delay}s...", file=sys.stderr)
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff
+                else:
+                    # Not a cold start error, or final attempt - re-raise
+                    break
+
+        # All retries exhausted
+        print(f"❌ Connection failed after {max_retries} attempts: {last_error}", file=sys.stderr)
+        raise last_error
 
     def release_connection(self, conn):
         """Return connection to the pool."""
