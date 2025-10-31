@@ -1,65 +1,83 @@
 #!/usr/bin/env python3
 """
-Minimal Cloud-Hosted Dementia MCP Server
+Production Cloud-Hosted Dementia MCP Server
 
-Ultra-simple HTTP wrapper for existing MCP tools.
-Phase 1: Validate remote access works, then iterate.
+Production-grade HTTP wrapper with:
+- Structured logging (structlog)
+- Prometheus metrics
+- Bearer token authentication
+- Correlation ID tracking
 """
 
 import os
 import json
 import time
-import sys
 import traceback
 from datetime import datetime, timezone
-from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi.responses import Response
 from pydantic import BaseModel
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 # Import existing MCP server
 from claude_mcp_hybrid import mcp
 
+# Import production infrastructure
+from src.logging_config import configure_logging, get_logger
+from src.metrics import (
+    track_tool_execution,
+    active_connections,
+    get_metrics_text,
+    tool_invocations,
+    request_size_bytes,
+    response_size_bytes
+)
+from src.middleware.auth import (
+    BearerTokenAuth,
+    CorrelationIdMiddleware,
+    get_current_user,
+    get_current_project
+)
+
 # Configuration
-API_KEY = os.getenv('DEMENTIA_API_KEY')
-VERSION = "4.2.0"
+ENVIRONMENT = os.getenv('ENVIRONMENT', 'production')
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+VERSION = "4.3.0"
 
-app = FastAPI(title="Dementia MCP Cloud", version=VERSION)
-
-# Simple in-memory metrics (resets on restart)
-metrics = {
-    "requests_total": 0,
-    "requests_success": 0,
-    "requests_error": 0,
-    "tools": {}  # {tool_name: {count, total_ms, errors}}
-}
-
-def log(event: str, level: str = "INFO", **kwargs):
-    """JSON logger to stdout for DigitalOcean."""
-    print(json.dumps({
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "level": level,
-        "event": event,
-        **kwargs
-    }), file=sys.stdout, flush=True)
+# Configure structured logging
+configure_logging(environment=ENVIRONMENT, log_level=LOG_LEVEL)
+logger = get_logger(__name__)
 
 # ============================================================================
-# AUTH
+# LIFECYCLE EVENTS
 # ============================================================================
 
-def verify_api_key(authorization: str = Header(None)):
-    """Simple bearer token validation."""
-    if not API_KEY:
-        return  # Auth disabled if no key set
+from contextlib import asynccontextmanager
 
-    if not authorization:
-        raise HTTPException(401, "Missing Authorization header")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan handler (startup/shutdown)."""
+    # Startup
+    active_connections.inc()
+    logger.info("server_startup",
+                version=VERSION,
+                environment=ENVIRONMENT,
+                log_level=LOG_LEVEL)
 
-    if not authorization.startswith('Bearer '):
-        raise HTTPException(401, "Invalid Authorization format")
+    yield
 
-    token = authorization.replace('Bearer ', '')
-    if token != API_KEY:
-        raise HTTPException(401, "Invalid API key")
+    # Shutdown
+    active_connections.dec()
+    logger.info("server_shutdown", version=VERSION)
+
+# Initialize FastAPI with lifespan and middleware
+app = FastAPI(title="Dementia MCP Cloud", version=VERSION, lifespan=lifespan)
+
+# Add correlation ID middleware (must be first)
+app.add_middleware(CorrelationIdMiddleware)
+
+# Initialize bearer token auth
+bearer_auth = BearerTokenAuth()
 
 # ============================================================================
 # MODELS
@@ -75,7 +93,7 @@ class ExecuteRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    """Health check for DigitalOcean."""
+    """Health check for DigitalOcean (unauthenticated)."""
     return {
         "status": "healthy",
         "version": VERSION,
@@ -83,31 +101,23 @@ async def health():
     }
 
 @app.get("/metrics")
-async def get_metrics(authorization: str = Header(None)):
-    """Simple metrics endpoint."""
-    verify_api_key(authorization)
-
-    # Calculate averages
-    tool_stats = {}
-    for tool_name, stats in metrics["tools"].items():
-        avg_ms = stats["total_ms"] / stats["count"] if stats["count"] > 0 else 0
-        tool_stats[tool_name] = {
-            "count": stats["count"],
-            "errors": stats["errors"],
-            "avg_response_ms": round(avg_ms, 2)
-        }
-
-    return {
-        "requests_total": metrics["requests_total"],
-        "requests_success": metrics["requests_success"],
-        "requests_error": metrics["requests_error"],
-        "tools": tool_stats
-    }
+async def metrics_endpoint(credentials = Depends(bearer_auth)):
+    """Prometheus metrics endpoint (authenticated)."""
+    data, content_type = get_metrics_text()
+    return Response(content=data, media_type=content_type)
 
 @app.get("/tools")
-async def list_tools(authorization: str = Header(None)):
-    """List available MCP tools."""
-    verify_api_key(authorization)
+async def list_tools(
+    request: Request,
+    credentials = Depends(bearer_auth)
+):
+    """List available MCP tools (authenticated)."""
+    user_id = get_current_user(credentials) if credentials else "anonymous"
+    correlation_id = request.state.correlation_id
+
+    logger.info("list_tools_start",
+                user_id=user_id,
+                correlation_id=correlation_id)
 
     # Get tools from FastMCP tool manager
     tools_list = await mcp.list_tools()
@@ -119,26 +129,37 @@ async def list_tools(authorization: str = Header(None)):
             "description": tool.description or "No description"
         })
 
+    logger.info("list_tools_success",
+                user_id=user_id,
+                tool_count=len(tools),
+                correlation_id=correlation_id)
+
     return {"tools": tools, "count": len(tools)}
 
 @app.post("/execute")
 async def execute_tool(
     request: Request,
     body: ExecuteRequest,
-    authorization: str = Header(None)
+    credentials = Depends(bearer_auth)
 ):
-    """Execute MCP tool and return result."""
-    verify_api_key(authorization)
+    """Execute MCP tool and return result (authenticated)."""
     start_time = time.time()
 
-    # Track request
-    metrics["requests_total"] += 1
+    # Extract context
+    user_id = get_current_user(credentials) if credentials else "anonymous"
+    project_id = get_current_project(request)
+    correlation_id = request.state.correlation_id
 
-    # Initialize tool metrics
-    if body.tool not in metrics["tools"]:
-        metrics["tools"][body.tool] = {"count": 0, "total_ms": 0, "errors": 0}
+    # Track request size
+    request_body = await request.body()
+    request_size_bytes.observe(len(request_body))
 
-    log("tool_execute_start", tool=body.tool, arguments=body.arguments)
+    logger.info("tool_execute_start",
+                tool=body.tool,
+                user_id=user_id,
+                project_id=project_id,
+                correlation_id=correlation_id,
+                arguments=body.arguments)
 
     try:
         # Execute tool via FastMCP
@@ -147,45 +168,72 @@ async def execute_tool(
         # Calculate latency
         latency_ms = (time.time() - start_time) * 1000
 
-        # Update metrics
-        metrics["requests_success"] += 1
-        metrics["tools"][body.tool]["count"] += 1
-        metrics["tools"][body.tool]["total_ms"] += latency_ms
+        # Update Prometheus metrics
+        tool_invocations.labels(tool=body.tool, status="success").inc()
 
-        # Parse result (MCP tools return JSON strings)
-        if isinstance(result, str):
+        # Convert MCP result to JSON-serializable format
+        # FastMCP returns list of TextContent or other MCP types
+        if isinstance(result, list):
+            # Extract text from TextContent objects
+            serialized_result = []
+            for item in result:
+                if hasattr(item, 'text'):
+                    # Parse JSON if possible
+                    try:
+                        serialized_result.append(json.loads(item.text))
+                    except:
+                        serialized_result.append(item.text)
+                elif hasattr(item, 'model_dump'):
+                    serialized_result.append(item.model_dump())
+                else:
+                    serialized_result.append(str(item))
+            result = serialized_result[0] if len(serialized_result) == 1 else serialized_result
+        elif isinstance(result, str):
+            # Try to parse JSON strings
             try:
                 result = json.loads(result)
             except:
                 pass  # Keep as string if not JSON
+        elif hasattr(result, 'model_dump'):
+            result = result.model_dump()
 
-        log("tool_execute_success",
-            tool=body.tool,
-            latency_ms=round(latency_ms, 2))
-
-        return {
+        response_data = {
             "success": True,
             "tool": body.tool,
             "result": result,
             "latency_ms": round(latency_ms, 2)
         }
 
+        # Track response size (now safe to serialize)
+        response_json = json.dumps(response_data)
+        response_size_bytes.observe(len(response_json))
+
+        logger.info("tool_execute_success",
+                    tool=body.tool,
+                    user_id=user_id,
+                    project_id=project_id,
+                    correlation_id=correlation_id,
+                    latency_ms=round(latency_ms, 2))
+
+        return response_data
+
     except Exception as e:
         # Calculate latency
         latency_ms = (time.time() - start_time) * 1000
 
-        # Update metrics
-        metrics["requests_error"] += 1
-        metrics["tools"][body.tool]["errors"] += 1
+        # Update Prometheus metrics
+        tool_invocations.labels(tool=body.tool, status="error").inc()
 
-        # Log detailed error
-        log("tool_execute_error",
-            level="ERROR",
-            tool=body.tool,
-            error=str(e),
-            error_type=type(e).__name__,
-            traceback=traceback.format_exc(),
-            latency_ms=round(latency_ms, 2))
+        # Log detailed error with structured logging
+        logger.error("tool_execute_error",
+                     tool=body.tool,
+                     user_id=user_id,
+                     project_id=project_id,
+                     correlation_id=correlation_id,
+                     error=str(e),
+                     error_type=type(e).__name__,
+                     traceback=traceback.format_exc(),
+                     latency_ms=round(latency_ms, 2))
 
         raise HTTPException(500, f"Tool execution failed: {str(e)}")
 
@@ -198,9 +246,14 @@ if __name__ == "__main__":
 
     port = int(os.getenv('PORT', 8080))
 
-    log("server_start",
-        port=port,
-        version=VERSION,
-        auth_enabled=bool(API_KEY))
+    logger.info("server_main_start",
+                port=port,
+                version=VERSION,
+                environment=ENVIRONMENT)
 
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_config=None  # Disable uvicorn's default logging, use structlog
+    )

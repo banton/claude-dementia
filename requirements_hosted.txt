@@ -1,0 +1,28 @@
+# Cloud-Hosted Dementia MCP Server Requirements
+
+# Core dependencies (inherited from local version)
+mcp>=0.1.0
+psycopg2-binary>=2.9.9
+python-dotenv>=1.0.0
+
+# FastAPI and ASGI server for HTTP/SSE transport
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0  # Production ASGI server with performance extras
+python-multipart>=0.0.9    # For form data parsing
+
+# Structured logging
+structlog>=24.1.0          # Structured logging with JSON output
+python-json-logger>=2.0.7  # JSON log formatter
+
+# Connection pooling for PostgreSQL
+psycopg2-pool>=1.1         # Connection pool for psycopg2
+
+# Security
+pydantic[email]>=2.5.0     # Data validation with email validation
+python-jose[cryptography]>=3.3.0  # JWT token handling (future OAuth)
+
+# Monitoring and metrics
+prometheus-client>=0.20.0  # Prometheus metrics endpoint
+
+# HTTP client for testing
+httpx>=0.27.0             # Async HTTP client for testing
