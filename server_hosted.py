@@ -194,6 +194,12 @@ async def execute_tool(
                 result = json.loads(result)
             except:
                 pass  # Keep as string if not JSON
+        elif hasattr(result, 'text'):
+            # Single TextContent object
+            try:
+                result = json.loads(result.text)
+            except:
+                result = result.text
         elif hasattr(result, 'model_dump'):
             result = result.model_dump()
 
@@ -204,8 +210,14 @@ async def execute_tool(
             "latency_ms": round(latency_ms, 2)
         }
 
-        # Track response size (now safe to serialize)
-        response_json = json.dumps(response_data)
+        # Track response size with fallback for any remaining non-serializable objects
+        try:
+            response_json = json.dumps(response_data)
+        except TypeError as e:
+            # Fallback: convert entire result to string if still not serializable
+            logger.warning("json_serialization_fallback", error=str(e), result_type=str(type(result)))
+            response_data["result"] = str(result)
+            response_json = json.dumps(response_data)
         response_size_bytes.observe(len(response_json))
 
         logger.info("tool_execute_success",

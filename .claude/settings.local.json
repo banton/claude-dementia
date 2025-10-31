@@ -40,7 +40,9 @@
       "mcp__dementia__lock_context",
       "mcp__digitalocean__get_deployment_logs_url",
       "mcp__digitalocean__download_logs",
-      "mcp__digitalocean__update_app"
+      "mcp__digitalocean__update_app",
+      "mcp__digitalocean__list_deployments",
+      "Bash(timeout 30 bash:*)"
     ],
     "deny": [],
     "ask": [],
