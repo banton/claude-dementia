@@ -36,7 +36,11 @@
       "mcp__dementia__explore_context_tree",
       "Bash(export ENVIRONMENT=development)",
       "Bash(export DEMENTIA_API_KEY=\"test_key_123\")",
-      "Bash(timeout 5 python3:*)"
+      "Bash(timeout 5 python3:*)",
+      "mcp__dementia__lock_context",
+      "mcp__digitalocean__get_deployment_logs_url",
+      "mcp__digitalocean__download_logs",
+      "mcp__digitalocean__update_app"
     ],
     "deny": [],
     "ask": [],

@@ -56,13 +56,20 @@ from src.config import config
 # Initialize PostgreSQL adapter - NO FALLBACK to SQLite
 from postgres_adapter import PostgreSQLAdapter
 
-# Global: Default adapter (for backward compatibility and auto-detection)
-_postgres_adapter = PostgreSQLAdapter(
-    database_url=config.database_url,
-    schema=os.getenv('DEMENTIA_SCHEMA')  # Will auto-detect if not set
-)
-_postgres_adapter.ensure_schema_exists()
-print(f"✅ PostgreSQL/Neon connected (schema: {_postgres_adapter.schema})", file=sys.stderr)
+# Global: Default adapter (lazy initialization for cloud deployment)
+_postgres_adapter = None
+
+def _get_db_adapter():
+    """Lazy initialization of database adapter to avoid import-time connection failures."""
+    global _postgres_adapter
+    if _postgres_adapter is None:
+        _postgres_adapter = PostgreSQLAdapter(
+            database_url=config.database_url,
+            schema=os.getenv('DEMENTIA_SCHEMA')  # Will auto-detect if not set
+        )
+        _postgres_adapter.ensure_schema_exists()
+        print(f"✅ PostgreSQL/Neon connected (schema: {_postgres_adapter.schema})", file=sys.stderr)
+    return _postgres_adapter
 
 # Session-level active project tracking (per conversation)
 _active_projects = {}  # {session_id: project_name}
@@ -95,8 +102,8 @@ def _get_project_for_context(project: str = None) -> str:
     # Priority 3: Auto-detect from filesystem (Claude Code only)
     # This uses the global adapter's auto-detection
     # Only works if we're in a project directory
-    if _postgres_adapter.schema and _postgres_adapter.schema != 'default':
-        return _postgres_adapter.schema
+    if _get_db_adapter().schema and _get_db_adapter().schema != 'default':
+        return _get_db_adapter().schema
 
     # Priority 4: Default project
     return "default"
@@ -181,7 +188,7 @@ def _get_db_for_project(project: str = None):
     target_project = _get_project_for_context(project)
 
     # If it's the same as our global adapter, reuse it
-    if target_project == _postgres_adapter.schema:
+    if target_project == _get_db_adapter().schema:
         return get_db()
 
     # Create new adapter for different project
@@ -421,7 +428,7 @@ def is_project_directory(path: str) -> bool:
 def get_current_db_path() -> str:
     """Get current database path (PostgreSQL returns schema name, not file path)."""
     if is_postgresql_mode():
-        return f"postgresql://{_postgres_adapter.schema}"
+        return f"postgresql://{_get_db_adapter().schema}"
     # SQLite mode disabled
     return "N/A"
 
@@ -508,7 +515,7 @@ def get_db():
     WARNING: Do not call this with a project parameter!
     Use _get_db_for_project(project) for project-aware connections.
     """
-    conn = _postgres_adapter.get_connection()
+    conn = _get_db_adapter().get_connection()
     return AutoClosingPostgreSQLConnection(conn, _postgres_adapter)
 
 # ============================================================================
@@ -2340,7 +2347,7 @@ def _get_detection_source() -> str:
     except:
         pass
 
-    if _postgres_adapter.schema and _postgres_adapter.schema != 'default':
+    if _get_db_adapter().schema and _get_db_adapter().schema != 'default':
         return "auto_detected_from_directory"
 
     return "default_fallback"
