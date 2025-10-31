@@ -44,7 +44,8 @@
       "mcp__digitalocean__list_deployments",
       "Bash(timeout 30 bash:*)",
       "Bash(bash -c 'for i in {1..20}; do sleep 5; STATUS=$(doctl apps list-deployments d1fcd0b9-706f-4b56-8813-73edc952a172 --format ID,Phase,Progress --no-header | head -1); echo \"\"[$i] $STATUS\"\"; if echo \"\"$STATUS\"\" | grep -qE \"\"ACTIVE|ERROR|CANCELED\"\"; then echo \"\"Deployment finished!\"\"; break; fi; done')",
-      "Bash(bash:*)"
+      "Bash(bash:*)",
+      "Bash(/tmp/test_cloud.sh:*)"
     ],
     "deny": [],
     "ask": [],
