@@ -19,6 +19,10 @@ class APIConfig:
         # Database Configuration - PostgreSQL ONLY
         self.database_url: str = os.getenv('DATABASE_URL')
         if not self.database_url:
+            # Debug: print all env vars that contain 'DATA' to stderr
+            import sys
+            data_vars = {k: v[:20] + '...' if len(v) > 20 else v for k, v in os.environ.items() if 'DATA' in k}
+            print(f"DEBUG: DATABASE_URL not found. Data-related env vars: {data_vars}", file=sys.stderr)
             raise ValueError("DATABASE_URL must be set in .env (PostgreSQL required)")
 
         # Embedding Configuration - Voyage AI ONLY
