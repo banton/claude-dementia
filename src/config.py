@@ -89,5 +89,19 @@ class APIConfig:
         }
 
 
-# Global config instance
-config = APIConfig()
+# Global config instance (lazy initialization for cloud deployment)
+_config = None
+
+def get_config() -> APIConfig:
+    """Get or create config instance (lazy initialization)."""
+    global _config
+    if _config is None:
+        _config = APIConfig()
+    return _config
+
+# For backward compatibility, create a property-based accessor
+class _ConfigProxy:
+    def __getattr__(self, name):
+        return getattr(get_config(), name)
+
+config = _ConfigProxy()
