@@ -172,7 +172,12 @@ async def execute_tool(
         tool_invocations.labels(tool=body.tool, status="success").inc()
 
         # Convert MCP result to JSON-serializable format
-        # FastMCP returns list of TextContent or other MCP types
+        # FastMCP may return tuple (content, metadata) or just content
+        if isinstance(result, tuple) and len(result) >= 1:
+            # Extract first element (content), ignore metadata
+            result = result[0]
+
+        # Now process the content (list, single object, or string)
         if isinstance(result, list):
             # Extract text from TextContent objects
             serialized_result = []
