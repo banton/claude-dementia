@@ -31,6 +31,7 @@ import os
 import sys
 import hashlib
 import time
+import random
 import psycopg2
 from psycopg2 import pool, sql, OperationalError
 from psycopg2.extras import RealDictCursor
@@ -73,7 +74,9 @@ class PostgreSQLAdapter:
             self.pool = psycopg2.pool.SimpleConnectionPool(
                 1, 10,
                 self.database_url,
-                cursor_factory=RealDictCursor  # Returns dict-like rows (compatible with SQLite)
+                cursor_factory=RealDictCursor,  # Returns dict-like rows (compatible with SQLite)
+                connect_timeout=10,  # 10 second connection timeout for Neon cold starts
+                options='-c statement_timeout=30000'  # 30 second statement timeout
             )
             print(f"✅ PostgreSQL connection pool initialized (schema: {self.schema})", file=sys.stderr)
         except Exception as e:
@@ -142,16 +145,16 @@ class PostgreSQLAdapter:
         # Limit length
         return safe[:32]
 
-    def get_connection(self, max_retries=3, initial_delay=0.5):
+    def get_connection(self, max_retries=5, initial_delay=2.0):
         """
         Get a connection from the pool with schema isolation applied.
 
         Implements retry logic for Neon database cold starts (compute autoscaling).
-        Neon databases "sleep" after inactivity and need 1-2s to wake up.
+        Neon databases "sleep" after inactivity and need 2-5s to wake up.
 
         Args:
-            max_retries: Maximum connection attempts (default: 3)
-            initial_delay: Initial retry delay in seconds (doubles each retry)
+            max_retries: Maximum connection attempts (default: 5)
+            initial_delay: Initial retry delay in seconds (default: 2.0, doubles each retry)
 
         Returns:
             psycopg2.connection: Database connection with search_path set to schema
@@ -185,15 +188,19 @@ class PostgreSQLAdapter:
                 last_error = e
                 error_msg = str(e).lower()
 
-                # Check if it's a cold start error (SSL, connection timeout, etc.)
+                # Check if it's a cold start error (SSL, connection timeout, network issues, etc.)
                 is_cold_start = any(keyword in error_msg for keyword in [
                     'ssl', 'timeout', 'connection refused', 'temporarily unavailable',
-                    'could not connect', 'server closed the connection'
+                    'could not connect', 'server closed the connection',
+                    'connection timed out', 'network unreachable'
                 ])
 
                 if is_cold_start and attempt < max_retries - 1:
-                    print(f"⏳ Neon cold start detected (attempt {attempt + 1}/{max_retries}), retrying in {delay}s...", file=sys.stderr)
-                    time.sleep(delay)
+                    # Add random jitter to prevent thundering herd
+                    jitter = random.uniform(0, delay * 0.3)
+                    wait_time = delay + jitter
+                    print(f"⏳ Neon cold start detected (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.2f}s...", file=sys.stderr)
+                    time.sleep(wait_time)
                     delay *= 2  # Exponential backoff
                 else:
                     # Not a cold start error, or final attempt - re-raise
