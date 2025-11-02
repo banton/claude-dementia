@@ -100,17 +100,6 @@ async def health():
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-@app.get("/debug/env")
-async def debug_env():
-    """Debug endpoint to check environment variables (TEMPORARY - remove after debugging)."""
-    import os
-    return {
-        "has_database_url": "DATABASE_URL" in os.environ,
-        "has_api_key": "DEMENTIA_API_KEY" in os.environ,
-        "environment": os.getenv("ENVIRONMENT", "not_set"),
-        "all_env_keys": sorted([k for k in os.environ.keys() if not k.startswith("_")])
-    }
-
 @app.get("/metrics")
 async def metrics_endpoint(credentials = Depends(bearer_auth)):
     """Prometheus metrics endpoint (authenticated)."""

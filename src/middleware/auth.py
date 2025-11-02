@@ -16,34 +16,37 @@ logger = get_logger(__name__)
 correlation_id_var = contextvars.ContextVar('correlation_id', default=None)
 
 class BearerTokenAuth(HTTPBearer):
-    """Bearer token authentication scheme."""
+    """Bearer token authentication scheme with strict enforcement."""
 
-    def __init__(self, auto_error: bool = True):
-        super().__init__(auto_error=auto_error)
+    def __init__(self):
+        # CRITICAL: auto_error=True to enforce authentication
+        super().__init__(auto_error=True)
 
         # Load API key from environment
         self.api_key = os.getenv('DEMENTIA_API_KEY')
         if not self.api_key:
-            logger.warning("DEMENTIA_API_KEY not set - authentication disabled")
+            logger.error("DEMENTIA_API_KEY not set - server will reject all requests")
+            raise ValueError("DEMENTIA_API_KEY must be set for production deployment")
 
-        logger.info("bearer_auth_initialized", has_api_key=bool(self.api_key))
+        logger.info("bearer_auth_initialized", has_api_key=True)
 
-    async def __call__(self, request: Request) -> Optional[HTTPAuthorizationCredentials]:
-        """Validate bearer token from Authorization header."""
+    async def __call__(self, request: Request) -> HTTPAuthorizationCredentials:
+        """Validate bearer token from Authorization header.
 
-        # Skip authentication for health check
+        CRITICAL SECURITY: This method MUST raise HTTPException on auth failure.
+        Never return None for protected endpoints.
+        """
+
+        # Skip authentication ONLY for health check (required for DO monitoring)
         if request.url.path == "/health":
             return None
 
-        # If no API key configured, allow all requests (dev mode)
-        if not self.api_key:
-            logger.warning("auth_disabled", path=request.url.path)
-            return None
-
+        # Get credentials from Authorization header (will raise 401 if missing due to auto_error=True)
         credentials = await super().__call__(request)
 
+        # Additional safety check (should never be None due to auto_error=True)
         if not credentials:
-            logger.warning("auth_missing_token", path=request.url.path)
+            logger.error("auth_missing_credentials", path=request.url.path)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Missing authorization header",
@@ -52,7 +55,8 @@ class BearerTokenAuth(HTTPBearer):
 
         # Constant-time comparison to prevent timing attacks
         if not secrets.compare_digest(credentials.credentials, self.api_key):
-            logger.warning("auth_invalid_token", path=request.url.path)
+            logger.warning("auth_invalid_token", path=request.url.path,
+                         token_prefix=credentials.credentials[:8] + "..." if len(credentials.credentials) > 8 else "***")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid API key",
