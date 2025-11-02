@@ -25,10 +25,9 @@ class BearerTokenAuth(HTTPBearer):
         # Load API key from environment
         self.api_key = os.getenv('DEMENTIA_API_KEY')
         if not self.api_key:
-            logger.error("DEMENTIA_API_KEY not set - server will reject all requests")
-            raise ValueError("DEMENTIA_API_KEY must be set for production deployment")
+            logger.error("CRITICAL: DEMENTIA_API_KEY not set - server will reject all authenticated requests")
 
-        logger.info("bearer_auth_initialized", has_api_key=True)
+        logger.info("bearer_auth_initialized", has_api_key=bool(self.api_key))
 
     async def __call__(self, request: Request) -> HTTPAuthorizationCredentials:
         """Validate bearer token from Authorization header.
