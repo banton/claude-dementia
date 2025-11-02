@@ -303,7 +303,9 @@ from starlette.routing import Mount
 
 mcp_app_with_auth = Starlette(
     routes=[Mount("/", app=mcp.streamable_http_app)],
-    middleware=[(MCPAuthMiddleware, {})]
+    middleware=[
+        (MCPAuthMiddleware, [], {})  # (class, args, kwargs)
+    ]
 )
 
 # Mount at /mcp path
