@@ -255,6 +255,63 @@ async def execute_tool(
         raise HTTPException(500, f"Tool execution failed: {str(e)}")
 
 # ============================================================================
+# MCP STREAMABLE HTTP TRANSPORT (for Claude Desktop)
+# ============================================================================
+
+# Mount FastMCP's streamable HTTP transport at /mcp path
+# This provides the modern MCP protocol over HTTP
+# Authentication is handled by checking headers in a dependency
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
+import secrets
+
+class MCPAuthMiddleware(BaseHTTPMiddleware):
+    """Authentication middleware for MCP endpoints."""
+
+    async def dispatch(self, request: StarletteRequest, call_next):
+        # Only auth MCP endpoints
+        if not request.url.path.startswith("/mcp"):
+            return await call_next(request)
+
+        # Check Authorization header
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Missing or invalid authorization header"}
+            )
+
+        token = auth_header.replace("Bearer ", "")
+        api_key = os.getenv('DEMENTIA_API_KEY')
+
+        # Constant-time comparison
+        if not api_key or not secrets.compare_digest(token, api_key):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid API key"}
+            )
+
+        # Auth passed
+        return await call_next(request)
+
+# Wrap MCP app with auth middleware
+from starlette.applications import Starlette
+from starlette.routing import Mount
+
+mcp_app_with_auth = Starlette(
+    routes=[Mount("/", app=mcp.streamable_http_app)],
+    middleware=[(MCPAuthMiddleware, {})]
+)
+
+# Mount at /mcp path
+app.mount("/mcp", mcp_app_with_auth)
+
+logger.info("mcp_http_mounted", path="/mcp")
+
+# ============================================================================
 # STARTUP
 # ============================================================================
 
