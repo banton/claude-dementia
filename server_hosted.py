@@ -302,7 +302,7 @@ from starlette.applications import Starlette
 from starlette.routing import Mount
 
 mcp_app_with_auth = Starlette(
-    routes=[Mount("/", app=mcp.streamable_http_app)],
+    routes=[Mount("/", app=mcp.streamable_http_app())],  # Call method to get ASGI app
     middleware=[
         (MCPAuthMiddleware, [], {})  # (class, args, kwargs)
     ]
