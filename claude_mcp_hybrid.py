@@ -2535,67 +2535,67 @@ async def get_project_info(name: str) -> str:
             schema=safe_name
         )
 
-        conn = adapter.get_connection()
-        cur = conn.cursor()
+        # Use context manager to ensure connection is always released
+        with adapter.connection() as conn:
+            cur = conn.cursor()
 
-        # Check if schema exists
-        cur.execute("""
-            SELECT schema_name
-            FROM information_schema.schemata
-            WHERE schema_name = %s
-        """, (safe_name,))
+            # Check if schema exists
+            cur.execute("""
+                SELECT schema_name
+                FROM information_schema.schemata
+                WHERE schema_name = %s
+            """, (safe_name,))
 
-        if not cur.fetchone():
-            adapter.release_connection(conn)
-            adapter.close()
-            return json.dumps({
-                "success": False,
-                "error": f"Project '{name}' not found (schema: {safe_name})"
-            })
+            if not cur.fetchone():
+                adapter.close()
+                return json.dumps({
+                    "success": False,
+                    "error": f"Project '{name}' not found (schema: {safe_name})"
+                })
 
-        # Get project stats
-        cur.execute(f'SELECT COUNT(*) as count FROM "{safe_name}".sessions')
-        total_sessions = cur.fetchone()['count']
+            # Get project stats
+            cur.execute(f'SELECT COUNT(*) as count FROM "{safe_name}".sessions')
+            total_sessions = cur.fetchone()['count']
 
-        cur.execute(f'SELECT COUNT(*) as count FROM "{safe_name}".context_locks')
-        total_contexts = cur.fetchone()['count']
+            cur.execute(f'SELECT COUNT(*) as count FROM "{safe_name}".context_locks')
+            total_contexts = cur.fetchone()['count']
 
-        cur.execute(f'SELECT COUNT(*) as count FROM "{safe_name}".memory_entries')
-        total_memories = cur.fetchone()['count']
+            cur.execute(f'SELECT COUNT(*) as count FROM "{safe_name}".memory_entries')
+            total_memories = cur.fetchone()['count']
 
-        # Get recent sessions
-        cur.execute(f"""
-            SELECT id, started_at, project_name, last_active
-            FROM "{safe_name}".sessions
-            ORDER BY last_active DESC NULLS LAST, started_at DESC
-            LIMIT 5
-        """)
-        recent_sessions = []
-        for row in cur.fetchall():
-            recent_sessions.append({
-                "id": row['id'],
-                "project_name": row['project_name'],
-                "started_at": row['started_at'],
-                "last_active": row['last_active']
-            })
+            # Get recent sessions
+            cur.execute(f"""
+                SELECT id, started_at, project_name, last_active
+                FROM "{safe_name}".sessions
+                ORDER BY last_active DESC NULLS LAST, started_at DESC
+                LIMIT 5
+            """)
+            recent_sessions = []
+            for row in cur.fetchall():
+                recent_sessions.append({
+                    "id": row['id'],
+                    "project_name": row['project_name'],
+                    "started_at": row['started_at'],
+                    "last_active": row['last_active']
+                })
 
-        # Get top contexts
-        cur.execute(f"""
-            SELECT label, version, LENGTH(content) as size, locked_at
-            FROM "{safe_name}".context_locks
-            ORDER BY locked_at DESC
-            LIMIT 10
-        """)
-        top_contexts = []
-        for row in cur.fetchall():
-            top_contexts.append({
-                "label": row['label'],
-                "version": row['version'],
-                "size_bytes": row['size'],
-                "locked_at": row['locked_at']
-            })
+            # Get top contexts
+            cur.execute(f"""
+                SELECT label, version, LENGTH(content) as size, locked_at
+                FROM "{safe_name}".context_locks
+                ORDER BY locked_at DESC
+                LIMIT 10
+            """)
+            top_contexts = []
+            for row in cur.fetchall():
+                top_contexts.append({
+                    "label": row['label'],
+                    "version": row['version'],
+                    "size_bytes": row['size'],
+                    "locked_at": row['locked_at']
+                })
 
-        adapter.release_connection(conn)
+        # Connection automatically released by context manager
         adapter.close()
 
         return json.dumps({

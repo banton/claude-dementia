@@ -37,6 +37,7 @@ from psycopg2 import pool, sql, OperationalError
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from typing import Optional
+from contextlib import contextmanager
 import json
 
 # Load environment variables
@@ -217,6 +218,32 @@ class PostgreSQLAdapter:
     def release_connection(self, conn):
         """Return connection to the pool."""
         self.pool.putconn(conn)
+
+    @contextmanager
+    def connection(self, max_retries=5, initial_delay=2.0):
+        """
+        Context manager for safe connection handling.
+
+        Ensures connections are always returned to the pool, even if exceptions occur.
+
+        Usage:
+            with adapter.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM table")
+                    # Connection automatically released on exit
+
+        Args:
+            max_retries: Maximum connection attempts (default: 5)
+            initial_delay: Initial retry delay in seconds (default: 2.0)
+
+        Yields:
+            psycopg2.connection: Database connection with search_path set
+        """
+        conn = self.get_connection(max_retries=max_retries, initial_delay=initial_delay)
+        try:
+            yield conn
+        finally:
+            self.release_connection(conn)
 
     def ensure_schema_exists(self):
         """
