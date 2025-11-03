@@ -58,6 +58,7 @@ from postgres_adapter import PostgreSQLAdapter
 
 # Global: Default adapter (lazy initialization for cloud deployment)
 _postgres_adapter = None
+_adapter_cache = {}  # Cache adapters by schema name to prevent connection pool exhaustion
 
 def _get_db_adapter():
     """Lazy initialization of database adapter to avoid import-time connection failures."""
@@ -69,7 +70,33 @@ def _get_db_adapter():
         )
         _postgres_adapter.ensure_schema_exists()
         print(f"✅ PostgreSQL/Neon connected (schema: {_postgres_adapter.schema})", file=sys.stderr)
+        # Add to cache
+        _adapter_cache[_postgres_adapter.schema] = _postgres_adapter
     return _postgres_adapter
+
+def _get_cached_adapter(schema_name: str) -> PostgreSQLAdapter:
+    """
+    Get or create a cached adapter for the given schema.
+    Prevents creating multiple connection pools for the same schema.
+
+    CRITICAL: Each PostgreSQLAdapter creates a connection pool (1-10 connections).
+    Creating multiple adapters for the same schema exhausts the connection pool!
+    """
+    global _adapter_cache
+
+    if schema_name not in _adapter_cache:
+        adapter = PostgreSQLAdapter(
+            database_url=config.database_url,
+            schema=schema_name
+        )
+        try:
+            adapter.ensure_schema_exists()
+        except:
+            pass  # Schema might already exist
+        _adapter_cache[schema_name] = adapter
+        print(f"✅ Cached new adapter for schema: {schema_name}", file=sys.stderr)
+
+    return _adapter_cache[schema_name]
 
 # Session-level active project tracking (per conversation)
 _active_projects = {}  # {session_id: project_name}
@@ -191,18 +218,8 @@ def _get_db_for_project(project: str = None):
     if target_project == _get_db_adapter().schema:
         return get_db()
 
-    # Create new adapter for different project
-    adapter = PostgreSQLAdapter(
-        database_url=config.database_url,
-        schema=target_project
-    )
-
-    # Ensure schema exists (auto-create on first use)
-    try:
-        adapter.ensure_schema_exists()
-    except:
-        pass  # Schema might already exist
-
+    # Get cached adapter for different project (prevents connection pool exhaustion)
+    adapter = _get_cached_adapter(target_project)
     conn = adapter.get_connection()
     return AutoClosingPostgreSQLConnection(conn, adapter)
 
@@ -2376,11 +2393,8 @@ async def create_project(name: str) -> str:
         safe_name = re.sub(r'[^a-z0-9]', '_', name.lower())
         safe_name = re.sub(r'_+', '_', safe_name).strip('_')[:32]
 
-        # Create adapter with explicit schema
-        adapter = PostgreSQLAdapter(
-            database_url=config.database_url,
-            schema=safe_name
-        )
+        # Get cached adapter with explicit schema (prevents connection pool exhaustion)
+        adapter = _get_cached_adapter(safe_name)
 
         # Check if schema already exists
         conn = adapter.pool.getconn()
@@ -2529,11 +2543,8 @@ async def get_project_info(name: str) -> str:
         safe_name = re.sub(r'[^a-z0-9]', '_', name.lower())
         safe_name = re.sub(r'_+', '_', safe_name).strip('_')[:32]
 
-        # Connect to specific schema
-        adapter = PostgreSQLAdapter(
-            database_url=config.database_url,
-            schema=safe_name
-        )
+        # Get cached adapter for specific schema (prevents connection pool exhaustion)
+        adapter = _get_cached_adapter(safe_name)
 
         # Use context manager to ensure connection is always released
         with adapter.connection() as conn:
