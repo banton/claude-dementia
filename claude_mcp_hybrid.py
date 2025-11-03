@@ -2742,9 +2742,11 @@ async def wake_up(project: Optional[str] = None) -> str:
     git_info = get_git_status()
 
     # Run file model scan (incremental, only project directories)
+    # DISABLED in production/cloud to prevent scanning build artifacts
     file_model_data = None
+    environment = os.getenv('ENVIRONMENT', 'development')
     current_project_root = get_project_root()  # Dynamic detection
-    if is_project_directory(current_project_root):
+    if environment == 'development' and is_project_directory(current_project_root):
         try:
             # Load stored model
             stored_model = load_stored_file_model(conn, session_id)
