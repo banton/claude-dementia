@@ -60,6 +60,47 @@ from postgres_adapter import PostgreSQLAdapter
 _postgres_adapter = None
 _adapter_cache = {}  # Cache adapters by schema name to prevent connection pool exhaustion
 
+# ============================================================================
+# DATABASE CONNECTION PATTERN - THE ONE TRUE WAY
+# ============================================================================
+"""
+CRITICAL: Follow this pattern to avoid connection pool exhaustion!
+
+1. GETTING AN ADAPTER:
+   - For default project: adapter = _get_postgres_adapter()
+   - For specific project: adapter = _get_cached_adapter(schema_name)
+   - NEVER create new PostgreSQLAdapter() directly in tool functions!
+
+2. GETTING A CONNECTION (ALWAYS use context manager):
+   ✅ CORRECT:
+       adapter = _get_cached_adapter(schema_name)
+       with adapter.connection() as conn:
+           cur = conn.cursor()
+           cur.execute("SELECT ...")
+           # Connection automatically released when exiting 'with' block
+
+   ❌ WRONG:
+       conn = adapter.get_connection()  # Manual - easy to leak!
+       conn = adapter.pool.getconn()    # Direct pool access - very dangerous!
+
+3. POOL CONFIGURATION:
+   - Size: Controlled by DB_POOL_MIN (default: 1) and DB_POOL_MAX (default: 10)
+   - Timeout: 30s statement timeout set per-connection
+   - Each adapter = 1 connection pool (1-10 connections)
+   - Adapters are cached and reused to prevent pool proliferation
+
+4. WHY THIS MATTERS:
+   - Each adapter creates a NEW connection pool
+   - Creating 100 adapters = 1000 connections (100 × 10)
+   - Neon has connection limits - exceeding causes failures
+   - Context manager guarantees connections are released, even on errors
+
+5. ADAPTER LIFECYCLE:
+   - Adapters are cached globally and reused across requests
+   - DO NOT call adapter.close() on cached adapters
+   - Pool connections are managed automatically by context manager
+"""
+
 def _get_db_adapter():
     """Lazy initialization of database adapter to avoid import-time connection failures."""
     global _postgres_adapter
@@ -2396,9 +2437,8 @@ async def create_project(name: str) -> str:
         # Get cached adapter with explicit schema (prevents connection pool exhaustion)
         adapter = _get_cached_adapter(safe_name)
 
-        # Check if schema already exists
-        conn = adapter.pool.getconn()
-        try:
+        # Check if schema already exists (using context manager for safe connection handling)
+        with adapter.connection() as conn:
             cur = conn.cursor()
             cur.execute("""
                 SELECT schema_name
@@ -2407,28 +2447,14 @@ async def create_project(name: str) -> str:
             """, (safe_name,))
 
             if cur.fetchone():
-                adapter.pool.putconn(conn)
-                adapter.close()
                 return json.dumps({
                     "success": False,
                     "error": f"Project '{name}' already exists (schema: {safe_name})",
                     "schema": safe_name
                 })
 
-            # Return connection before proceeding
-            adapter.pool.putconn(conn)
-        except Exception:
-            # If error, try to return connection before closing
-            try:
-                adapter.pool.putconn(conn)
-            except:
-                pass
-            adapter.close()
-            raise
-
         # Create schema and tables
         adapter.ensure_schema_exists()
-        adapter.close()
 
         return json.dumps({
             "success": True,
