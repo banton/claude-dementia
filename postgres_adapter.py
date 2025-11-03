@@ -70,19 +70,49 @@ class PostgreSQLAdapter:
         # Determine schema name
         self.schema = schema or self._get_schema_name()
 
-        # Initialize connection pool (min 1, max 10 connections)
-        try:
-            self.pool = psycopg2.pool.SimpleConnectionPool(
-                1, 10,
-                self.database_url,
-                cursor_factory=RealDictCursor,  # Returns dict-like rows (compatible with SQLite)
-                connect_timeout=10  # 10 second connection timeout for Neon cold starts
-                # Note: statement_timeout removed from pool options (not supported by Neon pooler)
-                # Instead, set per-connection in get_connection()
-            )
-            print(f"✅ PostgreSQL connection pool initialized (schema: {self.schema})", file=sys.stderr)
-        except Exception as e:
-            raise ConnectionError(f"Failed to create connection pool: {e}")
+        # Initialize connection pool with retry logic for Neon cold starts
+        # Neon databases can be suspended after inactivity and take 10-30s to wake up
+        max_retries = 5
+        initial_delay = 2.0
+        delay = initial_delay
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                self.pool = psycopg2.pool.SimpleConnectionPool(
+                    1, 10,
+                    self.database_url,
+                    cursor_factory=RealDictCursor,  # Returns dict-like rows (compatible with SQLite)
+                    connect_timeout=15  # Increased to 15s for Neon wakeup
+                    # Note: statement_timeout removed from pool options (not supported by Neon pooler)
+                    # Instead, set per-connection in get_connection()
+                )
+                if attempt > 0:
+                    print(f"✅ PostgreSQL connection pool initialized after {attempt + 1} attempts (schema: {self.schema})", file=sys.stderr)
+                else:
+                    print(f"✅ PostgreSQL connection pool initialized (schema: {self.schema})", file=sys.stderr)
+                break  # Success!
+
+            except Exception as e:
+                last_error = e
+                error_msg = str(e).lower()
+
+                # Check if it's a cold start / suspension error
+                is_cold_start = any(keyword in error_msg for keyword in [
+                    'ssl', 'timeout', 'connection refused', 'temporarily unavailable',
+                    'could not connect', 'server closed the connection',
+                    'connection timed out', 'network unreachable', 'suspended'
+                ])
+
+                if is_cold_start and attempt < max_retries - 1:
+                    jitter = random.uniform(0, delay * 0.3)
+                    wait_time = delay + jitter
+                    print(f"⏳ Neon database wakeup (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.2f}s...", file=sys.stderr)
+                    time.sleep(wait_time)
+                    delay *= 2  # Exponential backoff
+                else:
+                    # Not a cold start error, or final attempt
+                    raise ConnectionError(f"Failed to create connection pool after {max_retries} attempts: {e}")
 
     def _get_schema_name(self) -> str:
         """
