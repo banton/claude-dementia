@@ -241,21 +241,18 @@ async def metrics_endpoint(request: Request):
 # Get FastMCP's Starlette app (already has /mcp routes and lifespan)
 app = mcp.streamable_http_app()
 
-# Eagerly initialize database at startup to prevent first-request timeout
+# Eagerly initialize database at module load to prevent first-request timeout
 # Neon database may be suspended and take 10-15s to wake up
 # This ensures the connection pool is ready before serving requests
-@app.on_event("startup")
-async def startup_database():
-    """Initialize database connection pool at startup."""
-    from claude_mcp_hybrid import _get_db_adapter
-    try:
-        logger.info("database_initialization_start")
-        adapter = _get_db_adapter()
-        logger.info("database_initialization_success", schema=adapter.schema)
-    except Exception as e:
-        logger.error("database_initialization_failed", error=str(e))
-        # Don't crash the server, let it handle cold starts per-request
-        pass
+from claude_mcp_hybrid import _get_db_adapter
+try:
+    logger.info("database_initialization_start")
+    adapter = _get_db_adapter()
+    logger.info("database_initialization_success", schema=adapter.schema)
+except Exception as e:
+    logger.error("database_initialization_failed", error=str(e))
+    # Don't crash the server, let it handle cold starts per-request
+    pass
 
 # Add custom routes FIRST (before auth middleware, so routing happens before auth check)
 app.routes.insert(0, Route('/health', health_check, methods=['GET']))
