@@ -201,16 +201,11 @@ class PostgreSQLAdapter:
             try:
                 conn = self.pool.getconn()
 
-                # Set search_path to isolate this connection to the schema
-                # Also set statement_timeout (30s) per-connection (compatible with Neon pooler)
+                # CRITICAL FIX: search_path is now set at ROLE level (see ensure_schema_exists)
+                # Only set statement_timeout per-connection (compatible with Neon transaction pooling)
                 with conn.cursor() as cur:
-                    # Use sql.Identifier to prevent SQL injection
-                    cur.execute(
-                        sql.SQL("SET search_path TO {}, public").format(
-                            sql.Identifier(self.schema)
-                        )
-                    )
                     # Set statement timeout (30 seconds)
+                    # This is OK per-connection even with transaction pooling
                     cur.execute("SET statement_timeout = '30s'")
 
                 # Connection successful
@@ -279,6 +274,11 @@ class PostgreSQLAdapter:
         """
         Ensure schema exists and has required tables.
         Creates schema and runs migrations if needed.
+
+        CRITICAL FIX for Neon transaction pooling:
+        Uses ALTER ROLE to set search_path permanently instead of per-connection SET.
+        This is required because Neon uses pool_mode=transaction where SET statements
+        only last one transaction, causing connection pool exhaustion.
         """
         conn = self.pool.getconn()
         try:
@@ -290,12 +290,21 @@ class PostgreSQLAdapter:
                     )
                 )
 
-                # Set search_path for this session
+                # CRITICAL FIX: Set search_path at ROLE level (not session level)
+                # This persists across all connections for this role, compatible with Neon transaction pooling
+                # Extract role name from connection
+                cur.execute("SELECT CURRENT_USER")
+                role_name = cur.fetchone()['current_user']
+
+                # Set search_path permanently for this role
+                # This replaces the per-connection SET which doesn't work with Neon's pool_mode=transaction
                 cur.execute(
-                    sql.SQL("SET search_path TO {}, public").format(
+                    sql.SQL("ALTER ROLE {} SET search_path TO {}, public").format(
+                        sql.Identifier(role_name),
                         sql.Identifier(self.schema)
                     )
                 )
+                print(f"✅ Set search_path for role '{role_name}' to '{self.schema}, public'", file=sys.stderr)
 
                 # Create tables (PostgreSQL syntax)
                 self._create_tables(cur)
