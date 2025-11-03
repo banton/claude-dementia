@@ -75,8 +75,9 @@ class PostgreSQLAdapter:
                 1, 10,
                 self.database_url,
                 cursor_factory=RealDictCursor,  # Returns dict-like rows (compatible with SQLite)
-                connect_timeout=10,  # 10 second connection timeout for Neon cold starts
-                options='-c statement_timeout=30000'  # 30 second statement timeout
+                connect_timeout=10  # 10 second connection timeout for Neon cold starts
+                # Note: statement_timeout removed from pool options (not supported by Neon pooler)
+                # Instead, set per-connection in get_connection()
             )
             print(f"✅ PostgreSQL connection pool initialized (schema: {self.schema})", file=sys.stderr)
         except Exception as e:
@@ -170,6 +171,7 @@ class PostgreSQLAdapter:
                 conn = self.pool.getconn()
 
                 # Set search_path to isolate this connection to the schema
+                # Also set statement_timeout (30s) per-connection (compatible with Neon pooler)
                 with conn.cursor() as cur:
                     # Use sql.Identifier to prevent SQL injection
                     cur.execute(
@@ -177,6 +179,8 @@ class PostgreSQLAdapter:
                             sql.Identifier(self.schema)
                         )
                     )
+                    # Set statement timeout (30 seconds)
+                    cur.execute("SET statement_timeout = '30s'")
 
                 # Connection successful
                 if attempt > 0:
