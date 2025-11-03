@@ -70,22 +70,17 @@ class PostgreSQLAdapter:
         # Determine schema name
         self.schema = schema or self._get_schema_name()
 
-        # Get pool configuration from environment (with sensible defaults)
-        pool_min = int(os.getenv('DB_POOL_MIN', '1'))
-        pool_max = int(os.getenv('DB_POOL_MAX', '10'))
-
-        # Initialize connection pool
+        # Initialize connection pool (min 1, max 10 connections)
         try:
             self.pool = psycopg2.pool.SimpleConnectionPool(
-                pool_min,
-                pool_max,
+                1, 10,
                 self.database_url,
                 cursor_factory=RealDictCursor,  # Returns dict-like rows (compatible with SQLite)
                 connect_timeout=10  # 10 second connection timeout for Neon cold starts
                 # Note: statement_timeout removed from pool options (not supported by Neon pooler)
                 # Instead, set per-connection in get_connection()
             )
-            print(f"✅ PostgreSQL connection pool initialized (schema: {self.schema}, pool: {pool_min}-{pool_max})", file=sys.stderr)
+            print(f"✅ PostgreSQL connection pool initialized (schema: {self.schema})", file=sys.stderr)
         except Exception as e:
             raise ConnectionError(f"Failed to create connection pool: {e}")
 
