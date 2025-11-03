@@ -107,7 +107,7 @@ def _get_project_for_context(project: str = None) -> str:
 
     Priority:
     1. Explicit project parameter
-    2. Session active project (set via switch_project)
+    2. Session active project (from database, set via switch_project)
     3. Auto-detect from filesystem (Claude Code with git repo)
     4. Fall back to "default"
 
@@ -118,11 +118,42 @@ def _get_project_for_context(project: str = None) -> str:
     if project:
         return project
 
-    # Priority 2: Session active project
+    # Priority 2: Session active project (from database for MCP server persistence)
     try:
         session_id = get_current_session_id()
+
+        # First check in-memory cache
         if session_id in _active_projects:
             return _active_projects[session_id]
+
+        # Then check database (for MCP server statelessness)
+        try:
+            # Try all projects to find which one has this session with active_project set
+            adapter = _get_db_adapter()
+            conn = adapter.get_connection()
+
+            # Query active_project from sessions table
+            if hasattr(conn, 'execute_with_conversion'):  # PostgreSQL
+                result = conn.execute_with_conversion(
+                    "SELECT active_project FROM sessions WHERE id = ? AND active_project IS NOT NULL",
+                    (session_id,),
+                    fetchone=True
+                )
+            else:  # SQLite
+                cursor = conn.execute(
+                    "SELECT active_project FROM sessions WHERE id = ? AND active_project IS NOT NULL",
+                    (session_id,)
+                )
+                result = cursor.fetchone()
+
+            if result:
+                active_project = result[0] if isinstance(result, tuple) else result.get('active_project')
+                if active_project:
+                    # Cache it in memory for faster subsequent lookups
+                    _active_projects[session_id] = active_project
+                    return active_project
+        except:
+            pass
     except:
         pass
 
@@ -617,7 +648,8 @@ if False:  # Disabled code preserved
                 summary TEXT,
                 project_fingerprint TEXT,
                 project_path TEXT,
-                project_name TEXT
+                project_name TEXT,
+                active_project TEXT
             )
         ''')
     
@@ -631,6 +663,8 @@ if False:  # Disabled code preserved
             cursor.execute('ALTER TABLE sessions ADD COLUMN project_path TEXT')
         if 'project_name' not in columns:
             cursor.execute('ALTER TABLE sessions ADD COLUMN project_name TEXT')
+        if 'active_project' not in columns:
+            cursor.execute('ALTER TABLE sessions ADD COLUMN active_project TEXT')
     
         # Create memory_entries table
         cursor.execute('''
@@ -2221,8 +2255,31 @@ async def switch_project(name: str) -> str:
                 "error": "Could not determine session ID"
             })
 
-        # Set active project for this session
+        # Set active project for this session (in-memory for backwards compatibility)
         _active_projects[session_id] = safe_name
+
+        # Persist active project to database for MCP server statelessness
+        try:
+            # Get connection for the target project
+            project_conn = _get_db_for_project(safe_name)
+            session_id_for_project = _get_session_id_for_project(project_conn, safe_name)
+
+            # Update session with active_project
+            if hasattr(project_conn, 'execute_with_conversion'):  # PostgreSQL
+                project_conn.execute_with_conversion(
+                    "UPDATE sessions SET active_project = ? WHERE id = ?",
+                    (safe_name, session_id_for_project)
+                )
+                project_conn.commit()
+            else:  # SQLite
+                project_conn.execute(
+                    "UPDATE sessions SET active_project = ? WHERE id = ?",
+                    (safe_name, session_id_for_project)
+                )
+                project_conn.commit()
+        except Exception as e:
+            # Don't fail if we can't persist - fall back to in-memory only
+            pass
 
         # Check if project exists
         import psycopg2
