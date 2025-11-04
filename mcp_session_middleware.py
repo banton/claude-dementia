@@ -97,13 +97,13 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
 
                 if new_session_id:
                     try:
-                        self.session_store.create_session(
+                        result = self.session_store.create_session(
                             session_id=new_session_id,
                             client_info={'user_agent': request.headers.get('user-agent', 'unknown')}
                         )
-                        logger.info(f"MCP session created: {new_session_id[:8]}")
+                        logger.info(f"MCP session created: {new_session_id[:8]}, stored_id: {result['session_id'][:8]}")
                     except Exception as e:
-                        logger.error(f"MCP session create failed: {new_session_id[:8]}, error: {e}")
+                        logger.error(f"MCP session create failed: {new_session_id[:8]}, error: {e}", exc_info=True)
 
             return response
 
@@ -120,10 +120,10 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                 # Try to recreate session in PostgreSQL
                 # (FastMCP might still accept it if client sends initialize)
                 try:
-                    self.session_store.create_session(session_id=session_id)
-                    logger.info(f"MCP session recreated: {session_id[:8]}")
-                except:
-                    pass  # Continue anyway, let FastMCP handle it
+                    result = self.session_store.create_session(session_id=session_id)
+                    logger.info(f"MCP session recreated: {session_id[:8]}, stored_id: {result['session_id'][:8]}")
+                except Exception as e:
+                    logger.error(f"MCP session recreate failed: {session_id[:8]}, error: {e}", exc_info=True)
 
             elif self.session_store.is_expired(session_id):
                 # Session expired
