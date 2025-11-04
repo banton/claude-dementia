@@ -15,7 +15,6 @@ This solves DEM-30: Sessions survive server restarts, no user disruption on depl
 """
 
 import json
-import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -25,8 +24,14 @@ from starlette.responses import JSONResponse
 
 from mcp_session_store import PostgreSQLSessionStore
 
-
-logger = logging.getLogger(__name__)
+# Use structlog for consistent logging format
+try:
+    from src.logging_config import get_logger
+    logger = get_logger(__name__)
+except ImportError:
+    # Fallback to standard logging for tests
+    import logging
+    logger = logging.getLogger(__name__)
 
 
 class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
@@ -95,12 +100,9 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                         self.session_store.create_session(
                             client_info={'user_agent': request.headers.get('user-agent', 'unknown')}
                         )
-                        logger.info("mcp_session_created",
-                                   session_id=new_session_id[:8])
+                        logger.info(f"MCP session created: {new_session_id[:8]}")
                     except Exception as e:
-                        logger.error("mcp_session_create_failed",
-                                    session_id=new_session_id[:8],
-                                    error=str(e))
+                        logger.error(f"MCP session create failed: {new_session_id[:8]}, error: {e}")
 
             return response
 
@@ -112,23 +114,19 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
             if pg_session is None:
                 # Session not found in PostgreSQL
                 # This happens after deployment when FastMCP lost in-memory sessions
-                logger.warning("mcp_session_not_found_in_db",
-                             session_id=session_id[:8])
+                logger.warning(f"MCP session not found in database: {session_id[:8]}")
 
                 # Try to recreate session in PostgreSQL
                 # (FastMCP might still accept it if client sends initialize)
                 try:
                     self.session_store.create_session()
-                    logger.info("mcp_session_recreated",
-                               session_id=session_id[:8])
+                    logger.info(f"MCP session recreated: {session_id[:8]}")
                 except:
                     pass  # Continue anyway, let FastMCP handle it
 
             elif self.session_store.is_expired(session_id):
                 # Session expired
-                logger.warning("mcp_session_expired",
-                             session_id=session_id[:8],
-                             expires_at=pg_session['expires_at'])
+                logger.warning(f"MCP session expired: {session_id[:8]}, expires_at: {pg_session['expires_at']}")
 
                 return JSONResponse(
                     status_code=400,
@@ -149,13 +147,10 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
             else:
                 # Valid session - update activity timestamp
                 self.session_store.update_activity(session_id)
-                logger.debug("mcp_session_activity_updated",
-                           session_id=session_id[:8])
+                logger.debug(f"MCP session activity updated: {session_id[:8]}")
 
         except Exception as e:
-            logger.error("mcp_session_validation_error",
-                        session_id=session_id[:8],
-                        error=str(e))
+            logger.error(f"MCP session validation error: {session_id[:8]}, error: {e}")
             # Don't block request on validation errors
             pass
 
