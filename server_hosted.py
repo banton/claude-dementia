@@ -30,6 +30,9 @@ from starlette.requests import Request
 # Import existing MCP server
 from claude_mcp_hybrid import mcp
 
+# Import session persistence
+from mcp_session_middleware import MCPSessionPersistenceMiddleware
+
 # Import production infrastructure
 from src.logging_config import configure_logging, get_logger
 from src.metrics import (
@@ -333,6 +336,7 @@ app = mcp.streamable_http_app()
 # Neon database may be suspended and take 10-15s to wake up
 # This ensures the connection pool is ready before serving requests
 from claude_mcp_hybrid import _get_db_adapter
+adapter = None  # Initialize to None in case initialization fails
 try:
     logger.info("database_initialization_start")
     adapter = _get_db_adapter()
@@ -349,11 +353,14 @@ app.routes.insert(2, Route('/execute', execute_tool_endpoint, methods=['POST']))
 app.routes.insert(3, Route('/metrics', metrics_endpoint, methods=['GET']))
 
 # Add middleware (order matters - last added runs first in Starlette)
-# Execution order: Timeout -> RequestLogging -> Auth -> CorrelationID -> Handler
-app.add_middleware(CorrelationIdMiddleware)      # Innermost - adds correlation ID
-app.add_middleware(BearerAuthMiddleware)         # Auth check
-app.add_middleware(MCPRequestLoggingMiddleware)  # Log /mcp requests/responses
-app.add_middleware(TimeoutMiddleware)            # Outermost - catch timeouts
+# Execution order: Timeout -> RequestLogging -> SessionPersistence -> Auth -> CorrelationID -> Handler
+app.add_middleware(CorrelationIdMiddleware)              # Innermost - adds correlation ID
+app.add_middleware(BearerAuthMiddleware)                 # Auth check
+if adapter is not None:
+    app.add_middleware(MCPSessionPersistenceMiddleware,  # Persist sessions in PostgreSQL
+                       db_pool=adapter.pool)             # Pass database pool
+app.add_middleware(MCPRequestLoggingMiddleware)          # Log /mcp requests/responses
+app.add_middleware(TimeoutMiddleware)                    # Outermost - catch timeouts
 
 logger.info("app_initialized",
             version=VERSION,
