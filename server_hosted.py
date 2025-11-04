@@ -113,6 +113,8 @@ class MCPRequestLoggingMiddleware(BaseHTTPMiddleware):
                        path=request.url.path,
                        content_type=request.headers.get('content-type'),
                        content_length=request.headers.get('content-length', 'unknown'),
+                       accept=request.headers.get('accept', 'missing'),
+                       mcp_session_id=request.headers.get('mcp-session-id', 'missing'),
                        has_auth=bool(request.headers.get('authorization')),
                        correlation_id=getattr(request.state, 'correlation_id', 'unknown'))
 
@@ -123,9 +125,20 @@ class MCPRequestLoggingMiddleware(BaseHTTPMiddleware):
 
         # Log the response for /mcp endpoint
         if request.url.path.startswith('/mcp'):
+            # For error responses, try to capture the body
+            error_detail = None
+            if response.status_code >= 400:
+                try:
+                    # Try to read response body (for StreamingResponse this may not work)
+                    if hasattr(response, 'body'):
+                        error_detail = response.body[:500].decode('utf-8', errors='replace')
+                except:
+                    pass
+
             logger.info("mcp_response_sent",
                        status_code=response.status_code,
                        elapsed_ms=round(elapsed_ms, 2),
+                       error_detail=error_detail,
                        correlation_id=getattr(request.state, 'correlation_id', 'unknown'))
 
         return response
