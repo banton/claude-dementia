@@ -37,6 +37,7 @@ class PostgreSQLSessionStore:
 
     def create_session(
         self,
+        session_id: Optional[str] = None,
         created_at: Optional[datetime] = None,
         capabilities: Optional[Dict[str, Any]] = None,
         client_info: Optional[Dict[str, Any]] = None
@@ -45,6 +46,7 @@ class PostgreSQLSessionStore:
         Create a new MCP session.
 
         Args:
+            session_id: Session ID from FastMCP (default: generate new)
             created_at: Session creation time (default: now)
             capabilities: MCP capabilities dict (default: {})
             client_info: Client metadata (default: {})
@@ -66,11 +68,56 @@ class PostgreSQLSessionStore:
 
         expires_at = created_at + timedelta(hours=24)
 
-        # Retry up to 3 times for duplicate session ID
-        max_retries = 3
-        for attempt in range(max_retries):
-            session_id = self._generate_session_id()
+        # Use provided session_id or generate new one
+        if session_id is None:
+            # Retry up to 3 times for duplicate session ID
+            max_retries = 3
+            for attempt in range(max_retries):
+                session_id = self._generate_session_id()
 
+                conn = self.pool.getconn()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO mcp_sessions (
+                                session_id, created_at, last_active, expires_at, capabilities, client_info
+                            ) VALUES (%s, %s, %s, %s, %s, %s)
+                            RETURNING session_id, created_at, last_active, expires_at, capabilities, client_info
+                        """, (
+                            session_id,
+                            created_at,
+                            created_at,
+                            expires_at,
+                            json.dumps(capabilities),
+                            json.dumps(client_info)
+                        ))
+
+                        row = cur.fetchone()
+                        conn.commit()
+
+                        return {
+                            'session_id': row['session_id'],
+                            'created_at': row['created_at'],
+                            'last_active': row['last_active'],
+                            'expires_at': row['expires_at'],
+                            'capabilities': json.loads(row['capabilities']) if isinstance(row['capabilities'], str) else row['capabilities'],
+                            'client_info': json.loads(row['client_info']) if isinstance(row['client_info'], str) else row['client_info']
+                        }
+
+                except psycopg2.errors.UniqueViolation:
+                    # Duplicate session_id, retry with new ID
+                    conn.rollback()
+                    if attempt == max_retries - 1:
+                        raise  # Last attempt failed, propagate error
+                    continue  # Retry with new session_id
+
+                finally:
+                    self.pool.putconn(conn)
+
+            # Should never reach here
+            raise RuntimeError("Failed to create session after max retries")
+        else:
+            # Session ID provided - insert directly (no retry, let caller handle duplicates)
             conn = self.pool.getconn()
             try:
                 with conn.cursor() as cur:
@@ -100,18 +147,8 @@ class PostgreSQLSessionStore:
                         'client_info': json.loads(row['client_info']) if isinstance(row['client_info'], str) else row['client_info']
                     }
 
-            except psycopg2.errors.UniqueViolation:
-                # Duplicate session_id, retry with new ID
-                conn.rollback()
-                if attempt == max_retries - 1:
-                    raise  # Last attempt failed, propagate error
-                continue  # Retry with new session_id
-
             finally:
                 self.pool.putconn(conn)
-
-        # Should never reach here
-        raise RuntimeError("Failed to create session after max retries")
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """

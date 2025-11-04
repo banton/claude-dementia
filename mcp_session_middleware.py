@@ -98,6 +98,7 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                 if new_session_id:
                     try:
                         self.session_store.create_session(
+                            session_id=new_session_id,
                             client_info={'user_agent': request.headers.get('user-agent', 'unknown')}
                         )
                         logger.info(f"MCP session created: {new_session_id[:8]}")
@@ -119,7 +120,7 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                 # Try to recreate session in PostgreSQL
                 # (FastMCP might still accept it if client sends initialize)
                 try:
-                    self.session_store.create_session()
+                    self.session_store.create_session(session_id=session_id)
                     logger.info(f"MCP session recreated: {session_id[:8]}")
                 except:
                     pass  # Continue anyway, let FastMCP handle it
