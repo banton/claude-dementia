@@ -1129,75 +1129,93 @@ def validate_database_isolation(conn) -> dict:
         "recommendations": []
     }
 
-    # Check 1: Path Correctness
-    try:
-        expected_hash = hashlib.md5(current_cwd.encode()).hexdigest()[:8]
-        actual_db_path = get_current_db_path()
-        expected_db_path = os.path.expanduser(f"~/.claude-dementia/{expected_hash}.db")
+    # Check 1: Path Correctness (SQLite only)
+    if not is_postgresql_mode():
+        try:
+            expected_hash = hashlib.md5(current_cwd.encode()).hexdigest()[:8]
+            actual_db_path = get_current_db_path()
+            expected_db_path = os.path.expanduser(f"~/.claude-dementia/{expected_hash}.db")
 
-        # Normalize paths for comparison
-        actual_normalized = os.path.normpath(actual_db_path)
-        expected_normalized = os.path.normpath(expected_db_path)
+            # Normalize paths for comparison
+            actual_normalized = os.path.normpath(actual_db_path)
+            expected_normalized = os.path.normpath(expected_db_path)
 
-        path_correct = actual_normalized == expected_normalized
+            path_correct = actual_normalized == expected_normalized
 
-        validation_report["checks"]["path_correctness"] = {
-            "passed": path_correct,
-            "expected": expected_db_path,
-            "actual": actual_db_path,
-            "level": "important"
-        }
+            validation_report["checks"]["path_correctness"] = {
+                "passed": path_correct,
+                "expected": expected_db_path,
+                "actual": actual_db_path,
+                "level": "important"
+            }
 
-        if not path_correct:
+            if not path_correct:
+                validation_report["valid"] = False
+                validation_report["level"] = "warning"
+                validation_report["warnings"].append(
+                    f"Database path mismatch. Expected: {expected_db_path}, Actual: {actual_db_path}"
+                )
+        except Exception as e:
+            validation_report["checks"]["path_correctness"] = {
+                "passed": False,
+                "error": str(e),
+                "level": "important"
+            }
             validation_report["valid"] = False
             validation_report["level"] = "warning"
-            validation_report["warnings"].append(
-                f"Database path mismatch. Expected: {expected_db_path}, Actual: {actual_db_path}"
-            )
-    except Exception as e:
+    else:
+        # PostgreSQL: Schema-based isolation, path checks not applicable
         validation_report["checks"]["path_correctness"] = {
-            "passed": False,
-            "error": str(e),
-            "level": "important"
-        }
-        validation_report["valid"] = False
-        validation_report["level"] = "warning"
-
-    # Check 2: Hash Consistency
-    try:
-        calculated_hash = hashlib.md5(current_cwd.encode()).hexdigest()[:8]
-        db_filename = os.path.basename(actual_db_path)
-        db_hash = db_filename.replace('.db', '')
-
-        hash_consistent = db_hash == calculated_hash
-
-        validation_report["checks"]["hash_consistency"] = {
-            "passed": hash_consistent,
-            "expected_hash": calculated_hash,
-            "actual_hash": db_hash,
-            "directory": current_cwd,
-            "level": "critical"
+            "passed": True,
+            "note": "Skipped (PostgreSQL mode uses schema-based isolation)",
+            "level": "informational"
         }
 
-        if not hash_consistent:
+    # Check 2: Hash Consistency (SQLite only)
+    if not is_postgresql_mode():
+        try:
+            expected_hash = hashlib.md5(current_cwd.encode()).hexdigest()[:8]
+            actual_db_path = get_current_db_path()
+            db_filename = os.path.basename(actual_db_path)
+            db_hash = db_filename.replace('.db', '')
+
+            hash_consistent = db_hash == expected_hash
+
+            validation_report["checks"]["hash_consistency"] = {
+                "passed": hash_consistent,
+                "expected_hash": expected_hash,
+                "actual_hash": db_hash,
+                "directory": current_cwd,
+                "level": "critical"
+            }
+
+            if not hash_consistent:
+                validation_report["valid"] = False
+                validation_report["level"] = "critical"
+                validation_report["errors"].append(
+                    f"DATABASE ISOLATION VIOLATION: Hash mismatch! "
+                    f"Expected {expected_hash} for {current_cwd}, got {db_hash}"
+                )
+                validation_report["recommendations"].append(
+                    "This indicates you may be using a database from a different project. "
+                    "Check if you're in the correct directory."
+                )
+        except Exception as e:
+            validation_report["checks"]["hash_consistency"] = {
+                "passed": False,
+                "error": str(e),
+                "level": "critical"
+            }
             validation_report["valid"] = False
             validation_report["level"] = "critical"
-            validation_report["errors"].append(
-                f"DATABASE ISOLATION VIOLATION: Hash mismatch! "
-                f"Expected {calculated_hash} for {current_cwd}, got {db_hash}"
-            )
-            validation_report["recommendations"].append(
-                "This indicates you may be using a database from a different project. "
-                "Check if you're in the correct directory."
-            )
-    except Exception as e:
+    else:
+        # PostgreSQL: Schema name provides isolation, not filename hash
         validation_report["checks"]["hash_consistency"] = {
-            "passed": False,
-            "error": str(e),
-            "level": "critical"
+            "passed": True,
+            "note": "Skipped (PostgreSQL mode uses schema names for isolation)",
+            "schema": _get_db_adapter().schema,
+            "level": "informational"
         }
-        validation_report["valid"] = False
-        validation_report["level"] = "critical"
 
     # Check 3: Session Alignment
     try:
@@ -1254,51 +1272,61 @@ def validate_database_isolation(conn) -> dict:
         validation_report["valid"] = False
         validation_report["level"] = "critical"
 
-    # Check 4: Path Mapping Accuracy
-    try:
-        mapping_file = os.path.expanduser("~/.claude-dementia/path_mapping.json")
-        if os.path.exists(mapping_file):
-            with open(mapping_file, 'r') as f:
-                mappings = json.load(f)
+    # Check 4: Path Mapping Accuracy (SQLite only)
+    if not is_postgresql_mode():
+        try:
+            mapping_file = os.path.expanduser("~/.claude-dementia/path_mapping.json")
+            if os.path.exists(mapping_file):
+                with open(mapping_file, 'r') as f:
+                    mappings = json.load(f)
 
-            if db_hash in mappings:
-                mapping_entry = mappings[db_hash]
-                mapping_accurate = mapping_entry['path'] == current_cwd
+                expected_hash = hashlib.md5(current_cwd.encode()).hexdigest()[:8]
+                if expected_hash in mappings:
+                    mapping_entry = mappings[expected_hash]
+                    mapping_accurate = mapping_entry['path'] == current_cwd
 
-                validation_report["checks"]["path_mapping"] = {
-                    "passed": mapping_accurate,
-                    "expected_path": current_cwd,
-                    "mapped_path": mapping_entry['path'],
-                    "mapped_name": mapping_entry['name'],
-                    "level": "important"
-                }
+                    validation_report["checks"]["path_mapping"] = {
+                        "passed": mapping_accurate,
+                        "expected_path": current_cwd,
+                        "mapped_path": mapping_entry['path'],
+                        "mapped_name": mapping_entry['name'],
+                        "level": "important"
+                    }
 
-                if not mapping_accurate:
-                    validation_report["valid"] = False
-                    validation_report["level"] = "warning"
+                    if not mapping_accurate:
+                        validation_report["valid"] = False
+                        validation_report["level"] = "warning"
+                        validation_report["warnings"].append(
+                            f"Path mapping mismatch. Mapped to {mapping_entry['path']}, "
+                            f"current directory is {current_cwd}"
+                        )
+                else:
+                    validation_report["checks"]["path_mapping"] = {
+                        "passed": False,
+                        "error": f"No mapping entry found for hash {expected_hash}",
+                        "level": "informational"
+                    }
                     validation_report["warnings"].append(
-                        f"Path mapping mismatch. Mapped to {mapping_entry['path']}, "
-                        f"current directory is {current_cwd}"
+                        "Path mapping entry missing (will be created automatically)"
                     )
             else:
                 validation_report["checks"]["path_mapping"] = {
                     "passed": False,
-                    "error": f"No mapping entry found for hash {db_hash}",
+                    "error": "Path mapping file does not exist",
                     "level": "informational"
                 }
-                validation_report["warnings"].append(
-                    "Path mapping entry missing (will be created automatically)"
-                )
-        else:
+        except Exception as e:
             validation_report["checks"]["path_mapping"] = {
                 "passed": False,
-                "error": "Path mapping file does not exist",
+                "error": str(e),
                 "level": "informational"
             }
-    except Exception as e:
+    else:
+        # PostgreSQL: Schema name is the mapping, no separate mapping file needed
         validation_report["checks"]["path_mapping"] = {
-            "passed": False,
-            "error": str(e),
+            "passed": True,
+            "note": "Skipped (PostgreSQL mode uses schema names directly)",
+            "schema": _get_db_adapter().schema,
             "level": "informational"
         }
 
