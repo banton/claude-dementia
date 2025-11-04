@@ -503,6 +503,18 @@ class PostgreSQLAdapter:
             )
         """)
 
+        # MCP sessions table (persistent session storage for cloud deployments)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS mcp_sessions (
+                session_id TEXT PRIMARY KEY,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                last_active TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                capabilities JSONB DEFAULT '{}',
+                expires_at TIMESTAMP WITH TIME ZONE,
+                client_info JSONB DEFAULT '{}'
+            )
+        """)
+
         # Create indexes for performance
         cur.execute("CREATE INDEX IF NOT EXISTS idx_context_locks_session ON context_locks(session_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_context_locks_label ON context_locks(label)")
@@ -516,6 +528,8 @@ class PostgreSQLAdapter:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_context_archives_label ON context_archives(label, deleted_at DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_file_tags_path ON file_tags(path)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_file_tags_created ON file_tags(created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_mcp_sessions_expires ON mcp_sessions(expires_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_mcp_sessions_last_active ON mcp_sessions(last_active)")
 
         # Run migrations for existing schemas
         self._run_migrations(cur)
