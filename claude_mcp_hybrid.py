@@ -527,6 +527,15 @@ class AutoClosingPostgreSQLConnection:
         """Get cursor from connection"""
         return self.conn.cursor()
 
+    def __enter__(self):
+        """Context manager entry - return self for 'with' statement"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - guarantee connection is released"""
+        self.close()
+        return False  # Don't suppress exceptions
+
     def close(self):
         """Return connection to pool instead of closing"""
         if not self._closed:
@@ -537,6 +546,7 @@ class AutoClosingPostgreSQLConnection:
                 pass
 
     def __del__(self):
+        """Fallback cleanup if close() wasn't called"""
         self.close()
 
 # ============================================================================

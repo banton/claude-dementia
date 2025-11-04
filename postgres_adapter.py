@@ -32,6 +32,7 @@ import sys
 import hashlib
 import time
 import random
+import concurrent.futures
 import psycopg2
 from psycopg2 import pool, sql, OperationalError
 from psycopg2.extras import RealDictCursor
@@ -80,7 +81,7 @@ class PostgreSQLAdapter:
         for attempt in range(max_retries):
             try:
                 self.pool = psycopg2.pool.SimpleConnectionPool(
-                    1, 10,
+                    1, 5,  # Reduced from 10 to 5 to prevent connection pool exhaustion
                     self.database_url,
                     cursor_factory=RealDictCursor,  # Returns dict-like rows (compatible with SQLite)
                     connect_timeout=15  # Increased to 15s for Neon wakeup
@@ -199,7 +200,14 @@ class PostgreSQLAdapter:
 
         for attempt in range(max_retries):
             try:
-                conn = self.pool.getconn()
+                # Add timeout to prevent indefinite hang if pool is exhausted
+                # Use concurrent.futures for timeout support
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(self.pool.getconn)
+                    try:
+                        conn = future.result(timeout=10.0)  # 10 second timeout
+                    except concurrent.futures.TimeoutError:
+                        raise OperationalError("Connection pool timeout: no connections available after 10s. Pool may be exhausted due to connection leaks.")
 
                 # CRITICAL FIX: search_path is now set at ROLE level (see ensure_schema_exists)
                 # Only set statement_timeout per-connection (compatible with Neon transaction pooling)
