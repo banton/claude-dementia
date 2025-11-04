@@ -15,6 +15,7 @@ Production-grade features:
 import os
 import json
 import time
+import asyncio
 import traceback
 import secrets
 from datetime import datetime, timezone
@@ -95,6 +96,96 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         response.headers['X-Correlation-ID'] = correlation_id
         return response
+
+# ============================================================================
+# REQUEST LOGGING MIDDLEWARE
+# ============================================================================
+
+class MCPRequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Log MCP requests and responses for debugging 400 errors."""
+
+    async def dispatch(self, request, call_next):
+        # Only log /mcp endpoint requests
+        if request.url.path.startswith('/mcp'):
+            # Read request body for logging
+            body_bytes = await request.body()
+
+            # Log the request
+            logger.info("mcp_request_received",
+                       method=request.method,
+                       path=request.url.path,
+                       content_type=request.headers.get('content-type'),
+                       content_length=len(body_bytes),
+                       has_auth=bool(request.headers.get('authorization')),
+                       correlation_id=getattr(request.state, 'correlation_id', 'unknown'),
+                       body_preview=body_bytes[:1000].decode('utf-8', errors='replace'))
+
+            # Create a new receive callable that returns the body we just read
+            async def receive():
+                return {'type': 'http.request', 'body': body_bytes}
+
+            # Create new request with the body
+            from starlette.requests import Request as StarletteRequest
+            request = StarletteRequest(scope=request.scope, receive=receive)
+
+            # Copy over the correlation_id state
+            correlation_id = request.headers.get('X-Correlation-ID', f'req-{int(time.time() * 1000)}')
+            request.state.correlation_id = correlation_id
+
+        # Process the request
+        start_time = time.time()
+        response = await call_next(request)
+        elapsed_ms = (time.time() - start_time) * 1000
+
+        # Log the response for /mcp endpoint
+        if request.url.path.startswith('/mcp'):
+            logger.info("mcp_response_sent",
+                       status_code=response.status_code,
+                       elapsed_ms=round(elapsed_ms, 2),
+                       correlation_id=getattr(request.state, 'correlation_id', 'unknown'))
+
+        return response
+
+# ============================================================================
+# TIMEOUT MIDDLEWARE
+# ============================================================================
+
+class TimeoutMiddleware(BaseHTTPMiddleware):
+    """Add timeout to requests to prevent hanging."""
+
+    async def dispatch(self, request, call_next):
+        start_time = time.time()
+        try:
+            # 45 second timeout (longer than client's 30s timeout)
+            response = await asyncio.wait_for(
+                call_next(request),
+                timeout=45.0
+            )
+
+            elapsed = time.time() - start_time
+
+            # Warn on slow requests
+            if elapsed > 20:
+                logger.warning("slow_request",
+                              path=request.url.path,
+                              elapsed_seconds=round(elapsed, 2),
+                              correlation_id=getattr(request.state, 'correlation_id', 'unknown'))
+
+            return response
+
+        except asyncio.TimeoutError:
+            elapsed = time.time() - start_time
+            logger.error("request_timeout",
+                        path=request.url.path,
+                        elapsed_seconds=round(elapsed, 2),
+                        correlation_id=getattr(request.state, 'correlation_id', 'unknown'))
+            return JSONResponse(
+                status_code=504,
+                content={
+                    "error": "Request timeout",
+                    "detail": f"Request exceeded 45 second timeout (elapsed: {round(elapsed, 2)}s)"
+                }
+            )
 
 # ============================================================================
 # CUSTOM ROUTES
@@ -260,9 +351,12 @@ app.routes.insert(1, Route('/tools', list_tools_endpoint, methods=['GET']))
 app.routes.insert(2, Route('/execute', execute_tool_endpoint, methods=['POST']))
 app.routes.insert(3, Route('/metrics', metrics_endpoint, methods=['GET']))
 
-# Add middleware (order matters: correlation ID first, then auth)
-app.add_middleware(BearerAuthMiddleware)
-app.add_middleware(CorrelationIdMiddleware)
+# Add middleware (order matters - last added runs first in Starlette)
+# Execution order: Timeout -> RequestLogging -> Auth -> CorrelationID -> Handler
+app.add_middleware(CorrelationIdMiddleware)      # Innermost - adds correlation ID
+app.add_middleware(BearerAuthMiddleware)         # Auth check
+app.add_middleware(MCPRequestLoggingMiddleware)  # Log /mcp requests/responses
+app.add_middleware(TimeoutMiddleware)            # Outermost - catch timeouts
 
 logger.info("app_initialized",
             version=VERSION,
