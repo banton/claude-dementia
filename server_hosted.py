@@ -102,35 +102,19 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
 # ============================================================================
 
 class MCPRequestLoggingMiddleware(BaseHTTPMiddleware):
-    """Log MCP requests and responses for debugging 400 errors."""
+    """Log MCP requests and responses for debugging - header-only to avoid breaking StreamableHTTP."""
 
     async def dispatch(self, request, call_next):
         # Only log /mcp endpoint requests
         if request.url.path.startswith('/mcp'):
-            # Read request body for logging
-            body_bytes = await request.body()
-
-            # Log the request
+            # Log request headers only (don't consume body - breaks StreamableHTTP)
             logger.info("mcp_request_received",
                        method=request.method,
                        path=request.url.path,
                        content_type=request.headers.get('content-type'),
-                       content_length=len(body_bytes),
+                       content_length=request.headers.get('content-length', 'unknown'),
                        has_auth=bool(request.headers.get('authorization')),
-                       correlation_id=getattr(request.state, 'correlation_id', 'unknown'),
-                       body_preview=body_bytes[:1000].decode('utf-8', errors='replace'))
-
-            # Create a new receive callable that returns the body we just read
-            async def receive():
-                return {'type': 'http.request', 'body': body_bytes}
-
-            # Create new request with the body
-            from starlette.requests import Request as StarletteRequest
-            request = StarletteRequest(scope=request.scope, receive=receive)
-
-            # Copy over the correlation_id state
-            correlation_id = request.headers.get('X-Correlation-ID', f'req-{int(time.time() * 1000)}')
-            request.state.correlation_id = correlation_id
+                       correlation_id=getattr(request.state, 'correlation_id', 'unknown'))
 
         # Process the request
         start_time = time.time()
