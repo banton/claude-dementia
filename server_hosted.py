@@ -26,12 +26,15 @@ from starlette.routing import Route
 from starlette.responses import JSONResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from contextlib import asynccontextmanager
 
 # Import existing MCP server
 from claude_mcp_hybrid import mcp
 
 # Import session persistence
 from mcp_session_middleware import MCPSessionPersistenceMiddleware
+from mcp_session_cleanup import start_cleanup_scheduler
+from mcp_session_store import PostgreSQLSessionStore
 
 # Import production infrastructure
 from src.logging_config import configure_logging, get_logger
@@ -346,6 +349,7 @@ except Exception as e:
     # Don't crash the server, let it handle cold starts per-request
     pass
 
+
 # Add custom routes FIRST (before auth middleware, so routing happens before auth check)
 app.routes.insert(0, Route('/health', health_check, methods=['GET']))
 app.routes.insert(1, Route('/tools', list_tools_endpoint, methods=['GET']))
@@ -381,9 +385,42 @@ if __name__ == "__main__":
                 version=VERSION,
                 environment=ENVIRONMENT)
 
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=port,
-        log_config=None  # Disable uvicorn's default logging, use structlog
-    )
+    # Start background cleanup task before starting uvicorn
+    async def run_server():
+        """Run server with background cleanup task."""
+        cleanup_task = None
+
+        try:
+            # Start cleanup task if database is available
+            if adapter is not None:
+                try:
+                    session_store = PostgreSQLSessionStore(adapter.pool)
+                    cleanup_task = asyncio.create_task(
+                        start_cleanup_scheduler(session_store, interval_seconds=3600)
+                    )
+                    logger.info("session_cleanup_task_started", interval_seconds=3600)
+                except Exception as e:
+                    logger.error(f"session_cleanup_task_failed: {e}")
+
+            # Run uvicorn server
+            config = uvicorn.Config(
+                app,
+                host="0.0.0.0",
+                port=port,
+                log_config=None
+            )
+            server = uvicorn.Server(config)
+            await server.serve()
+
+        finally:
+            # Shutdown: Cancel cleanup task
+            if cleanup_task is not None:
+                try:
+                    cleanup_task.cancel()
+                    await cleanup_task
+                except asyncio.CancelledError:
+                    logger.info("session_cleanup_task_stopped")
+                except Exception as e:
+                    logger.error(f"session_cleanup_task_shutdown_error: {e}")
+
+    asyncio.run(run_server())
