@@ -94,6 +94,7 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                 # Extract new session ID from response
                 # (FastMCP returns it in response headers or body)
                 new_session_id = response.headers.get('Mcp-Session-Id')
+                logger.debug(f"FastMCP header Mcp-Session-Id length: {len(new_session_id) if new_session_id else 0}, value: {new_session_id}")
 
                 if new_session_id:
                     try:
@@ -101,7 +102,7 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                             session_id=new_session_id,
                             client_info={'user_agent': request.headers.get('user-agent', 'unknown')}
                         )
-                        logger.info(f"MCP session created: {new_session_id[:8]}, stored_id: {result['session_id'][:8]}")
+                        logger.info(f"MCP session created: {new_session_id[:8]} (len={len(new_session_id)}), stored_id: {result['session_id'][:8]} (len={len(result['session_id'])})")
                     except Exception as e:
                         logger.error(f"MCP session create failed: {new_session_id[:8]}, error: {e}", exc_info=True)
 
