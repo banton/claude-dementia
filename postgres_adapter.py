@@ -71,8 +71,10 @@ class PostgreSQLAdapter:
         # Determine schema name
         self.schema = schema or self._get_schema_name()
 
-        # Initialize connection pool with retry logic for Neon cold starts
-        # Neon databases can be suspended after inactivity and take 10-30s to wake up
+        # CRITICAL FIX: No app-side pooling when using Neon pooler endpoint
+        # Neon's pooler handles connection pooling - app should create/destroy connections
+        # Using pool with 1-1 effectively disables pooling while keeping same API
+        # (In stateless cloud, each request creates new adapter anyway)
         max_retries = 5
         initial_delay = 2.0
         delay = initial_delay
@@ -81,7 +83,7 @@ class PostgreSQLAdapter:
         for attempt in range(max_retries):
             try:
                 self.pool = psycopg2.pool.SimpleConnectionPool(
-                    1, 5,  # Reduced from 10 to 5 to prevent connection pool exhaustion
+                    1, 3,  # Allow 3 concurrent connections (request + lazy checks + finalization)
                     self.database_url,
                     cursor_factory=RealDictCursor,  # Returns dict-like rows (compatible with SQLite)
                     connect_timeout=15  # Increased to 15s for Neon wakeup
@@ -652,6 +654,54 @@ class PostgreSQLAdapter:
         except Exception as e:
             pass
 
+        # Migration 8: Add project_name to mcp_sessions if missing
+        try:
+            cur.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                AND table_name = 'mcp_sessions'
+                AND column_name = 'project_name'
+            """)
+            if not cur.fetchone():
+                print("⚠️  Migrating mcp_sessions: adding project_name column", file=sys.stderr)
+                cur.execute("ALTER TABLE mcp_sessions ADD COLUMN project_name TEXT DEFAULT 'default'")
+        except Exception as e:
+            pass
+
+        # Migration 9: Add session_summary to mcp_sessions if missing
+        try:
+            cur.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                AND table_name = 'mcp_sessions'
+                AND column_name = 'session_summary'
+            """)
+            if not cur.fetchone():
+                print("⚠️  Migrating mcp_sessions: adding session_summary column", file=sys.stderr)
+                cur.execute("""
+                    ALTER TABLE mcp_sessions
+                    ADD COLUMN session_summary JSONB DEFAULT '{"work_done": [], "tools_used": [], "next_steps": [], "important_context": {}}'
+                """)
+        except Exception as e:
+            pass
+
+        # Migration 10: Add index for project_name and last_active on mcp_sessions
+        try:
+            cur.execute("""
+                SELECT indexname
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                AND tablename = 'mcp_sessions'
+                AND indexname = 'idx_sessions_project_active'
+            """)
+            if not cur.fetchone():
+                print("⚠️  Migrating mcp_sessions: adding project+activity index", file=sys.stderr)
+                cur.execute("CREATE INDEX idx_sessions_project_active ON mcp_sessions(project_name, last_active DESC)")
+        except Exception as e:
+            pass
+
     def get_info(self) -> dict:
         """Get information about current database and schema."""
         conn = self.get_connection()
@@ -686,7 +736,8 @@ class PostgreSQLAdapter:
                     "table_count": table_count,
                     "connection_pool": {
                         "min": 1,
-                        "max": 10
+                        "max": 1,
+                        "note": "App-side pooling disabled - Neon pooler handles it"
                     }
                 }
         finally:

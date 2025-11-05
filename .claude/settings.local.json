@@ -45,7 +45,13 @@
       "Bash(timeout 30 bash:*)",
       "Bash(bash -c 'for i in {1..20}; do sleep 5; STATUS=$(doctl apps list-deployments d1fcd0b9-706f-4b56-8813-73edc952a172 --format ID,Phase,Progress --no-header | head -1); echo \"\"[$i] $STATUS\"\"; if echo \"\"$STATUS\"\" | grep -qE \"\"ACTIVE|ERROR|CANCELED\"\"; then echo \"\"Deployment finished!\"\"; break; fi; done')",
       "Bash(bash:*)",
-      "Bash(/tmp/test_cloud.sh:*)"
+      "Bash(/tmp/test_cloud.sh:*)",
+      "mcp__linear-server__list_issues",
+      "mcp__dementia-cloud__wake_up",
+      "mcp__dementia-cloud__explore_context_tree",
+      "mcp__dementia-cloud__get_last_handover",
+      "mcp__dementia-cloud__switch_project",
+      "mcp__dementia-cloud__create_project"
     ],
     "deny": [],
     "ask": [],

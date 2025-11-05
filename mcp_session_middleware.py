@@ -108,51 +108,85 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
 
             return response
 
-        # Existing session - validate and update activity
+        # Existing session - validate and check for inactivity
         try:
             # Check if session exists in PostgreSQL
             pg_session = self.session_store.get_session(session_id)
 
             if pg_session is None:
-                # Session not found in PostgreSQL
-                # This happens after deployment when FastMCP lost in-memory sessions
-                logger.warning(f"MCP session not found in database: {session_id[:8]}")
-
-                # Try to recreate session in PostgreSQL
-                # (FastMCP might still accept it if client sends initialize)
-                try:
-                    result = self.session_store.create_session(session_id=session_id)
-                    logger.info(f"MCP session recreated: {session_id[:8]}, stored_id: {result['session_id'][:8]}")
-                except Exception as e:
-                    logger.error(f"MCP session recreate failed: {session_id[:8]}, error: {e}", exc_info=True)
-
-            elif self.session_store.is_expired(session_id):
-                # Session expired
-                logger.warning(f"MCP session expired: {session_id[:8]}, expires_at: {pg_session['expires_at']}")
+                # Session not found - return 401 to force re-initialization
+                logger.warning(f"MCP session not found: {session_id[:8]}")
 
                 return JSONResponse(
-                    status_code=400,
+                    status_code=401,
                     content={
                         "jsonrpc": "2.0",
                         "error": {
                             "code": -32600,
-                            "message": "Session expired",
+                            "message": "Session not found",
                             "data": {
-                                "detail": "Your session has expired. Please restart your MCP client to reinitialize the connection.",
-                                "expires_at": pg_session['expires_at'].isoformat()
+                                "detail": "Session not found. Please restart your MCP client to create a new session.",
+                                "code": "SESSION_NOT_FOUND"
                             }
                         },
                         "id": body.get('id')
                     }
                 )
 
-            else:
-                # Valid session - update activity timestamp
-                self.session_store.update_activity(session_id)
-                logger.debug(f"MCP session activity updated: {session_id[:8]}")
+            # Check for inactivity (120 minutes = 7200 seconds)
+            now = datetime.now(timezone.utc)
+            last_active = pg_session['last_active']
+
+            # Make timezone-aware if needed
+            if last_active.tzinfo is None:
+                last_active = last_active.replace(tzinfo=timezone.utc)
+
+            inactive_seconds = (now - last_active).total_seconds()
+
+            if inactive_seconds > 7200:  # 120 minutes
+                # Session inactive - finalize handover and delete
+                project_name = pg_session.get('project_name', 'default')
+
+                logger.info(f"MCP session inactive ({inactive_seconds/60:.1f} min): {session_id[:8]}, finalizing handover for project: {project_name}")
+
+                # Finalize handover from session_summary
+                try:
+                    self.session_store.finalize_handover(session_id, project_name)
+                    logger.info(f"MCP handover finalized: {session_id[:8]}, project: {project_name}")
+                except Exception as e:
+                    logger.error(f"MCP handover finalization failed: {session_id[:8]}, error: {e}")
+
+                # Delete session
+                try:
+                    self.session_store.delete_session(session_id)
+                    logger.info(f"MCP session deleted: {session_id[:8]}")
+                except Exception as e:
+                    logger.error(f"MCP session deletion failed: {session_id[:8]}, error: {e}")
+
+                # Return 401 to force new session
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "jsonrpc": "2.0",
+                        "error": {
+                            "code": -32600,
+                            "message": "Session inactive",
+                            "data": {
+                                "detail": f"Session was inactive for {inactive_seconds/60:.0f} minutes. A handover was created. Please restart to begin a new session.",
+                                "code": "SESSION_EXPIRED",
+                                "inactive_minutes": int(inactive_seconds / 60)
+                            }
+                        },
+                        "id": body.get('id')
+                    }
+                )
+
+            # Valid session - update activity timestamp
+            self.session_store.update_activity(session_id)
+            logger.debug(f"MCP session activity updated: {session_id[:8]}")
 
         except Exception as e:
-            logger.error(f"MCP session validation error: {session_id[:8]}, error: {e}")
+            logger.error(f"MCP session validation error: {session_id[:8]}, error: {e}", exc_info=True)
             # Don't block request on validation errors
             pass
 

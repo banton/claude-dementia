@@ -57,8 +57,10 @@ from src.config import config
 from postgres_adapter import PostgreSQLAdapter
 
 # Global: Default adapter (lazy initialization for cloud deployment)
+# WARNING: In stateless cloud (serverless/containers), these globals reset per request!
+# Solution: postgres_adapter.py uses 1-1 pooling (no app-side pooling) + Neon pooler
 _postgres_adapter = None
-_adapter_cache = {}  # Cache adapters by schema name to prevent connection pool exhaustion
+_adapter_cache = {}  # Cache adapters by schema name (works in local, resets in cloud)
 
 def _get_db_adapter():
     """Lazy initialization of database adapter to avoid import-time connection failures."""
