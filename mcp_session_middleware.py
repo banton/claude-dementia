@@ -100,6 +100,7 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                     try:
                         result = self.session_store.create_session(
                             session_id=new_session_id,
+                            project_name='__PENDING__',  # Sentinel - user must select project
                             client_info={'user_agent': request.headers.get('user-agent', 'unknown')}
                         )
                         logger.info(f"MCP session created: {new_session_id[:8]} (len={len(new_session_id)}), stored_id: {result['session_id'][:8]} (len={len(result['session_id'])})")
@@ -127,6 +128,73 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                             "data": {
                                 "detail": "Session not found. Please restart your MCP client to create a new session.",
                                 "code": "SESSION_NOT_FOUND"
+                            }
+                        },
+                        "id": body.get('id')
+                    }
+                )
+
+            # Check if project selection is pending
+            if pg_session.get('project_name') == '__PENDING__':
+                # Check if this is the select_project_for_session tool call
+                tool_name = body.get('params', {}).get('name', '')
+
+                if method == 'tools/call' and tool_name == 'select_project_for_session':
+                    # Allow select_project_for_session through
+                    logger.debug(f"Allowing select_project_for_session for session: {session_id[:8]}")
+
+                    # Set session context for tool to access
+                    try:
+                        from claude_mcp_hybrid import config
+                        config._current_session_id = session_id
+                    except Exception as e:
+                        logger.warning(f"Failed to set session context: {e}")
+
+                    return await call_next(request)
+
+                # Any other tool - require project selection first
+                logger.info(f"Project selection required for session: {session_id[:8]}")
+
+                # Get available projects
+                try:
+                    projects = self.session_store.get_projects_with_stats()
+
+                    # Format project info for display
+                    project_list = []
+                    for p in projects:
+                        last_used = p.get('last_used', 'never')
+                        locks = p.get('context_locks', 0)
+                        project_list.append({
+                            "name": p['project_name'],
+                            "context_locks": locks,
+                            "last_used": last_used,
+                            "description": f"{p['project_name']} ({locks} locks, {last_used})"
+                        })
+
+                    # Always include 'default' option if not present
+                    if not any(p['name'] == 'default' for p in project_list):
+                        project_list.append({
+                            "name": "default",
+                            "context_locks": 0,
+                            "last_used": "never",
+                            "description": "default (new session)"
+                        })
+
+                except Exception as e:
+                    logger.error(f"Failed to get project list: {e}")
+                    project_list = [{"name": "default", "description": "default (new session)"}]
+
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "jsonrpc": "2.0",
+                        "error": {
+                            "code": "PROJECT_SELECTION_REQUIRED",
+                            "message": "Please select a project before using tools",
+                            "data": {
+                                "projects": project_list,
+                                "instructions": "Call select_project_for_session('project_name') to continue",
+                                "tool_name": "select_project_for_session"
                             }
                         },
                         "id": body.get('id')
@@ -184,6 +252,14 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
             # Valid session - update activity timestamp
             self.session_store.update_activity(session_id)
             logger.debug(f"MCP session activity updated: {session_id[:8]}")
+
+            # Set session context for tools to access
+            try:
+                from claude_mcp_hybrid import config
+                config._current_session_id = session_id
+                logger.debug(f"Session context set for tools: {session_id[:8]}")
+            except Exception as e:
+                logger.warning(f"Failed to set session context: {e}")
 
         except Exception as e:
             logger.error(f"MCP session validation error: {session_id[:8]}, error: {e}", exc_info=True)
