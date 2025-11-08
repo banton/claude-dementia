@@ -180,22 +180,65 @@ class PostgreSQLAdapter:
         # Limit length
         return safe[:32]
 
+    def _validate_connection(self, conn):
+        """
+        Validate that connection is alive and ready to use.
+
+        Neon may close idle connections when autosuspending (after 5 min inactivity).
+        This prevents "SSL connection closed unexpectedly" errors.
+
+        Args:
+            conn: psycopg2 connection from pool
+
+        Returns:
+            bool: True if connection is valid, False if stale/closed
+
+        Raises:
+            Exception: Re-raises non-connection errors (e.g., permission errors)
+        """
+        try:
+            # Quick ping to check if connection is alive
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+            return True
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+            # Connection is stale/closed (Neon autosuspend or network issue)
+            error_msg = str(e).lower()
+            is_stale = any(keyword in error_msg for keyword in [
+                'ssl', 'closed', 'terminated', 'broken', 'connection reset',
+                'server closed the connection', 'connection lost'
+            ])
+
+            if is_stale:
+                print(f"⚠️  Stale connection detected: {e}", file=sys.stderr)
+                return False
+            else:
+                # Not a stale connection error - re-raise
+                raise
+
     def get_connection(self, max_retries=5, initial_delay=2.0):
         """
-        Get a connection from the pool with schema isolation applied.
+        Get a validated connection from the pool with schema isolation applied.
 
-        Implements retry logic for Neon database cold starts (compute autoscaling).
-        Neon databases "sleep" after inactivity and need 2-5s to wake up.
+        Implements:
+        1. Connection validation to detect stale connections (Neon autosuspend)
+        2. Automatic refresh of stale connections (transparent to caller)
+        3. Retry logic for Neon database cold starts (compute autoscaling)
+
+        Neon databases "sleep" after 5 min inactivity and close pooled connections.
+        This method validates connections before returning them, ensuring no
+        "SSL connection closed unexpectedly" errors reach the caller.
 
         Args:
             max_retries: Maximum connection attempts (default: 5)
             initial_delay: Initial retry delay in seconds (default: 2.0, doubles each retry)
 
         Returns:
-            psycopg2.connection: Database connection with search_path set to schema
+            psycopg2.connection: Validated database connection with search_path set to schema
 
         Raises:
-            OperationalError: If all retry attempts fail
+            OperationalError: If all retry attempts fail or all pooled connections are stale
         """
         last_error = None
         delay = initial_delay
@@ -210,6 +253,28 @@ class PostgreSQLAdapter:
                         conn = future.result(timeout=10.0)  # 10 second timeout
                     except concurrent.futures.TimeoutError:
                         raise OperationalError("Connection pool timeout: no connections available after 10s. Pool may be exhausted due to connection leaks.")
+
+                # VALIDATION LOOP: Check if connection is alive (handles Neon autosuspend)
+                # Try up to 2 times to get a fresh connection if stale
+                MAX_VALIDATION_ATTEMPTS = 2
+                for validation_attempt in range(MAX_VALIDATION_ATTEMPTS):
+                    if self._validate_connection(conn):
+                        # ✅ Connection is alive, continue to setup
+                        break
+                    else:
+                        # ❌ Connection is stale (Neon autosuspended), get fresh one
+                        if validation_attempt < MAX_VALIDATION_ATTEMPTS - 1:
+                            print(f"🔄 Refreshing stale connection (validation attempt {validation_attempt + 2}/{MAX_VALIDATION_ATTEMPTS})",
+                                  file=sys.stderr)
+                            try:
+                                conn.close()
+                            except:
+                                pass
+                            # Get new connection from pool
+                            conn = self.pool.getconn()
+                        else:
+                            # All validation attempts failed
+                            raise OperationalError("Failed to get valid connection: all pooled connections are stale")
 
                 # CRITICAL FIX: search_path is now set at ROLE level (see ensure_schema_exists)
                 # Only set statement_timeout per-connection (compatible with Neon transaction pooling)
