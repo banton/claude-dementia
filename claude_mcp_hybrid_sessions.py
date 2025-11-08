@@ -175,6 +175,54 @@ def _update_session_activity():
 # Session-level active project tracking (per conversation)
 _active_projects = {}  # {session_id: project_name}
 
+def _check_project_selection_required(project: Optional[str] = None) -> Optional[str]:
+    """
+    Check if project selection is required before tool execution.
+
+    For session-aware fork: Checks if session has project_name='__PENDING__'.
+    If yes, returns error response with available projects.
+    If no, returns None (tool can continue).
+
+    Args:
+        project: Explicit project parameter (if provided, check is skipped)
+
+    Returns:
+        JSON error string if project selection required, None otherwise
+    """
+    global _session_store, _local_session_id
+
+    # If explicit project parameter provided, no check needed
+    if project:
+        return None
+
+    # Check if session exists and has __PENDING__ project
+    if not _session_store or not _local_session_id:
+        return None  # No session management active
+
+    try:
+        session = _session_store.get_session(_local_session_id)
+
+        if session and session.get('project_name') == '__PENDING__':
+            # Get available projects
+            projects = _session_store.get_projects_with_stats()
+
+            # Filter out __PENDING__ from list
+            project_names = [p['project_name'] for p in projects if p['project_name'] != '__PENDING__']
+
+            return json.dumps({
+                "error": "PROJECT_SELECTION_REQUIRED",
+                "message": "⚠️  Please select a project before using this tool",
+                "available_projects": project_names if project_names else ["(no projects yet - create one with create_project)"],
+                "project_stats": [p for p in projects if p['project_name'] != '__PENDING__'],
+                "instruction": "📌 Call select_project_for_session('project_name') to select a project"
+            }, indent=2)
+    except Exception as e:
+        # If checking fails, allow tool to continue (don't block on error)
+        print(f"⚠️  Warning: Could not check project selection: {e}", file=sys.stderr)
+        return None
+
+    return None  # Project selected, continue normally
+
 def _get_project_for_context(project: str = None) -> str:
     """
     Determine which project to use for this operation.
@@ -3044,6 +3092,11 @@ async def wake_up(project: Optional[str] = None) -> str:
     - Use get_last_handover() for full handover
     - Use explore_context_tree() for context list
     """
+    # Check if project selection is required
+    project_check = _check_project_selection_required(project)
+    if project_check:
+        return project_check
+
     update_session_activity()
 
     # Use project-aware database connection
@@ -3297,6 +3350,11 @@ async def sleep(project: Optional[str] = None) -> str:
     Args:
         project: Project name (default: auto-detect or active project)
     """
+    # Check if project selection is required
+    project_check = _check_project_selection_required(project)
+    if project_check:
+        return project_check
+
     conn = _get_db_for_project(project)
     session_id = get_current_session_id()
     
@@ -3581,6 +3639,11 @@ async def get_last_handover(project: Optional[str] = None) -> str:
     # Returns: {work_done, next_steps, important_context, ...}
     ```
     """
+    # Check if project selection is required
+    project_check = _check_project_selection_required(project)
+    if project_check:
+        return project_check
+
     conn = _get_db_for_project(project)
 
     cursor = conn.execute("""
@@ -3826,6 +3889,11 @@ async def lock_context(
 
     Returns: Confirmation with version number and priority indicator
     """
+    # Check if project selection is required
+    project_check = _check_project_selection_required(project)
+    if project_check:
+        return project_check
+
     # Use project-aware database connection
     target_project = _get_project_for_context(project)
     conn = _get_db_for_project(project)
@@ -4069,6 +4137,11 @@ async def recall_context(
 
     Returns: Context content (preview or full) with metadata, or error if not found
     """
+    # Check if project selection is required
+    project_check = _check_project_selection_required(project)
+    if project_check:
+        return project_check
+
     # Use project-aware database connection
     target_project = _get_project_for_context(project)
     conn = _get_db_for_project(project)
@@ -4206,6 +4279,11 @@ async def unlock_context(
 
     Returns: Confirmation with count of deleted contexts
     """
+    # Check if project selection is required
+    project_check = _check_project_selection_required(project)
+    if project_check:
+        return project_check
+
     update_session_activity()
     conn = _get_db_for_project(project)
     session_id = _get_session_id_for_project(conn, project)
@@ -4488,6 +4566,11 @@ async def batch_lock_contexts(contexts: list[dict], project: Optional[str] = Non
     - Atomic operation - all succeed or all fail rolled back
     - Returns detailed status for each context
     """
+    # Check if project selection is required
+    project_check = _check_project_selection_required(project)
+    if project_check:
+        return project_check
+
     if not isinstance(contexts, list):
         return "❌ Input must be an array of context objects"
 
@@ -4612,6 +4695,11 @@ async def batch_recall_contexts(topics: list[str], preview_only: bool = True, pr
 
     Returns: JSON with summary and results for each topic
     """
+    # Check if project selection is required
+    project_check = _check_project_selection_required(project)
+    if project_check:
+        return project_check
+
     if not isinstance(topics, list):
         return "❌ Input must be an array of topic names"
 
@@ -4730,6 +4818,11 @@ async def search_contexts(
     - Discover relevant contexts for current work
     - Filter contexts by priority/tags
     """
+    # Check if project selection is required
+    project_check = _check_project_selection_required(project)
+    if project_check:
+        return project_check
+
     conn = _get_db_for_project(project)
     session_id = _get_session_id_for_project(conn, project)
 
@@ -6357,6 +6450,11 @@ async def check_contexts(text: str, project: Optional[str] = None) -> str:
 
     Returns: List of relevant contexts, rule violations, and suggestions
     """
+    # Check if project selection is required
+    project_check = _check_project_selection_required(project)
+    if project_check:
+        return project_check
+
     session_id = get_current_session_id()
 
     # Use project-aware database connection
@@ -6508,6 +6606,11 @@ async def explore_context_tree(flat: bool = True, confirm_full: bool = False, pr
 
     Returns: Tree structure of all contexts with previews (or simple list if flat=True)
     """
+    # Check if project selection is required
+    project_check = _check_project_selection_required(project)
+    if project_check:
+        return project_check
+
     conn = _get_db_for_project(project)
     session_id = _get_session_id_for_project(conn, project)
 
@@ -6847,6 +6950,11 @@ async def scan_project_files(
     - mcp__filesystem__read_file() for file contents
     - Then use our semantic analysis tools on the results
     """
+    # Check if project selection is required
+    project_check = _check_project_selection_required(project)
+    if project_check:
+        return project_check
+
     # Check if we have filesystem access
     project_root = os.getcwd()
 
@@ -7092,6 +7200,11 @@ async def query_files(
     Works in all environments. Run scan_project_files() first to build the model
     (local dev only) or populate database manually.
     """
+    # Check if project selection is required
+    project_check = _check_project_selection_required(project)
+    if project_check:
+        return project_check
+
     conn = _get_db_for_project(project)
     session_id = get_current_session_id()
 
