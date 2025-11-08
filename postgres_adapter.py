@@ -665,9 +665,10 @@ class PostgreSQLAdapter:
             """)
             if not cur.fetchone():
                 print("⚠️  Migrating mcp_sessions: adding project_name column", file=sys.stderr)
-                cur.execute("ALTER TABLE mcp_sessions ADD COLUMN project_name TEXT DEFAULT 'default'")
+                cur.execute("ALTER TABLE mcp_sessions ADD COLUMN project_name TEXT DEFAULT '__PENDING__'")
+                print("✅ Added project_name column to mcp_sessions", file=sys.stderr)
         except Exception as e:
-            pass
+            print(f"❌ Migration 8 failed: {e}", file=sys.stderr)
 
         # Migration 9: Add session_summary to mcp_sessions if missing
         try:
@@ -684,8 +685,9 @@ class PostgreSQLAdapter:
                     ALTER TABLE mcp_sessions
                     ADD COLUMN session_summary JSONB DEFAULT '{"work_done": [], "tools_used": [], "next_steps": [], "important_context": {}}'
                 """)
+                print("✅ Added session_summary column to mcp_sessions", file=sys.stderr)
         except Exception as e:
-            pass
+            print(f"❌ Migration 9 failed: {e}", file=sys.stderr)
 
         # Migration 10: Add index for project_name and last_active on mcp_sessions
         try:
@@ -699,8 +701,23 @@ class PostgreSQLAdapter:
             if not cur.fetchone():
                 print("⚠️  Migrating mcp_sessions: adding project+activity index", file=sys.stderr)
                 cur.execute("CREATE INDEX idx_sessions_project_active ON mcp_sessions(project_name, last_active DESC)")
+                print("✅ Added idx_sessions_project_active index", file=sys.stderr)
         except Exception as e:
-            pass
+            print(f"❌ Migration 10 failed: {e}", file=sys.stderr)
+
+        # Migration 11: Update existing rows with project_name='default' to '__PENDING__'
+        try:
+            cur.execute("""
+                UPDATE mcp_sessions
+                SET project_name = '__PENDING__'
+                WHERE project_name = 'default'
+            """)
+            updated_count = cur.rowcount
+            if updated_count > 0:
+                print(f"⚠️  Migration 11: Updated {updated_count} sessions from 'default' to '__PENDING__'", file=sys.stderr)
+            print("✅ Migration 11 complete: Existing sessions updated", file=sys.stderr)
+        except Exception as e:
+            print(f"❌ Migration 11 failed: {e}", file=sys.stderr)
 
     def get_info(self) -> dict:
         """Get information about current database and schema."""
