@@ -288,6 +288,67 @@ def _get_project_for_context(project: str = None) -> str:
     # Priority 4: Default project
     return "default"
 
+
+class AutoClosingPostgreSQLConnection:
+    """Wrapper for PostgreSQL connections that returns them to pool"""
+    def __init__(self, conn, adapter):
+        self.conn = conn
+        self.adapter = adapter
+        self._closed = False
+
+    def __getattr__(self, name):
+        return getattr(self.conn, name)
+
+    def _convert_sql_placeholders(self, sql):
+        """Convert SQLite placeholders (?) to PostgreSQL placeholders (%s)"""
+        return sql.replace('?', '%s')
+
+    def execute(self, sql, parameters=None):
+        """Execute SQL with cursor (SQLite compatibility)"""
+        # Convert SQLite placeholders to PostgreSQL
+        sql = self._convert_sql_placeholders(sql)
+
+        try:
+            cur = self.conn.cursor()
+            if parameters:
+                cur.execute(sql, parameters)
+            else:
+                cur.execute(sql)
+            return cur
+        except Exception as e:
+            # PostgreSQL requires rollback on error
+            print(f"⚠️  SQL Error: {e}", file=sys.stderr)
+            print(f"   SQL: {sql[:200]}...", file=sys.stderr)
+            self.conn.rollback()
+            raise
+
+    def cursor(self):
+        """Get cursor from connection"""
+        return self.conn.cursor()
+
+    def __enter__(self):
+        """Context manager entry - return self for 'with' statement"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - guarantee connection is released"""
+        self.close()
+        return False  # Don't suppress exceptions
+
+    def close(self):
+        """Return connection to pool instead of closing"""
+        if not self._closed:
+            try:
+                self.adapter.release_connection(self.conn)
+                self._closed = True
+            except:
+                pass
+
+    def __del__(self):
+        """Fallback cleanup if close() wasn't called"""
+        self.close()
+
+
 def _get_table_list(conn, like_pattern: str = '%'):
     """
     Get list of tables from database (works with SQLite and PostgreSQL).
@@ -433,65 +494,6 @@ def get_db_location_type() -> str:
 # ============================================================================
 # POSTGRESQL: Connection wrapper for connection pooling
 # ============================================================================
-
-class AutoClosingPostgreSQLConnection:
-    """Wrapper for PostgreSQL connections that returns them to pool"""
-    def __init__(self, conn, adapter):
-        self.conn = conn
-        self.adapter = adapter
-        self._closed = False
-
-    def __getattr__(self, name):
-        return getattr(self.conn, name)
-
-    def _convert_sql_placeholders(self, sql):
-        """Convert SQLite placeholders (?) to PostgreSQL placeholders (%s)"""
-        return sql.replace('?', '%s')
-
-    def execute(self, sql, parameters=None):
-        """Execute SQL with cursor (SQLite compatibility)"""
-        # Convert SQLite placeholders to PostgreSQL
-        sql = self._convert_sql_placeholders(sql)
-
-        try:
-            cur = self.conn.cursor()
-            if parameters:
-                cur.execute(sql, parameters)
-            else:
-                cur.execute(sql)
-            return cur
-        except Exception as e:
-            # PostgreSQL requires rollback on error
-            print(f"⚠️  SQL Error: {e}", file=sys.stderr)
-            print(f"   SQL: {sql[:200]}...", file=sys.stderr)
-            self.conn.rollback()
-            raise
-
-    def cursor(self):
-        """Get cursor from connection"""
-        return self.conn.cursor()
-
-    def __enter__(self):
-        """Context manager entry - return self for 'with' statement"""
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit - guarantee connection is released"""
-        self.close()
-        return False  # Don't suppress exceptions
-
-    def close(self):
-        """Return connection to pool instead of closing"""
-        if not self._closed:
-            try:
-                self.adapter.release_connection(self.conn)
-                self._closed = True
-            except:
-                pass
-
-    def __del__(self):
-        """Fallback cleanup if close() wasn't called"""
-        self.close()
 
 # ============================================================================
 # POSTGRESQL-ONLY DATABASE FUNCTIONS
