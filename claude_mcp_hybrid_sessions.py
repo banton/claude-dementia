@@ -6383,79 +6383,80 @@ async def context_dashboard(project: Optional[str] = None) -> str:
 
     Perfect for getting a bird's-eye view of your context library.
     """
-    conn = _get_db_for_project(project)
-    session_id = _get_session_id_for_project(conn, project)
+    # ✅ FIX: Use context manager to ensure connection is closed
+    with _get_db_for_project(project) as conn:
+        session_id = _get_session_id_for_project(conn, project)
 
-    # Get comprehensive statistics
-    stats_query = """
-        SELECT
-            (metadata::json)->>'priority' as priority,
-            COUNT(*) as count,
-            SUM(LENGTH(content)) as total_size,
-            AVG(LENGTH(content)) as avg_size
-        FROM context_locks
-        WHERE session_id = ?
-        GROUP BY priority
-    """
+        # Get comprehensive statistics
+        stats_query = """
+            SELECT
+                (metadata::json)->>'priority' as priority,
+                COUNT(*) as count,
+                SUM(LENGTH(content)) as total_size,
+                AVG(LENGTH(content)) as avg_size
+            FROM context_locks
+            WHERE session_id = ?
+            GROUP BY priority
+        """
 
-    cursor = conn.execute(stats_query, (session_id,))
-    priority_stats = {}
-    total_contexts = 0
-    total_size = 0
+        cursor = conn.execute(stats_query, (session_id,))
+        priority_stats = {}
+        total_contexts = 0
+        total_size = 0
 
-    for row in cursor.fetchall():
-        priority = row['priority'] or 'reference'
-        priority_stats[priority] = {
-            'count': row['count'],
-            'total_size': row['total_size'],
-            'avg_size': int(row['avg_size'])
-        }
-        total_contexts += row['count']
-        total_size += row['total_size']
+        for row in cursor.fetchall():
+            priority = row['priority'] or 'reference'
+            priority_stats[priority] = {
+                'count': row['count'],
+                'total_size': row['total_size'],
+                'avg_size': int(row['avg_size'])
+            }
+            total_contexts += row['count']
+            total_size += row['total_size']
 
-    # Get access patterns
-    most_accessed = conn.execute("""
-        SELECT label, access_count, last_accessed
-        FROM context_locks
-        WHERE session_id = ?
-        ORDER BY access_count DESC
-        LIMIT 5
-    """, (session_id,)).fetchall()
+        # Get access patterns
+        most_accessed = conn.execute("""
+            SELECT label, access_count, last_accessed
+            FROM context_locks
+            WHERE session_id = ?
+            ORDER BY access_count DESC
+            LIMIT 5
+        """, (session_id,)).fetchall()
 
-    least_accessed = conn.execute("""
-        SELECT label, access_count, last_accessed
-        FROM context_locks
-        WHERE session_id = ?
-          AND access_count > 0
-        ORDER BY access_count ASC
-        LIMIT 5
-    """, (session_id,)).fetchall()
+        least_accessed = conn.execute("""
+            SELECT label, access_count, last_accessed
+            FROM context_locks
+            WHERE session_id = ?
+              AND access_count > 0
+            ORDER BY access_count ASC
+            LIMIT 5
+        """, (session_id,)).fetchall()
 
-    # Find stale contexts (30+ days)
-    import time
-    thirty_days_ago = time.time() - (30 * 24 * 3600)
-    stale_contexts = conn.execute("""
-        SELECT label, last_accessed, access_count
-        FROM context_locks
-        WHERE session_id = ?
-          AND (last_accessed < ? OR last_accessed IS NULL)
-        ORDER BY last_accessed ASC
-        LIMIT 5
-    """, (session_id, thirty_days_ago)).fetchall()
+        # Find stale contexts (30+ days)
+        import time
+        thirty_days_ago = time.time() - (30 * 24 * 3600)
+        stale_contexts = conn.execute("""
+            SELECT label, last_accessed, access_count
+            FROM context_locks
+            WHERE session_id = ?
+              AND (last_accessed < ? OR last_accessed IS NULL)
+            ORDER BY last_accessed ASC
+            LIMIT 5
+        """, (session_id, thirty_days_ago)).fetchall()
 
-    # Get version statistics
-    version_stats = conn.execute("""
-        SELECT
-            label,
-            COUNT(*) as version_count,
-            MAX(version) as latest_version
-        FROM context_locks
-        WHERE session_id = ?
-        GROUP BY label
-        HAVING COUNT(*) > 1
-        ORDER BY COUNT(*) DESC
-        LIMIT 5
-    """, (session_id,)).fetchall()
+        # Get version statistics
+        version_stats = conn.execute("""
+            SELECT
+                label,
+                COUNT(*) as version_count,
+                MAX(version) as latest_version
+            FROM context_locks
+            WHERE session_id = ?
+            GROUP BY label
+            HAVING COUNT(*) > 1
+            ORDER BY COUNT(*) DESC
+            LIMIT 5
+        """, (session_id,)).fetchall()
 
     # Build summary
     summary_text = f"""
