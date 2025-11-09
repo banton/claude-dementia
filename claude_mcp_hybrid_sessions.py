@@ -322,11 +322,10 @@ class AutoClosingPostgreSQLConnection:
                 cur.execute(sql)
             return cur
         except Exception as e:
-            # PostgreSQL requires rollback on error
+            # Log error details (rollback handled by __exit__() in context manager)
             print(f"⚠️  SQL Error: {e}", file=sys.stderr)
             print(f"   SQL: {sql[:200]}...", file=sys.stderr)
-            self.conn.rollback()
-            raise
+            raise  # Let context manager __exit__() handle rollback
 
     def cursor(self):
         """Get cursor from connection"""
