@@ -27,14 +27,14 @@ class PostgreSQLSessionStore:
     - Retry logic for duplicate session IDs
     """
 
-    def __init__(self, pool):
+    def __init__(self, adapter):
         """
         Initialize session store with database connection pool.
 
         Args:
-            pool: psycopg2 connection pool
+            adapter: PostgreSQLAdapter instance (Neon pooler)
         """
-        self.pool = pool
+        self.adapter = adapter
 
     def create_session(
         self,
@@ -78,7 +78,7 @@ class PostgreSQLSessionStore:
             for attempt in range(max_retries):
                 session_id = self._generate_session_id()
 
-                conn = self.pool.getconn()
+                conn = self.adapter.get_connection()
                 try:
                     with conn.cursor() as cur:
                         cur.execute("""
@@ -117,13 +117,13 @@ class PostgreSQLSessionStore:
                     continue  # Retry with new session_id
 
                 finally:
-                    self.pool.putconn(conn)
+                    self.adapter.release_connection(conn)
 
             # Should never reach here
             raise RuntimeError("Failed to create session after max retries")
         else:
             # Session ID provided - insert directly (no retry, let caller handle duplicates)
-            conn = self.pool.getconn()
+            conn = self.adapter.get_connection()
             try:
                 with conn.cursor() as cur:
                     cur.execute("""
@@ -155,7 +155,7 @@ class PostgreSQLSessionStore:
                     }
 
             finally:
-                self.pool.putconn(conn)
+                self.adapter.release_connection(conn)
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -167,7 +167,7 @@ class PostgreSQLSessionStore:
         Returns:
             Session dict or None if not found
         """
-        conn = self.pool.getconn()
+        conn = self.adapter.get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -192,7 +192,7 @@ class PostgreSQLSessionStore:
                 }
 
         finally:
-            self.pool.putconn(conn)
+            self.adapter.release_connection(conn)
 
     def is_expired(self, session_id: str, current_time: Optional[datetime] = None) -> bool:
         """
@@ -208,7 +208,7 @@ class PostgreSQLSessionStore:
         if current_time is None:
             current_time = datetime.now(timezone.utc)
 
-        conn = self.pool.getconn()
+        conn = self.adapter.get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -228,7 +228,7 @@ class PostgreSQLSessionStore:
                 return current_time > row['expires_at']
 
         finally:
-            self.pool.putconn(conn)
+            self.adapter.release_connection(conn)
 
     def update_activity(self, session_id: str, accessed_at: Optional[datetime] = None):
         """
@@ -243,7 +243,7 @@ class PostgreSQLSessionStore:
 
         expires_at = accessed_at + timedelta(hours=24)
 
-        conn = self.pool.getconn()
+        conn = self.adapter.get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -254,7 +254,7 @@ class PostgreSQLSessionStore:
                 conn.commit()
 
         finally:
-            self.pool.putconn(conn)
+            self.adapter.release_connection(conn)
 
     def delete_session(self, session_id: str) -> bool:
         """
@@ -266,7 +266,7 @@ class PostgreSQLSessionStore:
         Returns:
             True if session was deleted, False if session not found
         """
-        conn = self.pool.getconn()
+        conn = self.adapter.get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -280,7 +280,7 @@ class PostgreSQLSessionStore:
                 return deleted
 
         finally:
-            self.pool.putconn(conn)
+            self.adapter.release_connection(conn)
 
     def cleanup_expired(self, current_time: Optional[datetime] = None) -> int:
         """
@@ -295,7 +295,7 @@ class PostgreSQLSessionStore:
         if current_time is None:
             current_time = datetime.now(timezone.utc)
 
-        conn = self.pool.getconn()
+        conn = self.adapter.get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -309,7 +309,7 @@ class PostgreSQLSessionStore:
                 return deleted
 
         finally:
-            self.pool.putconn(conn)
+            self.adapter.release_connection(conn)
 
     def get_projects_with_stats(self) -> list:
         """
@@ -322,7 +322,7 @@ class PostgreSQLSessionStore:
             - last_used: Human-readable time (e.g., "2 days ago")
             - last_used_timestamp: ISO timestamp
         """
-        conn = self.pool.getconn()
+        conn = self.adapter.get_connection()
         try:
             with conn.cursor() as cur:
                 # Get projects from mcp_sessions with last activity
@@ -387,7 +387,7 @@ class PostgreSQLSessionStore:
                 return projects
 
         finally:
-            self.pool.putconn(conn)
+            self.adapter.release_connection(conn)
 
     def update_session_summary(
         self,
@@ -408,7 +408,7 @@ class PostgreSQLSessionStore:
         Returns:
             True if updated successfully, False otherwise
         """
-        conn = self.pool.getconn()
+        conn = self.adapter.get_connection()
         try:
             with conn.cursor() as cur:
                 # Get current summary
@@ -453,7 +453,7 @@ class PostgreSQLSessionStore:
                 return True
 
         finally:
-            self.pool.putconn(conn)
+            self.adapter.release_connection(conn)
 
     def _generate_work_description(
         self,
@@ -509,7 +509,7 @@ class PostgreSQLSessionStore:
         Returns:
             True if handover created successfully, False otherwise
         """
-        conn = self.pool.getconn()
+        conn = self.adapter.get_connection()
         try:
             with conn.cursor() as cur:
                 # Get session with summary
@@ -557,7 +557,7 @@ class PostgreSQLSessionStore:
                 return True
 
         finally:
-            self.pool.putconn(conn)
+            self.adapter.release_connection(conn)
 
     def _generate_session_id(self) -> str:
         """

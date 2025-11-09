@@ -202,7 +202,7 @@ def _init_local_session():
 
     # Get database adapter
     adapter = _get_db_adapter()
-    _session_store = PostgreSQLSessionStore(adapter.pool)
+    _session_store = PostgreSQLSessionStore(adapter)
 
     # Create session in database
     try:
@@ -2207,7 +2207,7 @@ async def create_project(name: str) -> str:
         adapter = _get_cached_adapter(safe_name)
 
         # Check if schema already exists
-        conn = adapter.pool.getconn()
+        conn = adapter.get_connection()
         try:
             cur = conn.cursor()
             cur.execute("""
@@ -2217,7 +2217,7 @@ async def create_project(name: str) -> str:
             """, (safe_name,))
 
             if cur.fetchone():
-                adapter.pool.putconn(conn)
+                adapter.release_connection(conn)
                 adapter.close()
                 return json.dumps({
                     "success": False,
@@ -2226,11 +2226,11 @@ async def create_project(name: str) -> str:
                 })
 
             # Return connection before proceeding
-            adapter.pool.putconn(conn)
+            adapter.release_connection(conn)
         except Exception:
             # If error, try to return connection before closing
             try:
-                adapter.pool.putconn(conn)
+                adapter.release_connection(conn)
             except:
                 pass
             adapter.close()
