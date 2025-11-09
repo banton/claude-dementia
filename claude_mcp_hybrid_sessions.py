@@ -706,65 +706,65 @@ def get_current_session_id() -> str:
     if hasattr(sys.modules[__name__], 'SESSION_ID') and SESSION_ID:
         return SESSION_ID
 
-    conn = get_db()
+    # ✅ FIX: Use context manager to ensure connection is closed
+    with get_db() as conn:
+        # CRITICAL: Use dynamic project detection for proper isolation in long-running MCP servers
+        current_project_root = get_project_root()
+        current_project_name = get_project_name()
 
-    # CRITICAL: Use dynamic project detection for proper isolation in long-running MCP servers
-    current_project_root = get_project_root()
-    current_project_name = get_project_name()
+        # Create a project fingerprint - this ensures sessions are project-specific
+        project_fingerprint = hashlib.md5(f"{current_project_root}:{current_project_name}".encode()).hexdigest()[:8]
 
-    # Create a project fingerprint - this ensures sessions are project-specific
-    project_fingerprint = hashlib.md5(f"{current_project_root}:{current_project_name}".encode()).hexdigest()[:8]
-    
-    # Find active session for THIS PROJECT
-    cursor = conn.execute("""
-        SELECT id, last_active, project_path, project_name 
-        FROM sessions 
-        WHERE project_fingerprint = ?
-        ORDER BY last_active DESC
-        LIMIT 1
-    """, (project_fingerprint,))
-    
-    row = cursor.fetchone()
-    if row:
-        # Verify we're in the same project (safety check)
-        if row['project_path'] != current_project_root:
-            # Project moved but same logical project - update path
-            conn.execute("""
-                UPDATE sessions
-                SET project_path = ?, last_active = ?
-                WHERE id = ?
-            """, (current_project_root, time.time(), row['id']))
-        else:
-            # Normal case - just update activity
-            conn.execute("""
-                UPDATE sessions 
-                SET last_active = ?
-                WHERE id = ?
-            """, (time.time(), row['id']))
-        conn.commit()
-        return row['id']
-    
-    # Create new session for this project
-    session_id = f"{current_project_name[:4]}_{str(uuid.uuid4())[:8]}"
+        # Find active session for THIS PROJECT
+        cursor = conn.execute("""
+            SELECT id, last_active, project_path, project_name
+            FROM sessions
+            WHERE project_fingerprint = ?
+            ORDER BY last_active DESC
+            LIMIT 1
+        """, (project_fingerprint,))
 
-    # First add columns if they don't exist (migration - SQLite only)
-    # PostgreSQL schema is already complete from ensure_schema_exists()
-    if not is_postgresql_mode():
-        cursor.execute("PRAGMA table_info(sessions)")
-        columns = [col[1] for col in cursor.fetchall()]
-        if 'project_fingerprint' not in columns:
-            conn.execute("ALTER TABLE sessions ADD COLUMN project_fingerprint TEXT")
-            conn.execute("ALTER TABLE sessions ADD COLUMN project_path TEXT")
-            conn.execute("ALTER TABLE sessions ADD COLUMN project_name TEXT")
+        row = cursor.fetchone()
+        if row:
+            # Verify we're in the same project (safety check)
+            if row['project_path'] != current_project_root:
+                # Project moved but same logical project - update path
+                conn.execute("""
+                    UPDATE sessions
+                    SET project_path = ?, last_active = ?
+                    WHERE id = ?
+                """, (current_project_root, time.time(), row['id']))
+            else:
+                # Normal case - just update activity
+                conn.execute("""
+                    UPDATE sessions
+                    SET last_active = ?
+                    WHERE id = ?
+                """, (time.time(), row['id']))
             conn.commit()
+            return row['id']
 
-    conn.execute("""
-        INSERT INTO sessions (id, started_at, last_active, project_fingerprint, project_path, project_name)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (session_id, time.time(), time.time(), project_fingerprint, current_project_root, current_project_name))
-    conn.commit()
-    
-    return session_id
+        # Create new session for this project
+        session_id = f"{current_project_name[:4]}_{str(uuid.uuid4())[:8]}"
+
+        # First add columns if they don't exist (migration - SQLite only)
+        # PostgreSQL schema is already complete from ensure_schema_exists()
+        if not is_postgresql_mode():
+            cursor.execute("PRAGMA table_info(sessions)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'project_fingerprint' not in columns:
+                conn.execute("ALTER TABLE sessions ADD COLUMN project_fingerprint TEXT")
+                conn.execute("ALTER TABLE sessions ADD COLUMN project_path TEXT")
+                conn.execute("ALTER TABLE sessions ADD COLUMN project_name TEXT")
+                conn.commit()
+
+        conn.execute("""
+            INSERT INTO sessions (id, started_at, last_active, project_fingerprint, project_path, project_name)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (session_id, time.time(), time.time(), project_fingerprint, current_project_root, current_project_name))
+        conn.commit()
+
+        return session_id
 
 def _get_session_id_for_project(conn, project_name: Optional[str] = None) -> str:
     """
@@ -805,14 +805,15 @@ def _get_session_id_for_project(conn, project_name: Optional[str] = None) -> str
 
 def update_session_activity():
     """Update last active time for current session"""
-    conn = get_db()
-    session_id = get_current_session_id()
-    conn.execute("""
-        UPDATE sessions
-        SET last_active = ?
-        WHERE id = ?
-    """, (time.time(), session_id))
-    conn.commit()
+    # ✅ FIX: Use context manager to ensure connection is closed
+    with get_db() as conn:
+        session_id = get_current_session_id()
+        conn.execute("""
+            UPDATE sessions
+            SET last_active = ?
+            WHERE id = ?
+        """, (time.time(), session_id))
+        conn.commit()
 
 def validate_database_isolation(conn) -> dict:
     """
@@ -3267,35 +3268,34 @@ async def get_last_handover(project: Optional[str] = None) -> str:
     if project_check:
         return project_check
 
-    conn = _get_db_for_project(project)
+    with _get_db_for_project(project) as conn:
+        cursor = conn.execute("""
+            SELECT content, metadata, timestamp FROM memory_entries
+            WHERE category = 'handover'
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """)
+        handover = cursor.fetchone()
 
-    cursor = conn.execute("""
-        SELECT content, metadata, timestamp FROM memory_entries
-        WHERE category = 'handover'
-        ORDER BY timestamp DESC
-        LIMIT 1
-    """)
-    handover = cursor.fetchone()
+        if not handover:
+            return json.dumps({"available": False, "reason": "no_handover_found"}, indent=2)
 
-    if not handover:
-        return json.dumps({"available": False, "reason": "no_handover_found"}, indent=2)
+        try:
+            handover_data = json.loads(handover['metadata'])
+            hours_ago = (time.time() - handover['timestamp']) / 3600
 
-    try:
-        handover_data = json.loads(handover['metadata'])
-        hours_ago = (time.time() - handover['timestamp']) / 3600
-
-        return json.dumps({
-            "available": True,
-            "timestamp": handover['timestamp'],
-            "hours_ago": round(hours_ago, 1),
-            "content": handover_data
-        }, indent=2)
-    except Exception as e:
-        return json.dumps({
-            "available": False,
-            "reason": "corrupted_data",
-            "error": str(e)
-        }, indent=2)
+            return json.dumps({
+                "available": True,
+                "timestamp": handover['timestamp'],
+                "hours_ago": round(hours_ago, 1),
+                "content": handover_data
+            }, indent=2)
+        except Exception as e:
+            return json.dumps({
+                "available": False,
+                "reason": "corrupted_data",
+                "error": str(e)
+            }, indent=2)
 
 @mcp.tool()
 async def get_query_page(query_id: str, offset: int = 0, limit: int = 20, project: Optional[str] = None) -> str:
@@ -3334,9 +3334,9 @@ async def get_query_page(query_id: str, offset: int = 0, limit: int = 20, projec
 
     Note: Query results expire after 1 hour (TTL). If expired, run the query again.
     """
-    conn = _get_db_for_project(project)
-    result = get_query_page_data(conn, query_id, offset, limit)
-    return json.dumps(result, indent=2)
+    with _get_db_for_project(project) as conn:
+        result = get_query_page_data(conn, query_id, offset, limit)
+        return json.dumps(result, indent=2)
 
 # ============================================================================
 # MEMORY MANAGEMENT (unchanged)
@@ -3521,163 +3521,165 @@ async def lock_context(
 
     # Use project-aware database connection
     target_project = _get_project_for_context(project)
-    conn = _get_db_for_project(project)
-    session_id = _get_session_id_for_project(conn, project)
 
-    # Ensure session exists in this project database
-    try:
-        conn.execute("""
-            INSERT INTO sessions (id, started_at, last_active, project_name, project_path)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET last_active = EXCLUDED.last_active
-        """, (session_id, time.time(), time.time(), target_project, get_project_root() or ''))
-        conn.commit()
-    except Exception as e:
-        print(f"⚠️  Warning: Could not ensure session exists: {e}", file=sys.stderr)
+    # ✅ FIX: Use context manager to ensure connection is closed
+    with _get_db_for_project(project) as conn:
+        session_id = _get_session_id_for_project(conn, project)
 
-    # Auto-detect priority if not specified
-    if priority is None:
-        content_lower = content.lower()
-        if any(word in content_lower for word in ['always', 'never', 'must']):
-            priority = 'always_check'
-        elif any(word in content_lower for word in ['important', 'critical', 'required']):
-            priority = 'important'
-        else:
-            priority = 'reference'
-    
-    # Validate priority
-    valid_priorities = ['always_check', 'important', 'reference']
-    if priority not in valid_priorities:
-        return f"❌ Invalid priority '{priority}'. Must be one of: {', '.join(valid_priorities)}"
-    
-    # Generate hash
-    content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
-    
-    # Get latest version for this topic
-    cursor = conn.execute("""
-        SELECT version FROM context_locks 
-        WHERE label = ? AND session_id = ?
-        ORDER BY locked_at DESC
-        LIMIT 1
-    """, (topic, session_id))
-    
-    row = cursor.fetchone()
-    if row:
-        # Parse and increment version
-        parts = row['version'].split('.')
-        if len(parts) == 2:
-            major, minor = parts
-            version = f"{major}.{int(minor)+1}"
-        else:
-            version = "1.1"
-    else:
-        version = "1.0"
-    
-    # Extract keywords for better matching
-    keywords = []
-    keyword_patterns = {
-        'output': r'\b(output|directory|folder|path)\b',
-        'test': r'\b(test|testing|spec)\b',
-        'config': r'\b(config|settings|configuration)\b',
-        'api': r'\b(api|endpoint|rest|graphql)\b',
-        'database': r'\b(database|db|sql|table)\b',
-        'security': r'\b(auth|token|password|secret)\b',
-    }
-    content_lower = content.lower()
-    for key, pattern in keyword_patterns.items():
-        if re.search(pattern, content_lower):
-            keywords.append(key)
-    
-    # Prepare metadata with priority and keywords
-    metadata = {
-        "tags": tags.split(',') if tags else [],
-        "priority": priority,
-        "keywords": keywords,
-        "created_at": datetime.now().isoformat()
-    }
-
-    # Generate preview and key concepts for RLM optimization
-    preview = generate_preview(content, max_length=500)
-    tag_list = tags.split(',') if tags else []
-    key_concepts = extract_key_concepts(content, tag_list)
-
-    # Store lock
-    try:
-        current_time = time.time()
-
-        # Insert the context lock and get the ID
-        cursor = conn.execute("""
-            INSERT INTO context_locks
-            (session_id, label, version, content, content_hash, locked_at, metadata,
-             preview, key_concepts, last_accessed)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            RETURNING id
-        """, (session_id, topic, version, content, content_hash, current_time, json.dumps(metadata),
-              preview, json.dumps(key_concepts), current_time))
-
-        context_id = cursor.fetchone()['id']
-
-        # Create audit trail entry
-        priority_label = {
-            'always_check': ' [CRITICAL RULE]',
-            'important': ' [IMPORTANT]',
-            'reference': ''
-        }.get(priority, '')
-
-        audit_message = f"Locked context '{topic}' v{version}{priority_label} ({len(content)} chars, {len(tag_list)} tags)"
-
-        conn.execute("""
-            INSERT INTO memory_entries (category, content, timestamp, session_id)
-            VALUES ('progress', ?, ?, ?)
-        """, (audit_message, current_time, session_id))
-
-        conn.commit()
-
-        # Generate embedding (non-blocking, graceful failure)
-        embedding_status = ""
+        # Ensure session exists in this project database
         try:
-            from src.services import embedding_service
-            if embedding_service and embedding_service.enabled:
-                # Use preview for embedding (optimized for 1020 char limit)
-                embedding_text = preview if len(preview) <= 1020 else preview[:1020]
-                embedding = embedding_service.generate_embedding(embedding_text)
-
-                if embedding:
-                    # Store embedding - convert to bytes for PostgreSQL BYTEA
-                    import pickle
-                    embedding_bytes = pickle.dumps(embedding)
-
-                    conn.execute("""
-                        UPDATE context_locks
-                        SET embedding = ?, embedding_model = ?
-                        WHERE id = ?
-                    """, (embedding_bytes, embedding_service.model, context_id))
-                    conn.commit()
-                    embedding_status = " [embedded]"
-                else:
-                    # Mark for manual embedding generation
-                    print(f"⚠️  Embedding generation returned None for context '{topic}'", file=sys.stderr)
-            else:
-                # Service not available - context will need manual embedding
-                print(f"⚠️  Embedding service not available for context '{topic}' - run generate_embeddings() later", file=sys.stderr)
+            conn.execute("""
+                INSERT INTO sessions (id, started_at, last_active, project_name, project_path)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET last_active = EXCLUDED.last_active
+            """, (session_id, time.time(), time.time(), target_project, get_project_root() or ''))
+            conn.commit()
         except Exception as e:
-            # Graceful failure - context is saved, just without embedding
-            print(f"⚠️  Could not generate embedding for '{topic}': {e}", file=sys.stderr)
-            print(f"   Run generate_embeddings() to add embeddings later", file=sys.stderr)
+            print(f"⚠️  Warning: Could not ensure session exists: {e}", file=sys.stderr)
 
-        priority_indicator = {
-            'always_check': ' ⚠️ [ALWAYS CHECK]',
-            'important': ' 📌 [IMPORTANT]',
-            'reference': ''
-        }.get(priority, '')
+        # Auto-detect priority if not specified
+        if priority is None:
+            content_lower = content.lower()
+            if any(word in content_lower for word in ['always', 'never', 'must']):
+                priority = 'always_check'
+            elif any(word in content_lower for word in ['important', 'critical', 'required']):
+                priority = 'important'
+            else:
+                priority = 'reference'
 
-        project_label = f" in project '{target_project}'" if target_project != "default" else ""
-        return f"✅ Locked '{topic}' as v{version}{priority_indicator}{project_label}{embedding_status} ({len(content)} chars, hash: {content_hash[:8]})"
-        
-    except sqlite3.IntegrityError:
-        return f"❌ Version {version} of '{topic}' already exists"
-    except Exception as e:
-        return f"❌ Failed to lock context: {str(e)}"
+        # Validate priority
+        valid_priorities = ['always_check', 'important', 'reference']
+        if priority not in valid_priorities:
+            return f"❌ Invalid priority '{priority}'. Must be one of: {', '.join(valid_priorities)}"
+
+        # Generate hash
+        content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
+
+        # Get latest version for this topic
+        cursor = conn.execute("""
+            SELECT version FROM context_locks
+            WHERE label = ? AND session_id = ?
+            ORDER BY locked_at DESC
+            LIMIT 1
+        """, (topic, session_id))
+
+        row = cursor.fetchone()
+        if row:
+            # Parse and increment version
+            parts = row['version'].split('.')
+            if len(parts) == 2:
+                major, minor = parts
+                version = f"{major}.{int(minor)+1}"
+            else:
+                version = "1.1"
+        else:
+            version = "1.0"
+
+        # Extract keywords for better matching
+        keywords = []
+        keyword_patterns = {
+            'output': r'\b(output|directory|folder|path)\b',
+            'test': r'\b(test|testing|spec)\b',
+            'config': r'\b(config|settings|configuration)\b',
+            'api': r'\b(api|endpoint|rest|graphql)\b',
+            'database': r'\b(database|db|sql|table)\b',
+            'security': r'\b(auth|token|password|secret)\b',
+        }
+        content_lower = content.lower()
+        for key, pattern in keyword_patterns.items():
+            if re.search(pattern, content_lower):
+                keywords.append(key)
+
+        # Prepare metadata with priority and keywords
+        metadata = {
+            "tags": tags.split(',') if tags else [],
+            "priority": priority,
+            "keywords": keywords,
+            "created_at": datetime.now().isoformat()
+        }
+
+        # Generate preview and key concepts for RLM optimization
+        preview = generate_preview(content, max_length=500)
+        tag_list = tags.split(',') if tags else []
+        key_concepts = extract_key_concepts(content, tag_list)
+
+        # Store lock
+        try:
+            current_time = time.time()
+
+            # Insert the context lock and get the ID
+            cursor = conn.execute("""
+                INSERT INTO context_locks
+                (session_id, label, version, content, content_hash, locked_at, metadata,
+                 preview, key_concepts, last_accessed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING id
+            """, (session_id, topic, version, content, content_hash, current_time, json.dumps(metadata),
+                  preview, json.dumps(key_concepts), current_time))
+
+            context_id = cursor.fetchone()['id']
+
+            # Create audit trail entry
+            priority_label = {
+                'always_check': ' [CRITICAL RULE]',
+                'important': ' [IMPORTANT]',
+                'reference': ''
+            }.get(priority, '')
+
+            audit_message = f"Locked context '{topic}' v{version}{priority_label} ({len(content)} chars, {len(tag_list)} tags)"
+
+            conn.execute("""
+                INSERT INTO memory_entries (category, content, timestamp, session_id)
+                VALUES ('progress', ?, ?, ?)
+            """, (audit_message, current_time, session_id))
+
+            conn.commit()
+
+            # Generate embedding (non-blocking, graceful failure)
+            embedding_status = ""
+            try:
+                from src.services import embedding_service
+                if embedding_service and embedding_service.enabled:
+                    # Use preview for embedding (optimized for 1020 char limit)
+                    embedding_text = preview if len(preview) <= 1020 else preview[:1020]
+                    embedding = embedding_service.generate_embedding(embedding_text)
+
+                    if embedding:
+                        # Store embedding - convert to bytes for PostgreSQL BYTEA
+                        import pickle
+                        embedding_bytes = pickle.dumps(embedding)
+
+                        conn.execute("""
+                            UPDATE context_locks
+                            SET embedding = ?, embedding_model = ?
+                            WHERE id = ?
+                        """, (embedding_bytes, embedding_service.model, context_id))
+                        conn.commit()
+                        embedding_status = " [embedded]"
+                    else:
+                        # Mark for manual embedding generation
+                        print(f"⚠️  Embedding generation returned None for context '{topic}'", file=sys.stderr)
+                else:
+                    # Service not available - context will need manual embedding
+                    print(f"⚠️  Embedding service not available for context '{topic}' - run generate_embeddings() later", file=sys.stderr)
+            except Exception as e:
+                # Graceful failure - context is saved, just without embedding
+                print(f"⚠️  Could not generate embedding for '{topic}': {e}", file=sys.stderr)
+                print(f"   Run generate_embeddings() to add embeddings later", file=sys.stderr)
+
+            priority_indicator = {
+                'always_check': ' ⚠️ [ALWAYS CHECK]',
+                'important': ' 📌 [IMPORTANT]',
+                'reference': ''
+            }.get(priority, '')
+
+            project_label = f" in project '{target_project}'" if target_project != "default" else ""
+            return f"✅ Locked '{topic}' as v{version}{priority_indicator}{project_label}{embedding_status} ({len(content)} chars, hash: {content_hash[:8]})"
+
+        except sqlite3.IntegrityError:
+            return f"❌ Version {version} of '{topic}' already exists"
+        except Exception as e:
+            return f"❌ Failed to lock context: {str(e)}"
 
 @mcp.tool()
 async def recall_context(
@@ -3769,73 +3771,75 @@ async def recall_context(
 
     # Use project-aware database connection
     target_project = _get_project_for_context(project)
-    conn = _get_db_for_project(project)
-    session_id = _get_session_id_for_project(conn, project)
 
-    if version == "latest":
-        cursor = conn.execute("""
-            SELECT id, content, preview, key_concepts, version, locked_at, metadata
-            FROM context_locks
-            WHERE label = ? AND session_id = ?
-            ORDER BY locked_at DESC
-            LIMIT 1
-        """, (topic, session_id))
-    else:
-        # Clean version (remove 'v' prefix if present)
-        clean_version = version[1:] if version.startswith('v') else version
-        cursor = conn.execute("""
-            SELECT id, content, preview, key_concepts, version, locked_at, metadata
-            FROM context_locks
-            WHERE label = ? AND version = ? AND session_id = ?
-        """, (topic, clean_version, session_id))
+    # ✅ FIX: Use context manager to ensure connection is closed
+    with _get_db_for_project(project) as conn:
+        session_id = _get_session_id_for_project(conn, project)
 
-    row = cursor.fetchone()
-    if row:
-        context_id = row['id']
-        dt = datetime.fromtimestamp(row['locked_at'])
-        metadata = json.loads(row['metadata']) if row['metadata'] else {}
-        tags = metadata.get('tags', [])
-        key_concepts = json.loads(row['key_concepts']) if row['key_concepts'] else []
-
-        # Track access
-        conn.execute("""
-            UPDATE context_locks
-            SET last_accessed = ?,
-                access_count = access_count + 1
-            WHERE id = ?
-        """, (time.time(), context_id))
-        conn.commit()
-
-        if preview_only:
-            # Return preview mode (token-efficient)
-            content_size_kb = len(row['content']) / 1024
-            preview_text = row['preview'] or row['content'][:500] + "..."
-
-            return json.dumps({
-                "topic": topic,
-                "version": row['version'],
-                "preview": preview_text,
-                "key_concepts": key_concepts[:5],  # Top 5 concepts
-                "tags": tags,
-                "locked_at": dt.strftime('%Y-%m-%d %H:%M'),
-                "content_size_kb": round(content_size_kb, 1),
-                "note": "Use preview_only=False to get full content"
-            }, indent=2)
+        if version == "latest":
+            cursor = conn.execute("""
+                SELECT id, content, preview, key_concepts, version, locked_at, metadata
+                FROM context_locks
+                WHERE label = ? AND session_id = ?
+                ORDER BY locked_at DESC
+                LIMIT 1
+            """, (topic, session_id))
         else:
-            # Return full content
-            output = []
-            output.append(f"📌 {topic} v{row['version']}")
-            output.append(f"Locked: {dt.strftime('%Y-%m-%d %H:%M')}")
-            if tags:
-                output.append(f"Tags: {', '.join(tags)}")
-            if key_concepts:
-                output.append(f"Concepts: {', '.join(key_concepts[:5])}")
-            output.append("-" * 40)
-            output.append(row['content'])
+            # Clean version (remove 'v' prefix if present)
+            clean_version = version[1:] if version.startswith('v') else version
+            cursor = conn.execute("""
+                SELECT id, content, preview, key_concepts, version, locked_at, metadata
+                FROM context_locks
+                WHERE label = ? AND version = ? AND session_id = ?
+            """, (topic, clean_version, session_id))
 
-            return "\n".join(output)
-    else:
-        return f"❌ No locked context found for '{topic}' (version: {version})"
+        row = cursor.fetchone()
+        if row:
+            context_id = row['id']
+            dt = datetime.fromtimestamp(row['locked_at'])
+            metadata = json.loads(row['metadata']) if row['metadata'] else {}
+            tags = metadata.get('tags', [])
+            key_concepts = json.loads(row['key_concepts']) if row['key_concepts'] else []
+
+            # Track access
+            conn.execute("""
+                UPDATE context_locks
+                SET last_accessed = ?,
+                    access_count = access_count + 1
+                WHERE id = ?
+            """, (time.time(), context_id))
+            conn.commit()
+
+            if preview_only:
+                # Return preview mode (token-efficient)
+                content_size_kb = len(row['content']) / 1024
+                preview_text = row['preview'] or row['content'][:500] + "..."
+
+                return json.dumps({
+                    "topic": topic,
+                    "version": row['version'],
+                    "preview": preview_text,
+                    "key_concepts": key_concepts[:5],  # Top 5 concepts
+                    "tags": tags,
+                    "locked_at": dt.strftime('%Y-%m-%d %H:%M'),
+                    "content_size_kb": round(content_size_kb, 1),
+                    "note": "Use preview_only=False to get full content"
+                }, indent=2)
+            else:
+                # Return full content
+                output = []
+                output.append(f"📌 {topic} v{row['version']}")
+                output.append(f"Locked: {dt.strftime('%Y-%m-%d %H:%M')}")
+                if tags:
+                    output.append(f"Tags: {', '.join(tags)}")
+                if key_concepts:
+                    output.append(f"Concepts: {', '.join(key_concepts[:5])}")
+                output.append("-" * 40)
+                output.append(row['content'])
+
+                return "\n".join(output)
+        else:
+            return f"❌ No locked context found for '{topic}' (version: {version})"
 
 @mcp.tool()
 async def unlock_context(
@@ -3910,108 +3914,110 @@ async def unlock_context(
         return project_check
 
     update_session_activity()
-    conn = _get_db_for_project(project)
-    session_id = _get_session_id_for_project(conn, project)
 
-    # 1. Find contexts to delete
-    if version == "all":
-        cursor = conn.execute("""
-            SELECT * FROM context_locks
-            WHERE label = ? AND session_id = ?
-        """, (topic, session_id))
-    elif version == "latest":
-        cursor = conn.execute("""
-            SELECT * FROM context_locks
-            WHERE label = ? AND session_id = ?
-            ORDER BY version DESC
-            LIMIT 1
-        """, (topic, session_id))
-    else:
-        cursor = conn.execute("""
-            SELECT * FROM context_locks
-            WHERE label = ? AND version = ? AND session_id = ?
-        """, (topic, version, session_id))
+    # ✅ FIX: Use context manager to ensure connection is closed
+    with _get_db_for_project(project) as conn:
+        session_id = _get_session_id_for_project(conn, project)
 
-    contexts = cursor.fetchall()
-
-    if not contexts:
-        return f"❌ Context '{topic}' (version: {version}) not found"
-
-    # 2. Check for critical contexts
-    has_critical = False
-    for ctx in contexts:
-        metadata = json.loads(ctx['metadata']) if ctx['metadata'] else {}
-        if metadata.get('priority') == 'always_check':
-            has_critical = True
-            break
-
-    if has_critical and not force:
-        return f"⚠️  Cannot delete critical (always_check) context '{topic}' without force=True\n" \
-               f"   This context contains important rules. Use force=True if you're sure."
-
-    # 3. Archive before deletion
-    if archive:
-        for ctx in contexts:
-            try:
-                conn.execute("""
-                    INSERT INTO context_archives
-                    (original_id, session_id, label, version, content, preview, key_concepts,
-                     metadata, deleted_at, delete_reason)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (ctx['id'], ctx['session_id'], ctx['label'], ctx['version'],
-                      ctx['content'], ctx['preview'], ctx['key_concepts'],
-                      ctx['metadata'], time.time(), f"Deleted {version} version(s)"))
-            except Exception as e:
-                return f"❌ Failed to archive context: {str(e)}"
-
-    # 4. Delete contexts
-    try:
+        # 1. Find contexts to delete
         if version == "all":
-            conn.execute("""
-                DELETE FROM context_locks
+            cursor = conn.execute("""
+                SELECT * FROM context_locks
                 WHERE label = ? AND session_id = ?
             """, (topic, session_id))
         elif version == "latest":
-            # Delete the latest version (already fetched in contexts)
-            conn.execute("""
-                DELETE FROM context_locks
-                WHERE id = ?
-            """, (contexts[0]['id'],))
+            cursor = conn.execute("""
+                SELECT * FROM context_locks
+                WHERE label = ? AND session_id = ?
+                ORDER BY version DESC
+                LIMIT 1
+            """, (topic, session_id))
         else:
-            conn.execute("""
-                DELETE FROM context_locks
+            cursor = conn.execute("""
+                SELECT * FROM context_locks
                 WHERE label = ? AND version = ? AND session_id = ?
             """, (topic, version, session_id))
 
-        # Create audit trail entry
-        current_time = time.time()
-        count = len(contexts)
-        version_str = f"{count} version(s)" if version == "all" else f"version {version}"
+        contexts = cursor.fetchall()
 
-        critical_label = " [CRITICAL]" if has_critical else ""
-        audit_message = f"Deleted {version_str} of context '{topic}'{critical_label}"
+        if not contexts:
+            return f"❌ Context '{topic}' (version: {version}) not found"
+
+        # 2. Check for critical contexts
+        has_critical = False
+        for ctx in contexts:
+            metadata = json.loads(ctx['metadata']) if ctx['metadata'] else {}
+            if metadata.get('priority') == 'always_check':
+                has_critical = True
+                break
+
+        if has_critical and not force:
+            return f"⚠️  Cannot delete critical (always_check) context '{topic}' without force=True\n" \
+                   f"   This context contains important rules. Use force=True if you're sure."
+
+        # 3. Archive before deletion
         if archive:
-            audit_message += " (archived for recovery)"
+            for ctx in contexts:
+                try:
+                    conn.execute("""
+                        INSERT INTO context_archives
+                        (original_id, session_id, label, version, content, preview, key_concepts,
+                         metadata, deleted_at, delete_reason)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (ctx['id'], ctx['session_id'], ctx['label'], ctx['version'],
+                          ctx['content'], ctx['preview'], ctx['key_concepts'],
+                          ctx['metadata'], time.time(), f"Deleted {version} version(s)"))
+                except Exception as e:
+                    return f"❌ Failed to archive context: {str(e)}"
 
-        conn.execute("""
-            INSERT INTO memory_entries (category, content, timestamp, session_id)
-            VALUES ('progress', ?, ?, ?)
-        """, (audit_message, current_time, session_id))
+        # 4. Delete contexts
+        try:
+            if version == "all":
+                conn.execute("""
+                    DELETE FROM context_locks
+                    WHERE label = ? AND session_id = ?
+                """, (topic, session_id))
+            elif version == "latest":
+                # Delete the latest version (already fetched in contexts)
+                conn.execute("""
+                    DELETE FROM context_locks
+                    WHERE id = ?
+                """, (contexts[0]['id'],))
+            else:
+                conn.execute("""
+                    DELETE FROM context_locks
+                    WHERE label = ? AND version = ? AND session_id = ?
+                """, (topic, version, session_id))
 
-        conn.commit()
+            # Create audit trail entry
+            current_time = time.time()
+            count = len(contexts)
+            version_str = f"{count} version(s)" if version == "all" else f"version {version}"
 
-        result = f"✅ Deleted {version_str} of '{topic}'"
+            critical_label = " [CRITICAL]" if has_critical else ""
+            audit_message = f"Deleted {version_str} of context '{topic}'{critical_label}"
+            if archive:
+                audit_message += " (archived for recovery)"
 
-        if archive:
-            result += f"\n   💾 Archived for recovery (query context_archives table)"
+            conn.execute("""
+                INSERT INTO memory_entries (category, content, timestamp, session_id)
+                VALUES ('progress', ?, ?, ?)
+            """, (audit_message, current_time, session_id))
 
-        if has_critical:
-            result += f"\n   ⚠️  Critical context deleted (force=True was used)"
+            conn.commit()
 
-        return result
+            result = f"✅ Deleted {version_str} of '{topic}'"
 
-    except Exception as e:
-        return f"❌ Failed to delete context: {str(e)}"
+            if archive:
+                result += f"\n   💾 Archived for recovery (query context_archives table)"
+
+            if has_critical:
+                result += f"\n   ⚠️  Critical context deleted (force=True was used)"
+
+            return result
+
+        except Exception as e:
+            return f"❌ Failed to delete context: {str(e)}"
 
 # Add these functions after unlock_context() in claude_mcp_hybrid.py (around line 1831)
 
@@ -4448,149 +4454,150 @@ async def search_contexts(
     if project_check:
         return project_check
 
-    conn = _get_db_for_project(project)
-    session_id = _get_session_id_for_project(conn, project)
+    # ✅ FIX: Use context manager to ensure connection is closed
+    with _get_db_for_project(project) as conn:
+        session_id = _get_session_id_for_project(conn, project)
 
-    # Try semantic search first if enabled
-    semantic_results = []
-    if use_semantic:
+        # Try semantic search first if enabled
+        semantic_results = []
+        if use_semantic:
+            try:
+                from src.services import embedding_service
+                from src.services.semantic_search import SemanticSearch
+
+                if embedding_service and embedding_service.enabled:
+                    semantic_search = SemanticSearch(conn, embedding_service)
+
+                    # Check if any contexts have embeddings
+                    cursor = conn.execute("SELECT COUNT(*) as count FROM context_locks WHERE embedding IS NOT NULL")
+                    embedded_count = cursor.fetchone()['count']
+
+                    if embedded_count > 0:
+                        # Use semantic search with filters
+                        results = semantic_search.search_similar(
+                            query=query,
+                            limit=limit,
+                            threshold=0.6,  # Slightly lower threshold for search
+                            priority_filter=priority,
+                            tags_filter=tags
+                        )
+
+                        if results:
+                            return json.dumps({
+                                "search_mode": "semantic",
+                                "query": query,
+                                "total_results": len(results),
+                                "results": results,
+                                "note": "Results ranked by semantic similarity (0-1)"
+                            }, indent=2)
+            except Exception as e:
+                # Fall back to keyword search
+                print(f"⚠️  Semantic search unavailable: {e}", file=sys.stderr)
+
+        # Fall back to keyword search
+        # Build SQL query
+        sql = """
+            SELECT
+                label, version, content, preview, key_concepts,
+                locked_at, metadata, last_accessed, access_count
+            FROM context_locks
+            WHERE session_id = ?
+              AND (
+                  content LIKE ?
+                  OR preview LIKE ?
+                  OR key_concepts LIKE ?
+                  OR label LIKE ?
+              )
+        """
+
+        params = [session_id, f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%']
+
+        # Add priority filter
+        if priority:
+            sql += " AND (metadata::json)->>'priority' = ?"
+            params.append(priority)
+
+        # Add tags filter
+        if tags:
+            tag_conditions = []
+            for tag in tags.split(','):
+                tag = tag.strip()
+                tag_conditions.append("(metadata::json)->>'tags' LIKE ?")
+                params.append(f'%{tag}%')
+            sql += f" AND ({' OR '.join(tag_conditions)})"
+
+        sql += " LIMIT ?"
+        params.append(limit)
+
         try:
-            from src.services import embedding_service
-            from src.services.semantic_search import SemanticSearch
+            cursor = conn.execute(sql, params)
+            results = cursor.fetchall()
 
-            if embedding_service and embedding_service.enabled:
-                semantic_search = SemanticSearch(conn, embedding_service)
+            if not results:
+                return json.dumps({
+                    "query": query,
+                    "filters": {
+                        "priority": priority,
+                        "tags": tags
+                    },
+                    "total_found": 0,
+                    "message": "No contexts found matching query",
+                    "results": []
+                }, indent=2)
 
-                # Check if any contexts have embeddings
-                cursor = conn.execute("SELECT COUNT(*) as count FROM context_locks WHERE embedding IS NOT NULL")
-                embedded_count = cursor.fetchone()['count']
+            # Calculate relevance scores
+            scored_results = []
+            for row in results:
+                score = 0.0
 
-                if embedded_count > 0:
-                    # Use semantic search with filters
-                    results = semantic_search.search_similar(
-                        query=query,
-                        limit=limit,
-                        threshold=0.6,  # Slightly lower threshold for search
-                        priority_filter=priority,
-                        tags_filter=tags
-                    )
+                # Exact label match = highest score
+                if query.lower() in row['label'].lower():
+                    score += 1.0
 
-                    if results:
-                        return json.dumps({
-                            "search_mode": "semantic",
-                            "query": query,
-                            "total_results": len(results),
-                            "results": results,
-                            "note": "Results ranked by semantic similarity (0-1)"
-                        }, indent=2)
-        except Exception as e:
-            # Fall back to keyword search
-            print(f"⚠️  Semantic search unavailable: {e}", file=sys.stderr)
+                # Key concepts match
+                if row['key_concepts'] and query.lower() in row['key_concepts'].lower():
+                    score += 0.7
 
-    # Fall back to keyword search
-    # Build SQL query
-    sql = """
-        SELECT
-            label, version, content, preview, key_concepts,
-            locked_at, metadata, last_accessed, access_count
-        FROM context_locks
-        WHERE session_id = ?
-          AND (
-              content LIKE ?
-              OR preview LIKE ?
-              OR key_concepts LIKE ?
-              OR label LIKE ?
-          )
-    """
+                # Content match
+                if row['content'] and query.lower() in row['content'].lower():
+                    score += 0.5
 
-    params = [session_id, f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%']
+                # Preview match
+                if row['preview'] and query.lower() in row['preview'].lower():
+                    score += 0.3
 
-    # Add priority filter
-    if priority:
-        sql += " AND (metadata::json)->>'priority' = ?"
-        params.append(priority)
+                # Parse metadata
+                metadata = json.loads(row['metadata']) if row['metadata'] else {}
 
-    # Add tags filter
-    if tags:
-        tag_conditions = []
-        for tag in tags.split(','):
-            tag = tag.strip()
-            tag_conditions.append("(metadata::json)->>'tags' LIKE ?")
-            params.append(f'%{tag}%')
-        sql += f" AND ({' OR '.join(tag_conditions)})"
+                scored_results.append({
+                    "label": row['label'],
+                    "version": row['version'],
+                    "score": round(score, 2),
+                    "preview": row['preview'] or row['content'][:200] + "..." if row['content'] else "",
+                    "priority": metadata.get('priority', 'reference'),
+                    "tags": metadata.get('tags', []),
+                    "last_accessed": row['last_accessed'],
+                    "access_count": row['access_count'] or 0
+                })
 
-    sql += " LIMIT ?"
-    params.append(limit)
+            # Sort by score (highest first)
+            scored_results.sort(key=lambda x: x['score'], reverse=True)
 
-    try:
-        cursor = conn.execute(sql, params)
-        results = cursor.fetchall()
-
-        if not results:
             return json.dumps({
+                "search_mode": "keyword",
                 "query": query,
                 "filters": {
                     "priority": priority,
-                    "tags": tags
+                    "tags": tags,
+                    "limit": limit
                 },
-                "total_found": 0,
-                "message": "No contexts found matching query",
-                "results": []
+                "total_found": len(scored_results),
+                "results": scored_results,
+                "note": "Results ranked by keyword relevance (0-3.5 max)"
             }, indent=2)
 
-        # Calculate relevance scores
-        scored_results = []
-        for row in results:
-            score = 0.0
-
-            # Exact label match = highest score
-            if query.lower() in row['label'].lower():
-                score += 1.0
-
-            # Key concepts match
-            if row['key_concepts'] and query.lower() in row['key_concepts'].lower():
-                score += 0.7
-
-            # Content match
-            if row['content'] and query.lower() in row['content'].lower():
-                score += 0.5
-
-            # Preview match
-            if row['preview'] and query.lower() in row['preview'].lower():
-                score += 0.3
-
-            # Parse metadata
-            metadata = json.loads(row['metadata']) if row['metadata'] else {}
-
-            scored_results.append({
-                "label": row['label'],
-                "version": row['version'],
-                "score": round(score, 2),
-                "preview": row['preview'] or row['content'][:200] + "..." if row['content'] else "",
-                "priority": metadata.get('priority', 'reference'),
-                "tags": metadata.get('tags', []),
-                "last_accessed": row['last_accessed'],
-                "access_count": row['access_count'] or 0
-            })
-
-        # Sort by score (highest first)
-        scored_results.sort(key=lambda x: x['score'], reverse=True)
-
-        return json.dumps({
-            "search_mode": "keyword",
-            "query": query,
-            "filters": {
-                "priority": priority,
-                "tags": tags,
-                "limit": limit
-            },
-            "total_found": len(scored_results),
-            "results": scored_results,
-            "note": "Results ranked by keyword relevance (0-3.5 max)"
-        }, indent=2)
-
-    except Exception as e:
-        return f"❌ Search error: {str(e)}"
+        except Exception as e:
+            return f"❌ Search error: {str(e)}"
 
 
 
@@ -4864,14 +4871,15 @@ async def sync_project_memory(
                     )
 
                     # Update metadata to mark as auto-generated
-                    conn = _get_db_for_project(project)
-                    session_id = _get_session_id_for_project(conn, project)
-                    conn.execute("""
-                        UPDATE context_locks
-                        SET metadata = ?
-                        WHERE label = ? AND session_id = ?
-                    """, (json.dumps(metadata_dict), label, session_id))
-                    conn.commit()
+                    # ✅ FIX: Use context manager to ensure connection is closed
+                    with _get_db_for_project(project) as conn:
+                        session_id = _get_session_id_for_project(conn, project)
+                        conn.execute("""
+                            UPDATE context_locks
+                            SET metadata = ?
+                            WHERE label = ? AND session_id = ?
+                        """, (json.dumps(metadata_dict), label, session_id))
+                        conn.commit()
 
                 created.append(f"      ✅ Created '{label}' ({priority})")
             else:
