@@ -94,6 +94,32 @@ def _get_db_adapter():
         _adapter_cache[_postgres_adapter.schema] = _postgres_adapter
     return _postgres_adapter
 
+def _validate_schema_name(schema_name: str) -> None:
+    """
+    Validate schema name to prevent SQL injection.
+
+    Schema names must:
+    - Be 1-63 characters (PostgreSQL limit)
+    - Only contain alphanumeric, underscore, or hyphen
+    - Not start with a digit
+
+    Raises:
+        ValueError: If schema name is invalid
+    """
+    if not schema_name:
+        raise ValueError("Schema name cannot be empty")
+
+    if len(schema_name) > 63:
+        raise ValueError(f"Schema name too long: {len(schema_name)} chars (max 63)")
+
+    # Check for valid characters (alphanumeric, underscore, hyphen)
+    import re
+    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_-]*$', schema_name):
+        raise ValueError(
+            f"Invalid schema name '{schema_name}': "
+            "must start with letter/underscore and contain only alphanumeric, underscore, or hyphen"
+        )
+
 def _get_cached_adapter(schema_name: str) -> PostgreSQLAdapter:
     """
     Get or create a cached adapter for the given schema.
@@ -103,6 +129,9 @@ def _get_cached_adapter(schema_name: str) -> PostgreSQLAdapter:
     Creating multiple adapters for the same schema exhausts the connection pool!
     """
     global _adapter_cache
+
+    # Validate schema name to prevent SQL injection
+    _validate_schema_name(schema_name)
 
     if schema_name not in _adapter_cache:
         adapter = PostgreSQLAdapter(
