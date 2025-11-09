@@ -256,6 +256,34 @@ class PostgreSQLSessionStore:
         finally:
             self.adapter.release_connection(conn)
 
+    def update_session_project(self, session_id: str, project_name: str) -> bool:
+        """
+        Update session's project_name field (e.g., from __PENDING__ to actual project).
+
+        Args:
+            session_id: Session identifier
+            project_name: New project name to set
+
+        Returns:
+            True if session was updated, False if session not found
+        """
+        conn = self.adapter.get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE mcp_sessions
+                    SET project_name = %s
+                    WHERE session_id = %s
+                """, (project_name, session_id))
+
+                updated = cur.rowcount > 0
+                conn.commit()
+
+                return updated
+
+        finally:
+            self.adapter.release_connection(conn)
+
     def delete_session(self, session_id: str) -> bool:
         """
         Delete a session from the database.

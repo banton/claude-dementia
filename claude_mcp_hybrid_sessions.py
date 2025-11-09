@@ -1999,40 +1999,33 @@ async def switch_project(name: str) -> str:
         safe_name = re.sub(r'[^a-z0-9]', '_', name.lower())
         safe_name = re.sub(r'_+', '_', safe_name).strip('_')[:32]
 
-        # Get session ID
-        try:
-            session_id = get_current_session_id()
-        except:
+        # UNIVERSAL PROJECT SELECTION: Use _local_session_id as single source of truth
+        if not _session_store or not _local_session_id:
             return json.dumps({
                 "success": False,
-                "error": "Could not determine session ID"
+                "error": "No active session - session store not initialized"
             })
 
-        # Set active project for this session (in-memory for backwards compatibility)
-        _active_projects[session_id] = safe_name
-
-        # Persist active project to database for MCP server statelessness
+        # Update the global session store's project_name field (SINGLE SOURCE OF TRUTH)
         try:
-            # Get connection for the target project
-            project_conn = _get_db_for_project(safe_name)
-            session_id_for_project = _get_session_id_for_project(project_conn, safe_name)
-
-            # Update session with active_project
-            if hasattr(project_conn, 'execute_with_conversion'):  # PostgreSQL
-                project_conn.execute_with_conversion(
-                    "UPDATE sessions SET active_project = ? WHERE id = ?",
-                    (safe_name, session_id_for_project)
-                )
-                project_conn.commit()
-            else:  # SQLite
-                project_conn.execute(
-                    "UPDATE sessions SET active_project = ? WHERE id = ?",
-                    (safe_name, session_id_for_project)
-                )
-                project_conn.commit()
+            updated = _session_store.update_session_project(_local_session_id, safe_name)
+            if updated:
+                print(f"✅ Switched to project: {safe_name} (session: {_local_session_id[:8]})", file=sys.stderr)
+            else:
+                print(f"⚠️  Session not found: {_local_session_id[:8]}", file=sys.stderr)
+                return json.dumps({
+                    "success": False,
+                    "error": f"Session {_local_session_id[:8]} not found in database"
+                })
         except Exception as e:
-            # Don't fail if we can't persist - fall back to in-memory only
-            pass
+            print(f"❌ Failed to update session project: {e}", file=sys.stderr)
+            return json.dumps({
+                "success": False,
+                "error": f"Failed to update session: {str(e)}"
+            })
+
+        # Also update in-memory cache for backwards compatibility
+        _active_projects[_local_session_id] = safe_name
 
         # Check if project exists
         import psycopg2
