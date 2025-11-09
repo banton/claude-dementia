@@ -8368,6 +8368,192 @@ async def health_check_and_repair(
         }, indent=2)
 
 
+@mcp.tool()
+async def inspect_schema(
+    project: Optional[str] = None,
+    table: Optional[str] = None
+) -> str:
+    """
+    PostgreSQL-aware schema inspection.
+
+    Returns detailed schema information using information_schema.
+    This is a lightweight alternative to health_check_and_repair() when you
+    just need schema structure without validation.
+
+    Args:
+        project: Project name (default: auto-detect)
+        table: Specific table name (default: all tables)
+               If specified, returns detailed info for just that table
+
+    Returns:
+        JSON with complete schema structure including:
+        - database_type: "postgresql"
+        - database_version: PostgreSQL version
+        - schema: Project schema name
+        - tables: List of tables with columns, indexes, constraints
+        - [If table specified] Detailed single table info
+
+    Example:
+        User: "Show me the schema structure"
+        LLM: inspect_schema()
+
+        User: "What columns does context_locks have?"
+        LLM: inspect_schema(table="context_locks")
+    """
+    try:
+        project_name = _resolve_project(project)
+        db = get_db()
+
+        conn = db.pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                # Get PostgreSQL version
+                cur.execute("SELECT version()")
+                version_str = cur.fetchone()["version"]
+                pg_version = version_str.split()[1] if version_str else "unknown"
+
+                # Build table list query
+                if table:
+                    # Single table inspection
+                    table_filter = "AND table_name = %s"
+                    params = (db.schema, table)
+                else:
+                    # All tables
+                    table_filter = ""
+                    params = (db.schema,)
+
+                # Get all tables in schema
+                cur.execute(f"""
+                    SELECT table_name
+                    FROM information_schema.tables
+                    WHERE table_schema = %s
+                      AND table_type = 'BASE TABLE'
+                      {table_filter}
+                    ORDER BY table_name
+                """, params)
+                tables_list = [row["table_name"] for row in cur.fetchall()]
+
+                if not tables_list:
+                    if table:
+                        return json.dumps({
+                            "error": f"Table '{table}' not found in schema '{db.schema}'",
+                            "available_tables": []
+                        }, indent=2)
+                    else:
+                        return json.dumps({
+                            "project": project_name,
+                            "schema": db.schema,
+                            "database_type": "postgresql",
+                            "database_version": pg_version,
+                            "tables": [],
+                            "message": "No tables found in schema"
+                        }, indent=2)
+
+                # Gather detailed info for each table
+                tables_info = []
+                for tbl in tables_list:
+                    # Get column information
+                    cur.execute(f"""
+                        SELECT
+                            column_name,
+                            data_type,
+                            is_nullable,
+                            column_default,
+                            character_maximum_length
+                        FROM information_schema.columns
+                        WHERE table_schema = %s
+                          AND table_name = %s
+                        ORDER BY ordinal_position
+                    """, (db.schema, tbl))
+                    columns = []
+                    for col in cur.fetchall():
+                        columns.append({
+                            "name": col["column_name"],
+                            "type": col["data_type"].upper(),
+                            "nullable": col["is_nullable"] == "YES",
+                            "default": col["column_default"],
+                            "max_length": col["character_maximum_length"]
+                        })
+
+                    # Get index information
+                    cur.execute(f"""
+                        SELECT
+                            i.relname as index_name,
+                            a.attname as column_name,
+                            ix.indisunique as is_unique,
+                            ix.indisprimary as is_primary,
+                            am.amname as index_type
+                        FROM pg_class t
+                        JOIN pg_index ix ON t.oid = ix.indrelid
+                        JOIN pg_class i ON i.oid = ix.indexrelid
+                        JOIN pg_am am ON i.relam = am.oid
+                        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+                        WHERE t.relname = %s
+                          AND t.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = %s)
+                        ORDER BY i.relname, a.attnum
+                    """, (tbl, db.schema))
+
+                    indexes = {}
+                    for idx in cur.fetchall():
+                        idx_name = idx["index_name"]
+                        if idx_name not in indexes:
+                            indexes[idx_name] = {
+                                "name": idx_name,
+                                "columns": [],
+                                "unique": idx["is_unique"],
+                                "primary": idx["is_primary"],
+                                "type": idx["index_type"]
+                            }
+                        indexes[idx_name]["columns"].append(idx["column_name"])
+
+                    # Get table size and row count
+                    cur.execute(f"""
+                        SELECT
+                            pg_size_pretty(pg_total_relation_size(%s || '.' || %s)) as size,
+                            n_live_tup as rows
+                        FROM pg_stat_user_tables
+                        WHERE schemaname = %s
+                          AND relname = %s
+                    """, (db.schema, tbl, db.schema, tbl))
+                    stats = cur.fetchone()
+
+                    tables_info.append({
+                        "name": tbl,
+                        "rows": stats["rows"] if stats else 0,
+                        "size": stats["size"] if stats else "0 bytes",
+                        "columns": columns,
+                        "indexes": list(indexes.values())
+                    })
+
+                # Build final response
+                response = {
+                    "project": project_name,
+                    "schema": db.schema,
+                    "database_type": "postgresql",
+                    "database_version": pg_version,
+                    "tables": tables_info
+                }
+
+                if table:
+                    # Single table mode - add helpful context
+                    response["inspected_table"] = table
+                    response["column_count"] = len(tables_info[0]["columns"])
+                    response["index_count"] = len(tables_info[0]["indexes"])
+
+                return json.dumps(response, indent=2, default=str)
+
+        finally:
+            db.pool.putconn(conn)
+
+    except Exception as e:
+        logger.error(f"Schema inspection failed: {e}", exc_info=True)
+        return json.dumps({
+            "error": str(e),
+            "type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        }, indent=2)
+
+
 # ============================================================================
 # RUN SERVER
 # ============================================================================
