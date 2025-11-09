@@ -5547,6 +5547,7 @@ async def execute_sql(
             if 'WHERE' not in sql_upper:
                 return f"❌ WARNING: {operation} without WHERE clause affects ALL rows!\n\nThis is potentially dangerous. If you really want to do this, add a WHERE clause like:\n  WHERE 1=1  (to explicitly confirm bulk operation)\n\nOr use a specific condition to limit scope."
 
+        # ✅ FIX: Use context managers to ensure connections are closed
         # Connect to database
         if db_path:
             # Validate path is in workspace
@@ -5559,142 +5560,146 @@ async def execute_sql(
             if not os.path.exists(abs_db_path):
                 return f"❌ Error: Database file not found: {db_path}"
 
-            conn = sqlite3.connect(abs_db_path)
+            # SQLite path - use context manager
+            connection_manager = sqlite3.connect(abs_db_path)
         else:
-            # Use default dementia database
-            conn = _get_db_for_project(project)
+            # PostgreSQL path - use context manager
+            connection_manager = _get_db_for_project(project)
 
-        conn.row_factory = sqlite3.Row
+        with connection_manager as conn:
+            # Set row factory for SQLite (PostgreSQL returns dicts by default)
+            if hasattr(conn, 'row_factory'):
+                conn.row_factory = sqlite3.Row
 
-        # DRY RUN MODE
-        if dry_run:
-            output = ["🔍 DRY RUN - No changes will be made", "=" * 60, ""]
-            output.append(f"Operation: {operation}")
-            output.append(f"SQL: {sql}")
-            if params:
-                output.append(f"Params: {params}")
-            output.append("")
-
-            # Generate preview query based on operation
-            if operation == 'INSERT':
-                output.append("Would insert 1 new row with the provided values.")
+            # DRY RUN MODE
+            if dry_run:
+                output = ["🔍 DRY RUN - No changes will be made", "=" * 60, ""]
+                output.append(f"Operation: {operation}")
+                output.append(f"SQL: {sql}")
+                if params:
+                    output.append(f"Params: {params}")
                 output.append("")
+    
+                # Generate preview query based on operation
+                if operation == 'INSERT':
+                    output.append("Would insert 1 new row with the provided values.")
+                    output.append("")
+                    output.append("To execute: Set dry_run=False and confirm=True")
+    
+                elif operation == 'UPDATE':
+                    # Convert UPDATE to SELECT to show affected rows
+                    # This is a simple heuristic - extract table and WHERE clause
+                    match = re.search(r'UPDATE\s+(\w+)\s+SET.*?(WHERE.*)', sql_upper, re.IGNORECASE | re.DOTALL)
+                    if match:
+                        table = match.group(1)
+                        where_clause = match.group(2)
+    
+                        # Get actual table name from original SQL (preserve case)
+                        table_match = re.search(r'UPDATE\s+(\w+)', sql, re.IGNORECASE)
+                        if table_match:
+                            table = table_match.group(1)
+    
+                        preview_sql = f"SELECT * FROM {table} {where_clause}"
+    
+                        try:
+                            if params:
+                                cursor = conn.execute(preview_sql, params)
+                            else:
+                                cursor = conn.execute(preview_sql)
+    
+                            rows = cursor.fetchall()
+                            output.append(f"Would affect {len(rows)} rows:")
+    
+                            if rows:
+                                output.append("")
+                                # Show first few rows as preview
+                                for i, row in enumerate(rows[:5]):
+                                    output.append(f"  Row {i+1}: {dict(row)}")
+                                if len(rows) > 5:
+                                    output.append(f"  ... and {len(rows) - 5} more rows")
+    
+                        except Exception as e:
+                            output.append(f"Preview query failed: {str(e)}")
+                    else:
+                        output.append("Could not generate preview (complex UPDATE syntax)")
+    
+                elif operation == 'DELETE':
+                    # Convert DELETE to SELECT to show affected rows
+                    match = re.search(r'DELETE\s+FROM\s+(\w+)(.*)', sql, re.IGNORECASE | re.DOTALL)
+                    if match:
+                        table = match.group(1)
+                        where_part = match.group(2).strip()
+    
+                        preview_sql = f"SELECT * FROM {table} {where_part}"
+    
+                        try:
+                            if params:
+                                cursor = conn.execute(preview_sql, params)
+                            else:
+                                cursor = conn.execute(preview_sql)
+    
+                            rows = cursor.fetchall()
+                            output.append(f"Would delete {len(rows)} rows:")
+    
+                            if rows:
+                                output.append("")
+                                for i, row in enumerate(rows[:5]):
+                                    output.append(f"  Row {i+1}: {dict(row)}")
+                                if len(rows) > 5:
+                                    output.append(f"  ... and {len(rows) - 5} more rows")
+                        except Exception as e:
+                            output.append(f"Preview query failed: {str(e)}")
+                    else:
+                        output.append("Could not generate preview (complex DELETE syntax)")
+    
+                output.append("")
+                output.append("=" * 60)
                 output.append("To execute: Set dry_run=False and confirm=True")
-
-            elif operation == 'UPDATE':
-                # Convert UPDATE to SELECT to show affected rows
-                # This is a simple heuristic - extract table and WHERE clause
-                match = re.search(r'UPDATE\s+(\w+)\s+SET.*?(WHERE.*)', sql_upper, re.IGNORECASE | re.DOTALL)
-                if match:
-                    table = match.group(1)
-                    where_clause = match.group(2)
-
-                    # Get actual table name from original SQL (preserve case)
-                    table_match = re.search(r'UPDATE\s+(\w+)', sql, re.IGNORECASE)
-                    if table_match:
-                        table = table_match.group(1)
-
-                    preview_sql = f"SELECT * FROM {table} {where_clause}"
-
-                    try:
-                        if params:
-                            cursor = conn.execute(preview_sql, params)
-                        else:
-                            cursor = conn.execute(preview_sql)
-
-                        rows = cursor.fetchall()
-                        output.append(f"Would affect {len(rows)} rows:")
-
-                        if rows:
-                            output.append("")
-                            # Show first few rows as preview
-                            for i, row in enumerate(rows[:5]):
-                                output.append(f"  Row {i+1}: {dict(row)}")
-                            if len(rows) > 5:
-                                output.append(f"  ... and {len(rows) - 5} more rows")
-
-                    except Exception as e:
-                        output.append(f"Preview query failed: {str(e)}")
-                else:
-                    output.append("Could not generate preview (complex UPDATE syntax)")
-
-            elif operation == 'DELETE':
-                # Convert DELETE to SELECT to show affected rows
-                match = re.search(r'DELETE\s+FROM\s+(\w+)(.*)', sql, re.IGNORECASE | re.DOTALL)
-                if match:
-                    table = match.group(1)
-                    where_part = match.group(2).strip()
-
-                    preview_sql = f"SELECT * FROM {table} {where_part}"
-
-                    try:
-                        if params:
-                            cursor = conn.execute(preview_sql, params)
-                        else:
-                            cursor = conn.execute(preview_sql)
-
-                        rows = cursor.fetchall()
-                        output.append(f"Would delete {len(rows)} rows:")
-
-                        if rows:
-                            output.append("")
-                            for i, row in enumerate(rows[:5]):
-                                output.append(f"  Row {i+1}: {dict(row)}")
-                            if len(rows) > 5:
-                                output.append(f"  ... and {len(rows) - 5} more rows")
-                    except Exception as e:
-                        output.append(f"Preview query failed: {str(e)}")
-                else:
-                    output.append("Could not generate preview (complex DELETE syntax)")
-
-            output.append("")
-            output.append("=" * 60)
-            output.append("To execute: Set dry_run=False and confirm=True")
-
-            return "\n".join(output)
-
-        # EXECUTE MODE
-        if not confirm:
-            return f"❌ Error: Confirmation required to execute.\n\nThis operation will modify the database.\n\nTo proceed, set confirm=True:\n  execute_sql(..., dry_run=False, confirm=True)"
-
-        # Start transaction and execute
-        start_time = time.time()
-
-        try:
-            conn.execute("BEGIN TRANSACTION")
-
-            if params:
-                cursor = conn.execute(sql, params)
-            else:
-                cursor = conn.execute(sql)
-
-            affected_rows = cursor.rowcount
-            execution_time = (time.time() - start_time) * 1000  # Convert to ms
-
-            # Check max_affected limit
-            if max_affected is not None and affected_rows > max_affected:
-                conn.execute("ROLLBACK")
-                return f"❌ Error: Operation would affect {affected_rows} rows, exceeding limit of {max_affected}.\n\nTransaction rolled back. No changes made.\n\nTo proceed, increase max_affected or refine your WHERE clause."
-
-            # Commit transaction
-            conn.execute("COMMIT")
-
-            # Success report
-            output = ["✅ SUCCESS!", "=" * 60, ""]
-            output.append(f"Operation: {operation}")
-            output.append(f"Affected rows: {affected_rows}")
-            output.append(f"Execution time: {execution_time:.2f}ms")
-            output.append("")
-            output.append("=" * 60)
-
-            return "\n".join(output)
-
-        except Exception as e:
-            # Rollback on error
+    
+                return "\n".join(output)
+    
+            # EXECUTE MODE
+            if not confirm:
+                return f"❌ Error: Confirmation required to execute.\n\nThis operation will modify the database.\n\nTo proceed, set confirm=True:\n  execute_sql(..., dry_run=False, confirm=True)"
+    
+            # Start transaction and execute
+            start_time = time.time()
+    
             try:
-                conn.execute("ROLLBACK")
-            except:
-                pass
+                conn.execute("BEGIN TRANSACTION")
+    
+                if params:
+                    cursor = conn.execute(sql, params)
+                else:
+                    cursor = conn.execute(sql)
+    
+                affected_rows = cursor.rowcount
+                execution_time = (time.time() - start_time) * 1000  # Convert to ms
+    
+                # Check max_affected limit
+                if max_affected is not None and affected_rows > max_affected:
+                    conn.execute("ROLLBACK")
+                    return f"❌ Error: Operation would affect {affected_rows} rows, exceeding limit of {max_affected}.\n\nTransaction rolled back. No changes made.\n\nTo proceed, increase max_affected or refine your WHERE clause."
+    
+                # Commit transaction
+                conn.execute("COMMIT")
+    
+                # Success report
+                output = ["✅ SUCCESS!", "=" * 60, ""]
+                output.append(f"Operation: {operation}")
+                output.append(f"Affected rows: {affected_rows}")
+                output.append(f"Execution time: {execution_time:.2f}ms")
+                output.append("")
+                output.append("=" * 60)
+    
+                return "\n".join(output)
+    
+            except Exception as e:
+                # Rollback on error
+                try:
+                    conn.execute("ROLLBACK")
+                except:
+                    pass
 
             return f"❌ Error: Operation failed and was rolled back.\n\nError: {str(e)}\n\nNo changes were made to the database."
 
