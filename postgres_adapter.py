@@ -44,63 +44,12 @@ import json
 # Load environment variables
 load_dotenv()
 
-# Shared connection pool across all schemas (prevents pool exhaustion)
-# All schemas share the same database, so we only need one pool
-_shared_pool = None
-_shared_pool_lock = None
-
-def _get_shared_pool(database_url: str):
-    """
-    Get or create the shared connection pool.
-
-    CRITICAL: All schemas share one pool to prevent connection exhaustion.
-    With Neon free tier (10 connections), we can't afford separate pools per schema.
-    """
-    global _shared_pool, _shared_pool_lock
-
-    if _shared_pool is None:
-        import threading
-        if _shared_pool_lock is None:
-            _shared_pool_lock = threading.Lock()
-
-        with _shared_pool_lock:
-            if _shared_pool is None:  # Double-check after acquiring lock
-                max_retries = 5
-                initial_delay = 2.0
-                delay = initial_delay
-
-                for attempt in range(max_retries):
-                    try:
-                        # Shared pool for ALL schemas (schema set via search_path per connection)
-                        # Neon free tier: 10 connections total
-                        # Stdio mode: max 3 concurrent uses across all schemas
-                        _shared_pool = psycopg2.pool.SimpleConnectionPool(
-                            1,  # min_connections: 1 (always keep one alive)
-                            3,  # max_connections: 3 (sufficient for stdio, prevents exhaustion)
-                            database_url,
-                            cursor_factory=RealDictCursor,
-                            connect_timeout=15
-                        )
-                        print(f"✅ Shared PostgreSQL connection pool initialized (min=1, max=3)", file=sys.stderr)
-                        break
-                    except Exception as e:
-                        error_msg = str(e).lower()
-                        is_cold_start = any(keyword in error_msg for keyword in [
-                            'ssl', 'timeout', 'connection refused', 'temporarily unavailable',
-                            'could not connect', 'server closed the connection',
-                            'connection timed out', 'network unreachable', 'suspended'
-                        ])
-
-                        if is_cold_start and attempt < max_retries - 1:
-                            jitter = random.uniform(0, delay * 0.3)
-                            wait_time = delay + jitter
-                            print(f"⏳ Neon database wakeup (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.2f}s...", file=sys.stderr)
-                            time.sleep(wait_time)
-                            delay *= 2
-                        else:
-                            raise ConnectionError(f"Failed to create shared connection pool after {max_retries} attempts: {e}")
-
-    return _shared_pool
+# NOTE: No application-side connection pooling when using Neon's pooler endpoint
+# Neon's PgBouncer pooler (indicated by -pooler in hostname) handles pooling with
+# support for up to 10,000 concurrent connections. Application-side pooling on top
+# of Neon's pooler causes connection exhaustion issues.
+#
+# See: https://neon.com/docs/connect/connection-pooling
 
 
 class PostgreSQLAdapter:
@@ -129,10 +78,10 @@ class PostgreSQLAdapter:
         # Determine schema name
         self.schema = schema or self._get_schema_name()
 
-        # Use shared connection pool (prevents pool exhaustion with multiple schemas)
-        # CRITICAL: All schemas share one pool since they're on the same database
-        # Schema isolation is achieved via search_path on each connection
-        self.pool = _get_shared_pool(self.database_url)
+        # Check if using Neon's pooler endpoint
+        self.using_neon_pooler = '-pooler.' in self.database_url
+        if self.using_neon_pooler:
+            print(f"✅ Using Neon's PgBouncer pooler (no app-side pooling needed)", file=sys.stderr)
 
     def _get_schema_name(self) -> str:
         """
@@ -197,107 +146,51 @@ class PostgreSQLAdapter:
         # Limit length
         return safe[:32]
 
-    def _validate_connection(self, conn):
-        """
-        Validate that connection is alive and ready to use.
-
-        Neon may close idle connections when autosuspending (after 5 min inactivity).
-        This prevents "SSL connection closed unexpectedly" errors.
-
-        Args:
-            conn: psycopg2 connection from pool
-
-        Returns:
-            bool: True if connection is valid, False if stale/closed
-
-        Raises:
-            Exception: Re-raises non-connection errors (e.g., permission errors)
-        """
-        try:
-            # Quick ping to check if connection is alive
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                cur.fetchone()
-            return True
-        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
-            # Connection is stale/closed (Neon autosuspend or network issue)
-            error_msg = str(e).lower()
-            is_stale = any(keyword in error_msg for keyword in [
-                'ssl', 'closed', 'terminated', 'broken', 'connection reset',
-                'server closed the connection', 'connection lost'
-            ])
-
-            if is_stale:
-                print(f"⚠️  Stale connection detected: {e}", file=sys.stderr)
-                return False
-            else:
-                # Not a stale connection error - re-raise
-                raise
-
     def get_connection(self, max_retries=5, initial_delay=2.0):
         """
-        Get a validated connection from the pool with schema isolation applied.
+        Create a new database connection with schema isolation.
+
+        When using Neon's pooler endpoint, creates direct connections since
+        Neon's PgBouncer handles connection pooling (up to 10,000 connections).
 
         Implements:
-        1. Connection validation to detect stale connections (Neon autosuspend)
-        2. Automatic refresh of stale connections (transparent to caller)
+        1. Direct connection creation (Neon pooler handles pooling)
+        2. Per-connection search_path setting (works with transaction pooling)
         3. Retry logic for Neon database cold starts (compute autoscaling)
-
-        Neon databases "sleep" after 5 min inactivity and close pooled connections.
-        This method validates connections before returning them, ensuring no
-        "SSL connection closed unexpectedly" errors reach the caller.
 
         Args:
             max_retries: Maximum connection attempts (default: 5)
             initial_delay: Initial retry delay in seconds (default: 2.0, doubles each retry)
 
         Returns:
-            psycopg2.connection: Validated database connection with search_path set to schema
+            psycopg2.connection: Database connection with search_path set to schema
 
         Raises:
-            OperationalError: If all retry attempts fail or all pooled connections are stale
+            OperationalError: If all retry attempts fail
         """
         last_error = None
         delay = initial_delay
 
         for attempt in range(max_retries):
             try:
-                # Add timeout to prevent indefinite hang if pool is exhausted
-                # Use concurrent.futures for timeout support
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(self.pool.getconn)
-                    try:
-                        conn = future.result(timeout=10.0)  # 10 second timeout
-                    except concurrent.futures.TimeoutError:
-                        raise OperationalError("Connection pool timeout: no connections available after 10s. Pool may be exhausted due to connection leaks.")
+                # Create direct connection - Neon's pooler handles the pooling
+                conn = psycopg2.connect(
+                    self.database_url,
+                    cursor_factory=RealDictCursor,
+                    connect_timeout=15
+                )
 
-                # VALIDATION LOOP: Check if connection is alive (handles Neon autosuspend)
-                # Try up to 2 times to get a fresh connection if stale
-                MAX_VALIDATION_ATTEMPTS = 2
-                for validation_attempt in range(MAX_VALIDATION_ATTEMPTS):
-                    if self._validate_connection(conn):
-                        # ✅ Connection is alive, continue to setup
-                        break
-                    else:
-                        # ❌ Connection is stale (Neon autosuspended), get fresh one
-                        if validation_attempt < MAX_VALIDATION_ATTEMPTS - 1:
-                            print(f"🔄 Refreshing stale connection (validation attempt {validation_attempt + 2}/{MAX_VALIDATION_ATTEMPTS})",
-                                  file=sys.stderr)
-                            try:
-                                conn.close()
-                            except:
-                                pass
-                            # Get new connection from pool
-                            conn = self.pool.getconn()
-                        else:
-                            # All validation attempts failed
-                            raise OperationalError("Failed to get valid connection: all pooled connections are stale")
-
-                # CRITICAL FIX: search_path is now set at ROLE level (see ensure_schema_exists)
-                # Only set statement_timeout per-connection (compatible with Neon transaction pooling)
+                # Set search_path per-connection
+                # With Neon's transaction pooling, this only lasts for the transaction,
+                # but since connections are short-lived with Neon's pooler, this is fine
                 with conn.cursor() as cur:
+                    # Set schema isolation via search_path
+                    cur.execute(
+                        sql.SQL("SET search_path TO {}, public").format(
+                            sql.Identifier(self.schema)
+                        )
+                    )
                     # Set statement timeout (30 seconds)
-                    # This is OK per-connection even with transaction pooling
                     cur.execute("SET statement_timeout = '30s'")
 
                 # Connection successful
@@ -333,8 +226,11 @@ class PostgreSQLAdapter:
         raise last_error
 
     def release_connection(self, conn):
-        """Return connection to the pool."""
-        self.pool.putconn(conn)
+        """Close the connection (Neon's pooler handles reuse)."""
+        try:
+            conn.close()
+        except Exception as e:
+            print(f"⚠️  Error closing connection: {e}", file=sys.stderr)
 
     @contextmanager
     def connection(self, max_retries=5, initial_delay=2.0):
@@ -367,12 +263,10 @@ class PostgreSQLAdapter:
         Ensure schema exists and has required tables.
         Creates schema and runs migrations if needed.
 
-        CRITICAL FIX for Neon transaction pooling:
-        Uses ALTER ROLE to set search_path permanently instead of per-connection SET.
-        This is required because Neon uses pool_mode=transaction where SET statements
-        only last one transaction, causing connection pool exhaustion.
+        Uses per-connection search_path setting which works perfectly with
+        Neon's transaction pooling since we create fresh connections each time.
         """
-        conn = self.pool.getconn()
+        conn = self.get_connection()
         try:
             with conn.cursor() as cur:
                 # Create schema if not exists
@@ -382,21 +276,8 @@ class PostgreSQLAdapter:
                     )
                 )
 
-                # CRITICAL FIX: Set search_path at ROLE level (not session level)
-                # This persists across all connections for this role, compatible with Neon transaction pooling
-                # Extract role name from connection
-                cur.execute("SELECT CURRENT_USER")
-                role_name = cur.fetchone()['current_user']
-
-                # Set search_path permanently for this role
-                # This replaces the per-connection SET which doesn't work with Neon's pool_mode=transaction
-                cur.execute(
-                    sql.SQL("ALTER ROLE {} SET search_path TO {}, public").format(
-                        sql.Identifier(role_name),
-                        sql.Identifier(self.schema)
-                    )
-                )
-                print(f"✅ Set search_path for role '{role_name}' to '{self.schema}, public'", file=sys.stderr)
+                # search_path is already set in get_connection()
+                # No need to set it again or use ALTER ROLE
 
                 # Create tables (PostgreSQL syntax)
                 self._create_tables(cur)
@@ -404,7 +285,7 @@ class PostgreSQLAdapter:
                 conn.commit()
                 print(f"✅ Schema '{self.schema}' ready with all tables", file=sys.stderr)
         finally:
-            self.pool.putconn(conn)
+            self.release_connection(conn)
 
     def _create_tables(self, cur):
         """Create all required tables in current schema."""
