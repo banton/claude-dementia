@@ -241,24 +241,29 @@ def _auto_load_handover() -> Optional[str]:
     _handover_auto_loaded = True
 
     try:
-        # Get current project
+        # Get current project and database adapter
         project = _get_project_for_context()
-        conn = _get_db_for_project(project)
+        adapter = _get_db_adapter()
         session_id = get_current_session_id()
 
         # Look for most recent handover from a different session
-        cursor = conn.execute("""
-            SELECT metadata, created_at FROM handovers
-            WHERE session_id != ? AND project_name = ?
-            ORDER BY created_at DESC
-            LIMIT 1
-        """, (session_id, project))
+        # Handovers are stored in memory_entries with category='handover'
+        with adapter.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT metadata, timestamp
+                    FROM memory_entries
+                    WHERE category = 'handover'
+                      AND session_id != %s
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                """, (session_id,))
 
-        handover = cursor.fetchone()
+                handover = cur.fetchone()
 
         if handover:
-            handover_data = json.loads(handover['metadata'])
-            hours_ago = (time.time() - handover['created_at']) / 3600
+            handover_data = json.loads(handover[0])  # metadata is first column
+            hours_ago = (time.time() - handover[1]) / 3600  # timestamp is second column
 
             # Build compact summary
             summary_parts = []
@@ -295,6 +300,7 @@ def _auto_load_handover() -> Optional[str]:
         logger.debug(f"Auto-load handover failed: {e}")
         _handover_message = None
         return None
+
 
 # Session-level active project tracking (per conversation)
 _active_projects = {}  # {session_id: project_name}
