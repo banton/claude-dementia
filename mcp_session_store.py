@@ -318,30 +318,28 @@ class PostgreSQLSessionStore:
         Returns:
             List of project dicts with:
             - project_name: Project name
-            - context_locks: Count of locked contexts
+            - context_locks: Count of locked contexts (placeholder, not accurate)
             - last_used: Human-readable time (e.g., "2 days ago")
             - last_used_timestamp: ISO timestamp
+
+        Note: context_locks count is set to 0 because context_locks table
+        is in per-project schemas, not in public schema with mcp_sessions.
+        Getting accurate counts would require querying each schema separately.
         """
         conn = self.adapter.get_connection()
         try:
             with conn.cursor() as cur:
                 # Get projects from mcp_sessions with last activity
+                # NOTE: Can't join with context_locks (different schemas)
                 cur.execute("""
-                    WITH project_stats AS (
-                        SELECT
-                            s.project_name,
-                            MAX(s.last_active) as last_activity,
-                            COUNT(DISTINCT c.id) as lock_count
-                        FROM mcp_sessions s
-                        LEFT JOIN context_locks c ON c.session_id = s.session_id
-                        WHERE s.project_name IS NOT NULL
-                        GROUP BY s.project_name
-                    )
                     SELECT
                         project_name,
-                        COALESCE(lock_count, 0) as context_locks,
-                        last_activity
-                    FROM project_stats
+                        MAX(last_active) as last_activity,
+                        0 as lock_count
+                    FROM mcp_sessions
+                    WHERE project_name IS NOT NULL
+                      AND project_name != '__PENDING__'
+                    GROUP BY project_name
                     ORDER BY last_activity DESC NULLS LAST
                 """)
 
@@ -379,7 +377,7 @@ class PostgreSQLSessionStore:
 
                     projects.append({
                         'project_name': row['project_name'],
-                        'context_locks': row['context_locks'],
+                        'context_locks': row['lock_count'],  # Column is 'lock_count' in query
                         'last_used': time_str,
                         'last_used_timestamp': last_activity.isoformat() if last_activity else None
                     })
