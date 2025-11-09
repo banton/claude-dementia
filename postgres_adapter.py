@@ -83,6 +83,10 @@ class PostgreSQLAdapter:
         if self.using_neon_pooler:
             print(f"✅ Using Neon's PgBouncer pooler (no app-side pooling needed)", file=sys.stderr)
 
+        # ✅ FIX: Initialize pool attribute (None when using Neon's pooler)
+        # This prevents AttributeError in close() method
+        self.pool = None
+
     def _get_schema_name(self) -> str:
         """
         Generate schema name for project isolation.
