@@ -242,40 +242,46 @@ def _get_project_for_context(project: str = None) -> str:
 
     # Priority 2: Session active project (from database for MCP server persistence)
     try:
-        session_id = get_current_session_id()
+        # Use session-aware fork's session ID (not old SQLite-based get_current_session_id)
+        session_id = _get_local_session_id()
 
-        # First check in-memory cache
-        if session_id in _active_projects:
-            return _active_projects[session_id]
+        # Skip if no session (session not initialized yet)
+        if not session_id:
+            pass  # Fall through to Priority 3
+        else:
+            # First check in-memory cache
+            if session_id in _active_projects:
+                return _active_projects[session_id]
 
-        # Then check database (for MCP server statelessness)
-        try:
-            # Try all projects to find which one has this session with active_project set
-            adapter = _get_db_adapter()
-            conn = adapter.get_connection()
+            # Then check database (for MCP server statelessness)
+            try:
+                # Try all projects to find which one has this session with active_project set
+                adapter = _get_db_adapter()
 
-            # Query active_project from sessions table
-            if hasattr(conn, 'execute_with_conversion'):  # PostgreSQL
-                result = conn.execute_with_conversion(
-                    "SELECT active_project FROM sessions WHERE id = ? AND active_project IS NOT NULL",
-                    (session_id,),
-                    fetchone=True
-                )
-            else:  # SQLite
-                cursor = conn.execute(
-                    "SELECT active_project FROM sessions WHERE id = ? AND active_project IS NOT NULL",
-                    (session_id,)
-                )
-                result = cursor.fetchone()
+                # FIX: Use context manager to prevent connection leak
+                with adapter.get_connection() as conn:
+                    # Query active_project from sessions table
+                    if hasattr(conn, 'execute_with_conversion'):  # PostgreSQL
+                        result = conn.execute_with_conversion(
+                            "SELECT active_project FROM sessions WHERE id = ? AND active_project IS NOT NULL",
+                            (session_id,),
+                            fetchone=True
+                        )
+                    else:  # SQLite
+                        cursor = conn.execute(
+                            "SELECT active_project FROM sessions WHERE id = ? AND active_project IS NOT NULL",
+                            (session_id,)
+                        )
+                        result = cursor.fetchone()
 
-            if result:
-                active_project = result[0] if isinstance(result, tuple) else result.get('active_project')
-                if active_project:
-                    # Cache it in memory for faster subsequent lookups
-                    _active_projects[session_id] = active_project
-                    return active_project
-        except:
-            pass
+                    if result:
+                        active_project = result[0] if isinstance(result, tuple) else result.get('active_project')
+                        if active_project:
+                            # Cache it in memory for faster subsequent lookups
+                            _active_projects[session_id] = active_project
+                            return active_project
+            except:
+                pass
     except:
         pass
 
