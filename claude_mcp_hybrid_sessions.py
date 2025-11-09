@@ -5011,6 +5011,7 @@ async def query_database(
         if 'LIMIT' not in query_upper:
             query = query.strip().rstrip(';') + ' LIMIT 100'
 
+        # ✅ FIX: Use context managers to ensure connections are closed
         # Connect to database
         if db_path:
             # Validate path is in workspace
@@ -5023,35 +5024,34 @@ async def query_database(
             if not os.path.exists(abs_db_path):
                 return f"❌ Error: Database file not found: {db_path}"
 
-            conn = sqlite3.connect(abs_db_path)
-            conn.row_factory = sqlite3.Row
-        else:
-            # Use default dementia database
-            conn = _get_db_for_project(project)
-
-            # Set row factory for SQLite (PostgreSQL already returns dicts)
-            if hasattr(conn, 'row_factory'):
+            # SQLite path - use context manager
+            with sqlite3.connect(abs_db_path) as conn:
                 conn.row_factory = sqlite3.Row
 
-        start_time = time.time()
+                start_time = time.time()
 
-        # Execute query (handle both SQLite and PostgreSQL)
-        if hasattr(conn, 'execute'):
-            # SQLite connection
-            if params:
-                cursor = conn.execute(query, params)
-            else:
-                cursor = conn.execute(query)
+                # Execute query
+                if params:
+                    cursor = conn.execute(query, params)
+                else:
+                    cursor = conn.execute(query)
+
+                rows = cursor.fetchall()
+                execution_time = (time.time() - start_time) * 1000  # Convert to ms
         else:
-            # PostgreSQL connection - need to use cursor
-            cursor = conn.cursor()
-            if params:
-                cursor.execute(query, params)
-            else:
-                cursor.execute(query)
+            # PostgreSQL path - use context manager
+            with _get_db_for_project(project) as conn:
+                start_time = time.time()
 
-        rows = cursor.fetchall()
-        execution_time = (time.time() - start_time) * 1000  # Convert to ms
+                # PostgreSQL connection - need to use cursor
+                cursor = conn.cursor()
+                if params:
+                    cursor.execute(query, params)
+                else:
+                    cursor.execute(query)
+
+                rows = cursor.fetchall()
+                execution_time = (time.time() - start_time) * 1000  # Convert to ms
 
         if not rows:
             return f"✅ Query executed successfully.\n\n0 rows returned.\n⏱️ Execution time: {execution_time:.2f}ms"
