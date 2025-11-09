@@ -5822,194 +5822,194 @@ async def manage_workspace_table(
                 "valid_operations": valid_operations
             }, indent=2)
 
-        conn = _get_db_for_project(project)
-
-        # Handle LIST operation
-        if operation == 'list':
-            rows = _get_table_list(conn, 'workspace_%')
-            tables = []
-            for row in rows:
+        # ✅ FIX: Use context manager to ensure connection is closed
+        with _get_db_for_project(project) as conn:
+            # Handle LIST operation
+            if operation == 'list':
+                rows = _get_table_list(conn, 'workspace_%')
+                tables = []
+                for row in rows:
+                    # Get row count
+                    if hasattr(conn, 'execute'):
+                        count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {row['name']}")
+                    else:
+                        count_cursor = conn.cursor()
+                        count_cursor.execute(f"SELECT COUNT(*) as count FROM {row['name']}")
+                    count = count_cursor.fetchone()['count']
+    
+                    tables.append({
+                        "name": row['name'],
+                        "schema": row['sql'] if row['sql'] else "(PostgreSQL table)",
+                        "row_count": count
+                    })
+    
+                return json.dumps({
+                    "operation": "list",
+                    "workspace_tables": tables,
+                    "total_count": len(tables)
+                }, indent=2)
+    
+            # Validate table_name
+            if not table_name:
+                return json.dumps({
+                    "error": "table_name is required for this operation"
+                }, indent=2)
+    
+            # Sanitize table name and add workspace_ prefix
+            safe_table_name = re.sub(r'[^a-zA-Z0-9_]', '', table_name)
+            full_table_name = f"workspace_{safe_table_name}"
+    
+            # Protect core tables
+            core_tables = [
+                'sessions', 'memory_entries', 'context_locks', 'context_archives',
+                'file_tags', 'todos', 'project_variables', 'query_results_cache',
+                'file_semantic_model'
+            ]
+            if safe_table_name in core_tables or table_name.startswith('workspace_'):
+                return json.dumps({
+                    "error": "Cannot use reserved table names or 'workspace_' prefix",
+                    "attempted": table_name,
+                    "reserved_tables": core_tables
+                }, indent=2)
+    
+            # Handle INSPECT operation
+            if operation == 'inspect':
+                # Check if table exists
+                if not _table_exists(conn, full_table_name):
+                    return json.dumps({
+                        "error": "Table not found",
+                        "table": full_table_name,
+                        "note": "Use operation='list' to see all workspace tables"
+                    }, indent=2)
+    
                 # Get row count
                 if hasattr(conn, 'execute'):
-                    count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {row['name']}")
-                else:
-                    count_cursor = conn.cursor()
-                    count_cursor.execute(f"SELECT COUNT(*) as count FROM {row['name']}")
-                count = count_cursor.fetchone()['count']
-
-                tables.append({
-                    "name": row['name'],
-                    "schema": row['sql'] if row['sql'] else "(PostgreSQL table)",
-                    "row_count": count
-                })
-
-            return json.dumps({
-                "operation": "list",
-                "workspace_tables": tables,
-                "total_count": len(tables)
-            }, indent=2)
-
-        # Validate table_name
-        if not table_name:
-            return json.dumps({
-                "error": "table_name is required for this operation"
-            }, indent=2)
-
-        # Sanitize table name and add workspace_ prefix
-        safe_table_name = re.sub(r'[^a-zA-Z0-9_]', '', table_name)
-        full_table_name = f"workspace_{safe_table_name}"
-
-        # Protect core tables
-        core_tables = [
-            'sessions', 'memory_entries', 'context_locks', 'context_archives',
-            'file_tags', 'todos', 'project_variables', 'query_results_cache',
-            'file_semantic_model'
-        ]
-        if safe_table_name in core_tables or table_name.startswith('workspace_'):
-            return json.dumps({
-                "error": "Cannot use reserved table names or 'workspace_' prefix",
-                "attempted": table_name,
-                "reserved_tables": core_tables
-            }, indent=2)
-
-        # Handle INSPECT operation
-        if operation == 'inspect':
-            # Check if table exists
-            if not _table_exists(conn, full_table_name):
-                return json.dumps({
-                    "error": "Table not found",
-                    "table": full_table_name,
-                    "note": "Use operation='list' to see all workspace tables"
-                }, indent=2)
-
-            # Get row count
-            if hasattr(conn, 'execute'):
-                count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
-                sample_cursor = conn.execute(f"SELECT * FROM {full_table_name} LIMIT 5")
-            else:
-                count_cursor = conn.cursor()
-                count_cursor.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
-                sample_cursor = conn.cursor()
-                sample_cursor.execute(f"SELECT * FROM {full_table_name} LIMIT 5")
-
-            count = count_cursor.fetchone()['count']
-
-            # Get sample data (first 5 rows)
-            sample_data = [dict(row) for row in sample_cursor.fetchall()]
-
-            return json.dumps({
-                "operation": "inspect",
-                "table": full_table_name,
-                "row_count": count,
-                "sample_data": sample_data
-            }, indent=2)
-
-        # Handle CREATE operation
-        if operation == 'create':
-            if not schema:
-                return json.dumps({
-                    "error": "schema is required for create operation",
-                    "example": "id INTEGER PRIMARY KEY, name TEXT, value REAL"
-                }, indent=2)
-
-            # Check if table already exists
-            if _table_exists(conn, full_table_name):
-                return json.dumps({
-                    "error": "Table already exists",
-                    "table": full_table_name,
-                    "note": "Use operation='drop' first to recreate, or choose a different name"
-                }, indent=2)
-
-            create_sql = f"CREATE TABLE {full_table_name} ({schema})"
-
-            if dry_run:
-                return json.dumps({
-                    "dry_run": True,
-                    "operation": "create",
-                    "table": full_table_name,
-                    "sql": create_sql,
-                    "note": "Set dry_run=False and confirm=True to execute"
-                }, indent=2)
-
-            if not confirm:
-                return json.dumps({
-                    "error": "Confirmation required",
-                    "note": "Set confirm=True to execute this operation"
-                }, indent=2)
-
-            # Execute CREATE
-            if hasattr(conn, 'execute'):
-                conn.execute(create_sql)
-            else:
-                cursor = conn.cursor()
-                cursor.execute(create_sql)
-            conn.commit()
-
-            return json.dumps({
-                "success": True,
-                "operation": "create",
-                "table": full_table_name,
-                "sql": create_sql,
-                "usage": f"Use query_database() with: SELECT * FROM {full_table_name}"
-            }, indent=2)
-
-        # Handle DROP operation
-        if operation == 'drop':
-            # Check if table exists
-            if not _table_exists(conn, full_table_name):
-                return json.dumps({
-                    "error": "Table not found",
-                    "table": full_table_name,
-                    "note": "Use operation='list' to see existing tables"
-                }, indent=2)
-
-            drop_sql = f"DROP TABLE {full_table_name}"
-
-            if dry_run:
-                # Get row count for preview
-                if hasattr(conn, 'execute'):
                     count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
+                    sample_cursor = conn.execute(f"SELECT * FROM {full_table_name} LIMIT 5")
                 else:
                     count_cursor = conn.cursor()
                     count_cursor.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
+                    sample_cursor = conn.cursor()
+                    sample_cursor.execute(f"SELECT * FROM {full_table_name} LIMIT 5")
+    
                 count = count_cursor.fetchone()['count']
-
+    
+                # Get sample data (first 5 rows)
+                sample_data = [dict(row) for row in sample_cursor.fetchall()]
+    
                 return json.dumps({
-                    "dry_run": True,
+                    "operation": "inspect",
+                    "table": full_table_name,
+                    "row_count": count,
+                    "sample_data": sample_data
+                }, indent=2)
+    
+            # Handle CREATE operation
+            if operation == 'create':
+                if not schema:
+                    return json.dumps({
+                        "error": "schema is required for create operation",
+                        "example": "id INTEGER PRIMARY KEY, name TEXT, value REAL"
+                    }, indent=2)
+    
+                # Check if table already exists
+                if _table_exists(conn, full_table_name):
+                    return json.dumps({
+                        "error": "Table already exists",
+                        "table": full_table_name,
+                        "note": "Use operation='drop' first to recreate, or choose a different name"
+                    }, indent=2)
+    
+                create_sql = f"CREATE TABLE {full_table_name} ({schema})"
+    
+                if dry_run:
+                    return json.dumps({
+                        "dry_run": True,
+                        "operation": "create",
+                        "table": full_table_name,
+                        "sql": create_sql,
+                        "note": "Set dry_run=False and confirm=True to execute"
+                    }, indent=2)
+    
+                if not confirm:
+                    return json.dumps({
+                        "error": "Confirmation required",
+                        "note": "Set confirm=True to execute this operation"
+                    }, indent=2)
+    
+                # Execute CREATE
+                if hasattr(conn, 'execute'):
+                    conn.execute(create_sql)
+                else:
+                    cursor = conn.cursor()
+                    cursor.execute(create_sql)
+                conn.commit()
+    
+                return json.dumps({
+                    "success": True,
+                    "operation": "create",
+                    "table": full_table_name,
+                    "sql": create_sql,
+                    "usage": f"Use query_database() with: SELECT * FROM {full_table_name}"
+                }, indent=2)
+    
+            # Handle DROP operation
+            if operation == 'drop':
+                # Check if table exists
+                if not _table_exists(conn, full_table_name):
+                    return json.dumps({
+                        "error": "Table not found",
+                        "table": full_table_name,
+                        "note": "Use operation='list' to see existing tables"
+                    }, indent=2)
+    
+                drop_sql = f"DROP TABLE {full_table_name}"
+    
+                if dry_run:
+                    # Get row count for preview
+                    if hasattr(conn, 'execute'):
+                        count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
+                    else:
+                        count_cursor = conn.cursor()
+                        count_cursor.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
+                    count = count_cursor.fetchone()['count']
+    
+                    return json.dumps({
+                        "dry_run": True,
+                        "operation": "drop",
+                        "table": full_table_name,
+                        "rows_to_delete": count,
+                        "sql": drop_sql,
+                        "note": "Set dry_run=False and confirm=True to execute"
+                    }, indent=2)
+    
+                if not confirm:
+                    return json.dumps({
+                        "error": "Confirmation required",
+                        "note": "Set confirm=True to execute this operation"
+                    }, indent=2)
+    
+                # Execute DROP
+                if hasattr(conn, 'execute'):
+                    conn.execute(drop_sql)
+                else:
+                    cursor = conn.cursor()
+                    cursor.execute(drop_sql)
+                conn.commit()
+    
+                return json.dumps({
+                    "success": True,
                     "operation": "drop",
                     "table": full_table_name,
-                    "rows_to_delete": count,
-                    "sql": drop_sql,
-                    "note": "Set dry_run=False and confirm=True to execute"
+                    "sql": drop_sql
                 }, indent=2)
-
-            if not confirm:
-                return json.dumps({
-                    "error": "Confirmation required",
-                    "note": "Set confirm=True to execute this operation"
-                }, indent=2)
-
-            # Execute DROP
-            if hasattr(conn, 'execute'):
-                conn.execute(drop_sql)
-            else:
-                cursor = conn.cursor()
-                cursor.execute(drop_sql)
-            conn.commit()
-
+    
+        except Exception as e:
             return json.dumps({
-                "success": True,
-                "operation": "drop",
-                "table": full_table_name,
-                "sql": drop_sql
+                "error": str(e),
+                "operation": operation
             }, indent=2)
-
-    except Exception as e:
-        return json.dumps({
-            "error": str(e),
-            "operation": operation
-        }, indent=2)
-
+    
 
 @mcp.tool()
 async def check_contexts(text: str, project: Optional[str] = None) -> str:
