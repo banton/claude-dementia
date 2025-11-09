@@ -131,7 +131,24 @@ def _init_local_session():
 
     Returns:
         str: Session ID
+
+    Raises:
+        RuntimeError: If MCP_TRANSPORT=http (unsafe with global session state)
     """
+    # CRITICAL: Session-aware fork uses global state, ONLY safe for stdio (single-threaded)
+    transport = os.getenv('MCP_TRANSPORT', 'stdio')
+    if transport == 'http':
+        raise RuntimeError(
+            "🚫 Session-aware fork CANNOT run in HTTP mode (uses global state).\n"
+            "   Global _local_session_id would be shared across concurrent requests.\n"
+            "   This would cause data corruption (request A gets request B's session).\n"
+            "\n"
+            "   Solutions:\n"
+            "   1. Use stdio transport for local testing: MCP_TRANSPORT=stdio\n"
+            "   2. Use claude_mcp_hybrid.py (original) for HTTP/cloud deployments\n"
+            "   3. Implement request-scoped session storage (not yet available)\n"
+        )
+
     global _local_session_id, _session_store
 
     # Generate session ID
