@@ -79,6 +79,10 @@ from mcp_session_store import PostgreSQLSessionStore
 _local_session_id = None
 _session_store = None
 
+# Global: Handover auto-loading tracking
+_handover_auto_loaded = False
+_handover_message = None
+
 # Global: Default adapter (lazy initialization for cloud deployment)
 # WARNING: In stateless cloud (serverless/containers), these globals reset per request!
 # Solution: postgres_adapter.py uses 1-1 pooling (no app-side pooling) + Neon pooler
@@ -221,6 +225,77 @@ def _get_local_session_id() -> Optional[str]:
     """Get current local session ID."""
     return _local_session_id
 
+def _auto_load_handover() -> Optional[str]:
+    """
+    Automatically load the last handover on first tool call.
+    Returns the handover message to show to the LLM, or None if no handover exists.
+
+    This replaces the need for explicit wake_up() calls.
+    """
+    global _handover_auto_loaded, _handover_message
+
+    # Only load once per session
+    if _handover_auto_loaded:
+        return _handover_message
+
+    _handover_auto_loaded = True
+
+    try:
+        # Get current project
+        project = _get_project_for_context()
+        conn = _get_db_for_project(project)
+        session_id = get_current_session_id()
+
+        # Look for most recent handover from a different session
+        cursor = conn.execute("""
+            SELECT metadata, created_at FROM handovers
+            WHERE session_id != ? AND project_name = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, (session_id, project))
+
+        handover = cursor.fetchone()
+
+        if handover:
+            handover_data = json.loads(handover['metadata'])
+            hours_ago = (time.time() - handover['created_at']) / 3600
+
+            # Build compact summary
+            summary_parts = []
+            summary_parts.append(f"📋 **Previous Session ({hours_ago:.1f}h ago)**")
+
+            # Work completed
+            if handover_data.get('work_done', {}).get('completed_todos'):
+                completed = handover_data['work_done']['completed_todos']
+                summary_parts.append(f"\n✅ Completed: {len(completed)} tasks")
+                for task in completed[:3]:
+                    summary_parts.append(f"   • {task}")
+
+            # Pending work
+            if handover_data.get('next_steps', {}).get('todos'):
+                pending = handover_data['next_steps']['todos']
+                summary_parts.append(f"\n📋 Pending: {len(pending)} tasks")
+                for task in pending[:3]:
+                    priority = ['LOW', 'NORMAL', 'HIGH'][min(task.get('priority', 0), 2)]
+                    summary_parts.append(f"   • [{priority}] {task['content']}")
+
+            # Important context
+            if handover_data.get('important_context', {}).get('critical_contexts'):
+                contexts = handover_data['important_context']['critical_contexts']
+                summary_parts.append(f"\n⚠️  {len(contexts)} critical contexts locked")
+
+            _handover_message = "\n".join(summary_parts)
+            return _handover_message
+        else:
+            _handover_message = "ℹ️  No previous session handover found (fresh start)"
+            return None  # Don't show message for fresh starts
+
+    except Exception as e:
+        # Silently fail - don't block tool execution
+        logger.debug(f"Auto-load handover failed: {e}")
+        _handover_message = None
+        return None
+
 # Session-level active project tracking (per conversation)
 _active_projects = {}  # {session_id: project_name}
 
@@ -232,6 +307,8 @@ def _check_project_selection_required(project: Optional[str] = None) -> Optional
     If yes, returns error response with available projects.
     If no, returns None (tool can continue).
 
+    Also triggers auto-load of previous session handover on first call.
+
     Args:
         project: Explicit project parameter (if provided, check is skipped)
 
@@ -239,6 +316,12 @@ def _check_project_selection_required(project: Optional[str] = None) -> Optional
         JSON error string if project selection required, None otherwise
     """
     global _session_store, _local_session_id
+
+    # Auto-load handover on first tool call (does nothing after first call)
+    handover_msg = _auto_load_handover()
+    if handover_msg:
+        # Print to stderr so LLM sees it in tool result context
+        print(handover_msg, file=sys.stderr)
 
     # If explicit project parameter provided, validate it exists
     if project:
@@ -2580,545 +2663,582 @@ async def delete_project(name: str, confirm: bool = False) -> str:
 #@mcp.tool()
 async def wake_up(project: Optional[str] = None) -> str:
     """
-    Initialize session and load available context for LLM orientation.
-    Returns structured JSON with session info, git status, contexts, and staleness warnings.
+    ⚠️  **DEPRECATED**: This tool is no longer needed.
 
-    Purpose: Help LLM understand what data/tools are available to minimize confusion.
+    **What changed:**
+    - Handovers are now auto-loaded on the first tool call
+    - Session context is automatically available
+    - No manual wake_up() required
 
-    **Multi-project support:**
-    - project: Optional project name. If not specified, uses active project.
-    - Priority: explicit param > session active > auto-detect > "default"
-    - Shows which project is active and how it was determined
-    - Example: wake_up(project="innkeeper")
+    **What to do instead:**
+    - Just start using tools normally
+    - Use get_last_handover() if you want to see full previous session details
+    - Use context_dashboard() to see available contexts
 
-    **Token efficiency: SUMMARY** (~2-5KB)
-    - Returns counts and summaries only
-    - Use get_last_handover() for full handover
-    - Use explore_context_tree() for context list
+    **Why deprecated:**
+    - Reduces manual steps for LLM
+    - Automatic incremental handovers eliminate need for session boundaries
+    - Improves user experience with seamless context continuity
     """
-    # Check if project selection is required
-    project_check = _check_project_selection_required(project)
-    if project_check:
-        return project_check
+    return json.dumps({
+        "deprecated": True,
+        "message": "⚠️  wake_up() is deprecated - handover auto-loaded on first tool call",
+        "alternatives": [
+            "get_last_handover() - See full previous session details",
+            "context_dashboard() - See available contexts",
+            "Just use tools normally - context auto-loads"
+        ],
+        "note": "Session handover has already been auto-loaded. Continue working normally."
+    }, indent=2)
 
-    update_session_activity()
-
-    # Use project-aware database connection
-    target_project = _get_project_for_context(project)
-    conn = _get_db_for_project(project)
-    session_id = get_current_session_id()
-
-    # Cleanup expired queries (maintenance)
-    cleanup_expired_queries(conn)
-
-    # Validate database isolation (critical security check)
-    validation_report = validate_database_isolation(conn)
-
-    # Get git status
-    git_info = get_git_status()
-
-    # Run file model scan (incremental, only project directories)
-    # DISABLED in production/cloud to prevent scanning build artifacts
-    file_model_data = None
-    environment = os.getenv('ENVIRONMENT', 'development')
-    current_project_root = get_project_root()  # Dynamic detection
-    if environment == 'development' and is_project_directory(current_project_root):
-        try:
-            # Load stored model
-            stored_model = load_stored_file_model(conn, session_id)
-
-            # Quick incremental scan (respects .gitignore, max 10k files)
-            scan_start = time.time()
-            all_files = walk_project_files(current_project_root, respect_gitignore=True, max_files=10000)
-
-            # Detect changes
-            changed_files = []
-            deleted_files = []
-            analyzed_files = []
-
-            # Check for deleted files
-            stored_paths = set(stored_model.keys())
-            current_paths = set(all_files)
-            deleted_paths = stored_paths - current_paths
-
-            for deleted_path in deleted_paths:
-                mark_file_deleted(conn, session_id, deleted_path)
-                deleted_files.append(deleted_path)
-
-            # Check for new/changed files
-            for file_path in all_files:
-                stored_meta = stored_model.get(file_path)
-                changed, new_hash, hash_method = detect_file_change(file_path, stored_meta)
-
-                if changed:
-                    # Analyze file
-                    file_type, language, is_standard, standard_type = detect_file_type(file_path)
-                    warnings = check_standard_file_warnings(file_path, file_type, standard_type, current_project_root)
-                    semantics = analyze_file_semantics(file_path, file_type, language)
-
-                    # Build metadata
-                    file_stat = os.stat(file_path)
-                    metadata = {
-                        'file_path': file_path,
-                        'file_size': file_stat.st_size,
-                        'content_hash': new_hash,
-                        'modified_time': file_stat.st_mtime,
-                        'hash_method': hash_method,
-                        'file_type': file_type,
-                        'language': language,
-                        'is_standard': is_standard,
-                        'standard_type': standard_type,
-                        'warnings': warnings,
-                        **semantics
-                    }
-
-                    # Store in database
-                    store_file_metadata(conn, session_id, file_path, metadata, 0)
-
-                    # Track changes
-                    if stored_meta:
-                        size_delta = metadata['file_size'] - stored_meta.get('file_size', 0)
-                        record_file_change(conn, session_id, file_path, 'modified', stored_meta.get('content_hash'), new_hash, size_delta)
-                        changed_files.append(file_path)
-                    else:
-                        record_file_change(conn, session_id, file_path, 'added', None, new_hash, metadata['file_size'])
-                        changed_files.append(file_path)
-
-                    analyzed_files.append(metadata)
-
-            scan_time_ms = (time.time() - scan_start) * 1000
-
-            # Build file model summary
-            file_model_data = {
-                "enabled": True,
-                "scan_type": "incremental",
-                "scan_time_ms": round(scan_time_ms, 2),
-                "total_files": len(all_files),
-                "changes": {
-                    "added": len([f for f in changed_files if f not in stored_model]),
-                    "modified": len([f for f in changed_files if f in stored_model]),
-                    "deleted": len(deleted_files)
-                },
-                "warnings": [w for meta in analyzed_files for w in meta.get('warnings', [])][:10]  # First 10 warnings
-            }
-
-        except Exception as e:
-            # If scan fails, don't block wake_up
-            file_model_data = {
-                "enabled": False,
-                "error": str(e)
-            }
-    else:
-        file_model_data = {
-            "enabled": False,
-            "reason": "non_project_directory"
-        }
-
-    # Build session info (using dynamic database path)
-    current_db_path = get_current_db_path()
-
-    # Calculate database size (only for SQLite local files)
-    if is_postgresql_mode():
-        db_size_mb = 0  # PostgreSQL size not calculated for remote DB
-    else:
-        db_size_mb = os.path.getsize(current_db_path) / (1024 * 1024) if os.path.exists(current_db_path) else 0
-
-    # Get project detection source for display
-    detection_source = _get_detection_source()
-    detection_label = {
-        "session_switch": "via switch_project()",
-        "auto_detected_from_directory": "auto-detected from git repo/directory",
-        "default_fallback": "default fallback"
-    }.get(detection_source, detection_source)
-
-    session_data = {
-        "session": {
-            "id": session_id,
-            "project_name": get_project_name(),  # Dynamic detection
-            "active_project": target_project,    # Active project for this session
-            "project_detection": detection_label,  # How project was determined
-            "project_root": get_project_root(),  # Dynamic detection
-            "database": current_db_path,         # Dynamic detection
-            "database_location": get_db_location_type(),  # Dynamic detection
-            "database_size_mb": round(db_size_mb, 2),
-            "initialized_at": time.time()
-        },
-        "database_validation": {
-            "status": validation_report["level"],
-            "checks_passed": validation_report["summary"]["checks_passed"],
-            "checks_total": validation_report["summary"]["checks_total"],
-            "errors": validation_report["errors"],
-            "warnings": validation_report["warnings"],
-            "recommendations": validation_report["recommendations"]
-            # NOTE: Use validate_database_isolation() for detailed report
-        },
-        "git": git_info if git_info else {
-            "available": False,
-            "reason": "not_a_git_repo_or_no_access"
-        },
-        "file_model": file_model_data,
-        "contexts": None,  # Will be filled with counts only
-        "handover": None,  # Will be filled with availability only
-        "memory_health": None
-    }
-
-    # Get context COUNTS only (not full data - use explore_context_tree for that)
-    cursor = conn.execute("""
-        SELECT metadata, last_accessed, locked_at, label, version, content
-        FROM context_locks
-        WHERE session_id = ?
-    """, (session_id,))
-
-    all_contexts = cursor.fetchall()
-
-    # Count by priority (minimal data)
-    priority_counts = {"always_check": 0, "important": 0, "reference": 0}
-    stale_count = 0
-
-    for ctx_row in all_contexts:
-        metadata = json.loads(ctx_row['metadata']) if ctx_row['metadata'] else {}
-        priority = metadata.get('priority', 'reference')
-
-        if priority in priority_counts:
-            priority_counts[priority] += 1
-
-        # Check staleness (just count, don't return details)
-        context_dict = dict(ctx_row)
-        staleness = check_context_staleness(context_dict, git_info)
-        if staleness:
-            stale_count += 1
-
-    # Add token cost estimates for context operations
-    context_count = len(all_contexts)
-    token_estimates = {
-        "explore_tree_flat": "~1,000 tokens ✅",
-        "explore_tree_full": f"~{context_count * 50:,} tokens",
-        "recall_single_preview": "~350 tokens ✅",
-        "recall_single_full": "~900 tokens"
-    }
-
-    # Add warning if context count is high
-    overflow_warning = None
-    if context_count > 50:
-        overflow_warning = f"⚠️ High context count ({context_count}). Use flat=True for explore_context_tree() to avoid overflow."
-
-    session_data["contexts"] = {
-        "total_count": context_count,
-        "by_priority": priority_counts,
-        "stale_count": stale_count,
-        "token_estimates": token_estimates,
-        "overflow_warning": overflow_warning
-        # NOTE: Use explore_context_tree(flat=True) to see labels (token-efficient)
-    }
-
-    # Get handover if available (MINIMAL - just availability, not full content)
-    cursor = conn.execute("""
-        SELECT timestamp FROM memory_entries
-        WHERE category = 'handover'
-        ORDER BY timestamp DESC
-        LIMIT 1
-    """)
-    handover = cursor.fetchone()
-
-    if handover:
-        hours_ago = (time.time() - handover['timestamp']) / 3600
-        session_data["handover"] = {
-            "available": True,
-            "timestamp": handover['timestamp'],
-            "hours_ago": round(hours_ago, 1)
-            # NOTE: Use get_last_handover() tool to retrieve full content
-        }
-
-    # Memory health
-    total_size = sum(len(ctx['content'] or '') for ctx in all_contexts)
-    total_size_mb = total_size / (1024 * 1024)
-    capacity_mb = 50  # Current limit
-
-    session_data["memory_health"] = {
-        "total_contexts": len(all_contexts),
-        "total_size_mb": round(total_size_mb, 2),
-        "capacity_mb": capacity_mb,
-        "usage_percent": round((total_size_mb / capacity_mb) * 100, 1),
-        "status": "healthy" if total_size_mb < capacity_mb * 0.8 else "near_capacity"
-    }
-
-    return json.dumps(session_data, indent=2)
-
-
+#    # Use project-aware database connection
+#    target_project = _get_project_for_context(project)
+#    conn = _get_db_for_project(project)
+#    session_id = get_current_session_id()
+#
+#    # Cleanup expired queries (maintenance)
+#    cleanup_expired_queries(conn)
+#
+#    # Validate database isolation (critical security check)
+#    validation_report = validate_database_isolation(conn)
+#
+#    # Get git status
+#    git_info = get_git_status()
+#
+#    # Run file model scan (incremental, only project directories)
+#    # DISABLED in production/cloud to prevent scanning build artifacts
+#    file_model_data = None
+#    environment = os.getenv('ENVIRONMENT', 'development')
+#    current_project_root = get_project_root()  # Dynamic detection
+#    if environment == 'development' and is_project_directory(current_project_root):
+#        try:
+#            # Load stored model
+#            stored_model = load_stored_file_model(conn, session_id)
+#
+#            # Quick incremental scan (respects .gitignore, max 10k files)
+#            scan_start = time.time()
+#            all_files = walk_project_files(current_project_root, respect_gitignore=True, max_files=10000)
+#
+#            # Detect changes
+#            changed_files = []
+#            deleted_files = []
+#            analyzed_files = []
+#
+#            # Check for deleted files
+#            stored_paths = set(stored_model.keys())
+#            current_paths = set(all_files)
+#            deleted_paths = stored_paths - current_paths
+#
+#            for deleted_path in deleted_paths:
+#                mark_file_deleted(conn, session_id, deleted_path)
+#                deleted_files.append(deleted_path)
+#
+#            # Check for new/changed files
+#            for file_path in all_files:
+#                stored_meta = stored_model.get(file_path)
+#                changed, new_hash, hash_method = detect_file_change(file_path, stored_meta)
+#
+#                if changed:
+#                    # Analyze file
+#                    file_type, language, is_standard, standard_type = detect_file_type(file_path)
+#                    warnings = check_standard_file_warnings(file_path, file_type, standard_type, current_project_root)
+#                    semantics = analyze_file_semantics(file_path, file_type, language)
+#
+#                    # Build metadata
+#                    file_stat = os.stat(file_path)
+#                    metadata = {
+#                        'file_path': file_path,
+#                        'file_size': file_stat.st_size,
+#                        'content_hash': new_hash,
+#                        'modified_time': file_stat.st_mtime,
+#                        'hash_method': hash_method,
+#                        'file_type': file_type,
+#                        'language': language,
+#                        'is_standard': is_standard,
+#                        'standard_type': standard_type,
+#                        'warnings': warnings,
+#                        **semantics
+#                    }
+#
+#                    # Store in database
+#                    store_file_metadata(conn, session_id, file_path, metadata, 0)
+#
+#                    # Track changes
+#                    if stored_meta:
+#                        size_delta = metadata['file_size'] - stored_meta.get('file_size', 0)
+#                        record_file_change(conn, session_id, file_path, 'modified', stored_meta.get('content_hash'), new_hash, size_delta)
+#                        changed_files.append(file_path)
+#                    else:
+#                        record_file_change(conn, session_id, file_path, 'added', None, new_hash, metadata['file_size'])
+#                        changed_files.append(file_path)
+#
+#                    analyzed_files.append(metadata)
+#
+#            scan_time_ms = (time.time() - scan_start) * 1000
+#
+#            # Build file model summary
+#            file_model_data = {
+#                "enabled": True,
+#                "scan_type": "incremental",
+#                "scan_time_ms": round(scan_time_ms, 2),
+#                "total_files": len(all_files),
+#                "changes": {
+#                    "added": len([f for f in changed_files if f not in stored_model]),
+#                    "modified": len([f for f in changed_files if f in stored_model]),
+#                    "deleted": len(deleted_files)
+#                },
+#                "warnings": [w for meta in analyzed_files for w in meta.get('warnings', [])][:10]  # First 10 warnings
+#            }
+#
+#        except Exception as e:
+#            # If scan fails, don't block wake_up
+#            file_model_data = {
+#                "enabled": False,
+#                "error": str(e)
+#            }
+#    else:
+#        file_model_data = {
+#            "enabled": False,
+#            "reason": "non_project_directory"
+#        }
+#
+#    # Build session info (using dynamic database path)
+#    current_db_path = get_current_db_path()
+#
+#    # Calculate database size (only for SQLite local files)
+#    if is_postgresql_mode():
+#        db_size_mb = 0  # PostgreSQL size not calculated for remote DB
+#    else:
+#        db_size_mb = os.path.getsize(current_db_path) / (1024 * 1024) if os.path.exists(current_db_path) else 0
+#
+#    # Get project detection source for display
+#    detection_source = _get_detection_source()
+#    detection_label = {
+#        "session_switch": "via switch_project()",
+#        "auto_detected_from_directory": "auto-detected from git repo/directory",
+#        "default_fallback": "default fallback"
+#    }.get(detection_source, detection_source)
+#
+#    session_data = {
+#        "session": {
+#            "id": session_id,
+#            "project_name": get_project_name(),  # Dynamic detection
+#            "active_project": target_project,    # Active project for this session
+#            "project_detection": detection_label,  # How project was determined
+#            "project_root": get_project_root(),  # Dynamic detection
+#            "database": current_db_path,         # Dynamic detection
+#            "database_location": get_db_location_type(),  # Dynamic detection
+#            "database_size_mb": round(db_size_mb, 2),
+#            "initialized_at": time.time()
+#        },
+#        "database_validation": {
+#            "status": validation_report["level"],
+#            "checks_passed": validation_report["summary"]["checks_passed"],
+#            "checks_total": validation_report["summary"]["checks_total"],
+#            "errors": validation_report["errors"],
+#            "warnings": validation_report["warnings"],
+#            "recommendations": validation_report["recommendations"]
+#            # NOTE: Use validate_database_isolation() for detailed report
+#        },
+#        "git": git_info if git_info else {
+#            "available": False,
+#            "reason": "not_a_git_repo_or_no_access"
+#        },
+#        "file_model": file_model_data,
+#        "contexts": None,  # Will be filled with counts only
+#        "handover": None,  # Will be filled with availability only
+#        "memory_health": None
+#    }
+#
+#    # Get context COUNTS only (not full data - use explore_context_tree for that)
+#    cursor = conn.execute("""
+#        SELECT metadata, last_accessed, locked_at, label, version, content
+#        FROM context_locks
+#        WHERE session_id = ?
+#    """, (session_id,))
+#
+#    all_contexts = cursor.fetchall()
+#
+#    # Count by priority (minimal data)
+#    priority_counts = {"always_check": 0, "important": 0, "reference": 0}
+#    stale_count = 0
+#
+#    for ctx_row in all_contexts:
+#        metadata = json.loads(ctx_row['metadata']) if ctx_row['metadata'] else {}
+#        priority = metadata.get('priority', 'reference')
+#
+#        if priority in priority_counts:
+#            priority_counts[priority] += 1
+#
+#        # Check staleness (just count, don't return details)
+#        context_dict = dict(ctx_row)
+#        staleness = check_context_staleness(context_dict, git_info)
+#        if staleness:
+#            stale_count += 1
+#
+#    # Add token cost estimates for context operations
+#    context_count = len(all_contexts)
+#    token_estimates = {
+#        "explore_tree_flat": "~1,000 tokens ✅",
+#        "explore_tree_full": f"~{context_count * 50:,} tokens",
+#        "recall_single_preview": "~350 tokens ✅",
+#        "recall_single_full": "~900 tokens"
+#    }
+#
+#    # Add warning if context count is high
+#    overflow_warning = None
+#    if context_count > 50:
+#        overflow_warning = f"⚠️ High context count ({context_count}). Use flat=True for explore_context_tree() to avoid overflow."
+#
+#    session_data["contexts"] = {
+#        "total_count": context_count,
+#        "by_priority": priority_counts,
+#        "stale_count": stale_count,
+#        "token_estimates": token_estimates,
+#        "overflow_warning": overflow_warning
+#        # NOTE: Use explore_context_tree(flat=True) to see labels (token-efficient)
+#    }
+#
+#    # Get handover if available (MINIMAL - just availability, not full content)
+#    cursor = conn.execute("""
+#        SELECT timestamp FROM memory_entries
+#        WHERE category = 'handover'
+#        ORDER BY timestamp DESC
+#        LIMIT 1
+#    """)
+#    handover = cursor.fetchone()
+#
+#    if handover:
+#        hours_ago = (time.time() - handover['timestamp']) / 3600
+#        session_data["handover"] = {
+#            "available": True,
+#            "timestamp": handover['timestamp'],
+#            "hours_ago": round(hours_ago, 1)
+#            # NOTE: Use get_last_handover() tool to retrieve full content
+#        }
+#
+#    # Memory health
+#    total_size = sum(len(ctx['content'] or '') for ctx in all_contexts)
+#    total_size_mb = total_size / (1024 * 1024)
+#    capacity_mb = 50  # Current limit
+#
+#    session_data["memory_health"] = {
+#        "total_contexts": len(all_contexts),
+#        "total_size_mb": round(total_size_mb, 2),
+#        "capacity_mb": capacity_mb,
+#        "usage_percent": round((total_size_mb / capacity_mb) * 100, 1),
+#        "status": "healthy" if total_size_mb < capacity_mb * 0.8 else "near_capacity"
+#    }
+#
+#    return json.dumps(session_data, indent=2)
+#
+#
 @mcp.tool()
 async def sleep(project: Optional[str] = None) -> str:
     """
-    Create comprehensive handover package for next session.
-    Documents everything needed to resume work seamlessly.
+    ⚠️  **DEPRECATED**: This tool is no longer needed.
 
-    Args:
-        project: Project name (default: auto-detect or active project)
+    **What changed:**
+    - Session handovers are now auto-generated when sessions become inactive
+    - Tools update session summaries in real-time as you work
+    - No manual sleep() required
+
+    **What to do instead:**
+    - Just stop using tools when done - session will finalize automatically
+    - Use get_last_handover() if you want to see current session summary
+    - Session state is continuously saved, not just at end
+
+    **Why deprecated:**
+    - Reduces manual steps for LLM
+    - Real-time incremental handovers are more reliable
+    - No risk of forgetting to call sleep()
+    - Improves user experience with automatic session management
     """
-    # Check if project selection is required
-    project_check = _check_project_selection_required(project)
-    if project_check:
-        return project_check
+    return json.dumps({
+        "deprecated": True,
+        "message": "⚠️  sleep() is deprecated - handovers auto-generated on session inactivity",
+        "alternatives": [
+            "get_last_handover() - See current or previous session details",
+            "context_dashboard() - See available contexts",
+            "Just stop using tools - session auto-finalizes after inactivity"
+        ],
+        "note": "Your work is being tracked automatically. No action needed."
+    }, indent=2)
 
-    conn = _get_db_for_project(project)
-    session_id = get_current_session_id()
-    
-    # Get session info
-    cursor = conn.execute("""
-        SELECT started_at FROM sessions WHERE id = ?
-    """, (session_id,))
-    session = cursor.fetchone()
-    
-    if not session:
-        return "No active session to document"
-    
-    duration = time.time() - session['started_at']
-    hours = int(duration // 3600)
-    minutes = int((duration % 3600) // 60)
-    
-    # Build comprehensive handover package
-    handover = {
-        'timestamp': time.time(),
-        'session_id': session_id,
-        'duration': f"{hours}h {minutes}m",
-        'current_state': {},
-        'work_done': {},
-        'next_steps': {},
-        'important_context': {}
-    }
-    
-    output = []
-    output.append("💤 Creating handover package for next session...")
-    output.append(f"Session: {session_id} | Duration: {hours}h {minutes}m")
-    output.append("=" * 50)
-    
-    # 1. WHAT WAS ACCOMPLISHED
-    output.append("\n📊 WORK COMPLETED THIS SESSION:")
-    
-    # Progress updates
-    cursor = conn.execute("""
-        SELECT content, timestamp FROM memory_entries
-        WHERE session_id = ? AND category = 'progress'
-        ORDER BY timestamp DESC
-    """, (session_id,))
-    progress_items = cursor.fetchall()
-    
-    if progress_items:
-        output.append("\n✅ Progress Made:")
-        for item in progress_items[:5]:  # Top 5 progress items
-            output.append(f"   • {item['content']}")
-        handover['work_done']['progress'] = [p['content'] for p in progress_items]
-    
-    # Completed TODOs
-    cursor = conn.execute("""
-        SELECT content FROM todos
-        WHERE status = 'completed' AND completed_at > ?
-        ORDER BY completed_at DESC
-    """, (session['started_at'],))
-    completed = cursor.fetchall()
-    
-    if completed:
-        output.append(f"\n✅ TODOs Completed ({len(completed)}):")
-        for todo in completed[:5]:
-            output.append(f"   • {todo['content']}")
-        handover['work_done']['completed_todos'] = [t['content'] for t in completed]
-    
-    # 2. CURRENT STATE & CONTEXT
-    output.append("\n🎯 CURRENT PROJECT STATE:")
-    
-    # Active/pending TODOs
-    cursor = conn.execute("""
-        SELECT content, priority FROM todos
-        WHERE status = 'pending'
-        ORDER BY priority DESC, created_at ASC
-    """)
-    pending_todos = cursor.fetchall()
-    
-    if pending_todos:
-        output.append(f"\n📋 Pending TODOs ({len(pending_todos)}):")
-        for todo in pending_todos[:5]:
-            priority = ['LOW', 'NORMAL', 'HIGH'][min(todo['priority'] or 0, 2)]
-            output.append(f"   • [{priority}] {todo['content']}")
-        handover['next_steps']['todos'] = [
-            {'content': t['content'], 'priority': t['priority']} 
-            for t in pending_todos
-        ]
-    
-    # Recent decisions made
-    cursor = conn.execute("""
-        SELECT decision, rationale FROM decisions
-        WHERE timestamp > ? AND status = 'DECIDED'
-        ORDER BY timestamp DESC
-        LIMIT 3
-    """, (session['started_at'],))
-    decisions = cursor.fetchall()
-    
-    if decisions:
-        output.append("\n🤔 Key Decisions Made:")
-        for decision in decisions:
-            output.append(f"   • {decision['decision']}")
-            if decision['rationale']:
-                output.append(f"     → {decision['rationale']}")
-        handover['work_done']['decisions'] = [
-            {'decision': d['decision'], 'rationale': d['rationale']} 
-            for d in decisions
-        ]
-    
-    # 3. IMPORTANT LOCKED CONTEXTS
-    output.append("\n🔒 LOCKED CONTEXTS TO REMEMBER:")
-    
-    cursor = conn.execute("""
-        SELECT label, version, MAX(locked_at) as latest
-        FROM context_locks
-        WHERE session_id = ?
-        GROUP BY label, version
-        ORDER BY latest DESC
-        LIMIT 5
-    """, (session_id,))
-    
-    locked_contexts = cursor.fetchall()
-    if locked_contexts:
-        for ctx in locked_contexts:
-            output.append(f"   • {ctx['label']} (v{ctx['version']})")
-        handover['important_context']['locked'] = [
-            {'label': c['label'], 'version': c['version']} 
-            for c in locked_contexts
-        ]
-        output.append("   Use recall_context('topic') to retrieve these")
-    
-    # 4. FILES BEING WORKED ON
-    cursor = conn.execute("""
-        SELECT path, string_agg(tag, ', ') as tags, MAX(created_at) as latest
-        FROM file_tags
-        WHERE created_at > ?
-        GROUP BY path
-        ORDER BY latest DESC
-        LIMIT 5
-    """, (session['started_at'],))
-
-    recent_files = cursor.fetchall()
-    if recent_files:
-        output.append("\n📁 Files Recently Analyzed:")
-        for file in recent_files:
-            output.append(f"   • {file['path']}")
-            if file['tags']:
-                tags = file['tags'].split(',')[:3]  # First 3 tags
-                output.append(f"     Tags: {', '.join(tags)}")
-        handover['current_state']['recent_files'] = [
-            {'path': f['path'], 'tags': f['tags']}
-            for f in recent_files
-        ]
-
-    # 4.5. UPDATE FILE MODEL (if project directory)
-    current_project_root = get_project_root()  # Dynamic detection
-    if is_project_directory(current_project_root):
-        try:
-            # Quick incremental scan to capture any last-minute changes
-            stored_model = load_stored_file_model(conn, session_id)
-            all_files = walk_project_files(current_project_root, respect_gitignore=True, max_files=10000)
-
-            changed_count = 0
-            for file_path in all_files:
-                stored_meta = stored_model.get(file_path)
-                changed, new_hash, hash_method = detect_file_change(file_path, stored_meta)
-
-                if changed:
-                    # Analyze and update
-                    file_type, language, is_standard, standard_type = detect_file_type(file_path)
-                    warnings = check_standard_file_warnings(file_path, file_type, standard_type, current_project_root)
-                    semantics = analyze_file_semantics(file_path, file_type, language)
-
-                    file_stat = os.stat(file_path)
-                    metadata = {
-                        'file_path': file_path,
-                        'file_size': file_stat.st_size,
-                        'content_hash': new_hash,
-                        'modified_time': file_stat.st_mtime,
-                        'hash_method': hash_method,
-                        'file_type': file_type,
-                        'language': language,
-                        'is_standard': is_standard,
-                        'standard_type': standard_type,
-                        'warnings': warnings,
-                        **semantics
-                    }
-
-                    store_file_metadata(conn, session_id, file_path, metadata, 0)
-                    changed_count += 1
-
-            if changed_count > 0:
-                output.append(f"\n📊 File model updated: {changed_count} files changed since wake_up")
-                handover['current_state']['file_model_updated'] = {
-                    'files_changed': changed_count,
-                    'total_files': len(all_files)
-                }
-        except Exception as e:
-            # Don't block sleep if file scan fails
-            output.append(f"\n⚠️ File model update skipped: {str(e)}")
-
-    # 5. ERRORS OR ISSUES TO ADDRESS
-    cursor = conn.execute("""
-        SELECT content FROM memory_entries
-        WHERE session_id = ? AND category = 'error'
-        ORDER BY timestamp DESC
-        LIMIT 3
-    """, (session_id,))
-    
-    errors = cursor.fetchall()
-    if errors:
-        output.append("\n⚠️ Issues to Address:")
-        for error in errors:
-            output.append(f"   • {error['content']}")
-        handover['next_steps']['issues'] = [e['content'] for e in errors]
-    
-    # 6. NEXT STEPS GUIDANCE
-    output.append("\n🚀 NEXT SESSION RECOMMENDATIONS:")
-    
-    # Open questions
-    cursor = conn.execute("""
-        SELECT question FROM decisions
-        WHERE status = 'OPEN'
-        ORDER BY timestamp DESC
-        LIMIT 3
-    """)
-    questions = cursor.fetchall()
-    
-    if questions:
-        output.append("\n❓ Open Questions:")
-        for q in questions:
-            output.append(f"   • {q['question']}")
-        handover['next_steps']['questions'] = [q['question'] for q in questions]
-    
-    # Suggest next actions based on state
-    if pending_todos:
-        output.append(f"\n💡 Start with high-priority TODOs")
-    if errors:
-        output.append(f"💡 Address the {len(errors)} error(s) first")
-    if not locked_contexts:
-        output.append("💡 Consider locking important decisions/code with lock_context()")
-    
-    # Store comprehensive handover in database
-    handover_json = json.dumps(handover, indent=2)
-    
-    # Update session with handover package
-    conn.execute("""
-        UPDATE sessions 
-        SET summary = ?, last_active = ?
-        WHERE id = ?
-    """, (handover_json, time.time(), session_id))
-    
-    # Create a special handover memory entry
-    conn.execute("""
-        INSERT INTO memory_entries (category, content, metadata, timestamp, session_id)
-        VALUES ('handover', ?, ?, ?, ?)
-    """, (f"Session handover: {hours}h {minutes}m of work", handover_json, time.time(), session_id))
-    
-    conn.commit()
-    
-    output.append("\n" + "=" * 50)
-    output.append("✅ Handover package saved. Use wake_up() to resume.")
-    output.append("Your context and progress are preserved!")
-    
-    return "\n".join(output)
+# # OLD IMPLEMENTATION - Commented out (incremental handovers replace this)
+# async def sleep(project: Optional[str] = None) -> str:
+#     """
+#     Create comprehensive handover package for next session.
+#     Documents everything needed to resume work seamlessly.
+#
+#     Args:
+#         project: Project name (default: auto-detect or active project)
+#     """
+#     # Check if project selection is required
+#     project_check = _check_project_selection_required(project)
+#     if project_check:
+#         return project_check
+#
+#     conn = _get_db_for_project(project)
+#     session_id = get_current_session_id()
+#
+#     # Get session info
+#     cursor = conn.execute("""
+#         SELECT started_at FROM sessions WHERE id = ?
+#     """, (session_id,))
+#     session = cursor.fetchone()
+#
+#     if not session:
+#         return "No active session to document"
+#
+#     duration = time.time() - session['started_at']
+#     hours = int(duration // 3600)
+#     minutes = int((duration % 3600) // 60)
+#
+#     # Build comprehensive handover package
+#     handover = {
+#         'timestamp': time.time(),
+#         'session_id': session_id,
+#         'duration': f"{hours}h {minutes}m",
+#         'current_state': {},
+#         'work_done': {},
+#         'next_steps': {},
+#         'important_context': {}
+#     }
+#
+#     output = []
+#     output.append("💤 Creating handover package for next session...")
+#     output.append(f"Session: {session_id} | Duration: {hours}h {minutes}m")
+#     output.append("=" * 50)
+#
+#     # 1. WHAT WAS ACCOMPLISHED
+#     output.append("\n📊 WORK COMPLETED THIS SESSION:")
+#
+#     # Progress updates
+#     cursor = conn.execute("""
+#         SELECT content, timestamp FROM memory_entries
+#         WHERE session_id = ? AND category = 'progress'
+#         ORDER BY timestamp DESC
+#     """, (session_id,))
+#     progress_items = cursor.fetchall()
+#
+#     if progress_items:
+#         output.append("\n✅ Progress Made:")
+#         for item in progress_items[:5]:  # Top 5 progress items
+#             output.append(f"   • {item['content']}")
+#         handover['work_done']['progress'] = [p['content'] for p in progress_items]
+#
+#     # Completed TODOs
+#     cursor = conn.execute("""
+#         SELECT content FROM todos
+#         WHERE status = 'completed' AND completed_at > ?
+#         ORDER BY completed_at DESC
+#     """, (session['started_at'],))
+#     completed = cursor.fetchall()
+#
+#     if completed:
+#         output.append(f"\n✅ TODOs Completed ({len(completed)}):")
+#         for todo in completed[:5]:
+#             output.append(f"   • {todo['content']}")
+#         handover['work_done']['completed_todos'] = [t['content'] for t in completed]
+#
+#     # 2. CURRENT STATE & CONTEXT
+#     output.append("\n🎯 CURRENT PROJECT STATE:")
+#
+#     # Active/pending TODOs
+#     cursor = conn.execute("""
+#         SELECT content, priority FROM todos
+#         WHERE status = 'pending'
+#         ORDER BY priority DESC, created_at ASC
+#     """)
+#     pending_todos = cursor.fetchall()
+#
+#     if pending_todos:
+#         output.append(f"\n📋 Pending TODOs ({len(pending_todos)}):")
+#         for todo in pending_todos[:5]:
+#             priority = ['LOW', 'NORMAL', 'HIGH'][min(todo['priority'] or 0, 2)]
+#             output.append(f"   • [{priority}] {todo['content']}")
+#         handover['next_steps']['todos'] = [
+#             {'content': t['content'], 'priority': t['priority']} 
+#             for t in pending_todos
+#         ]
+#
+#     # Recent decisions made
+#     cursor = conn.execute("""
+#         SELECT decision, rationale FROM decisions
+#         WHERE timestamp > ? AND status = 'DECIDED'
+#         ORDER BY timestamp DESC
+#         LIMIT 3
+#     """, (session['started_at'],))
+#     decisions = cursor.fetchall()
+#
+#     if decisions:
+#         output.append("\n🤔 Key Decisions Made:")
+#         for decision in decisions:
+#             output.append(f"   • {decision['decision']}")
+#             if decision['rationale']:
+#                 output.append(f"     → {decision['rationale']}")
+#         handover['work_done']['decisions'] = [
+#             {'decision': d['decision'], 'rationale': d['rationale']} 
+#             for d in decisions
+#         ]
+#
+#     # 3. IMPORTANT LOCKED CONTEXTS
+#     output.append("\n🔒 LOCKED CONTEXTS TO REMEMBER:")
+#
+#     cursor = conn.execute("""
+#         SELECT label, version, MAX(locked_at) as latest
+#         FROM context_locks
+#         WHERE session_id = ?
+#         GROUP BY label, version
+#         ORDER BY latest DESC
+#         LIMIT 5
+#     """, (session_id,))
+#
+#     locked_contexts = cursor.fetchall()
+#     if locked_contexts:
+#         for ctx in locked_contexts:
+#             output.append(f"   • {ctx['label']} (v{ctx['version']})")
+#         handover['important_context']['locked'] = [
+#             {'label': c['label'], 'version': c['version']} 
+#             for c in locked_contexts
+#         ]
+#         output.append("   Use recall_context('topic') to retrieve these")
+#
+#     # 4. FILES BEING WORKED ON
+#     cursor = conn.execute("""
+#         SELECT path, string_agg(tag, ', ') as tags, MAX(created_at) as latest
+#         FROM file_tags
+#         WHERE created_at > ?
+#         GROUP BY path
+#         ORDER BY latest DESC
+#         LIMIT 5
+#     """, (session['started_at'],))
+#
+#     recent_files = cursor.fetchall()
+#     if recent_files:
+#         output.append("\n📁 Files Recently Analyzed:")
+#         for file in recent_files:
+#             output.append(f"   • {file['path']}")
+#             if file['tags']:
+#                 tags = file['tags'].split(',')[:3]  # First 3 tags
+#                 output.append(f"     Tags: {', '.join(tags)}")
+#         handover['current_state']['recent_files'] = [
+#             {'path': f['path'], 'tags': f['tags']}
+#             for f in recent_files
+#         ]
+#
+#     # 4.5. UPDATE FILE MODEL (if project directory)
+#     current_project_root = get_project_root()  # Dynamic detection
+#     if is_project_directory(current_project_root):
+#         try:
+#             # Quick incremental scan to capture any last-minute changes
+#             stored_model = load_stored_file_model(conn, session_id)
+#             all_files = walk_project_files(current_project_root, respect_gitignore=True, max_files=10000)
+#
+#             changed_count = 0
+#             for file_path in all_files:
+#                 stored_meta = stored_model.get(file_path)
+#                 changed, new_hash, hash_method = detect_file_change(file_path, stored_meta)
+#
+#                 if changed:
+#                     # Analyze and update
+#                     file_type, language, is_standard, standard_type = detect_file_type(file_path)
+#                     warnings = check_standard_file_warnings(file_path, file_type, standard_type, current_project_root)
+#                     semantics = analyze_file_semantics(file_path, file_type, language)
+#
+#                     file_stat = os.stat(file_path)
+#                     metadata = {
+#                         'file_path': file_path,
+#                         'file_size': file_stat.st_size,
+#                         'content_hash': new_hash,
+#                         'modified_time': file_stat.st_mtime,
+#                         'hash_method': hash_method,
+#                         'file_type': file_type,
+#                         'language': language,
+#                         'is_standard': is_standard,
+#                         'standard_type': standard_type,
+#                         'warnings': warnings,
+#                         **semantics
+#                     }
+#
+#                     store_file_metadata(conn, session_id, file_path, metadata, 0)
+#                     changed_count += 1
+#
+#             if changed_count > 0:
+#                 output.append(f"\n📊 File model updated: {changed_count} files changed since wake_up")
+#                 handover['current_state']['file_model_updated'] = {
+#                     'files_changed': changed_count,
+#                     'total_files': len(all_files)
+#                 }
+#         except Exception as e:
+#             # Don't block sleep if file scan fails
+#             output.append(f"\n⚠️ File model update skipped: {str(e)}")
+#
+#     # 5. ERRORS OR ISSUES TO ADDRESS
+#     cursor = conn.execute("""
+#         SELECT content FROM memory_entries
+#         WHERE session_id = ? AND category = 'error'
+#         ORDER BY timestamp DESC
+#         LIMIT 3
+#     """, (session_id,))
+#
+#     errors = cursor.fetchall()
+#     if errors:
+#         output.append("\n⚠️ Issues to Address:")
+#         for error in errors:
+#             output.append(f"   • {error['content']}")
+#         handover['next_steps']['issues'] = [e['content'] for e in errors]
+#
+#     # 6. NEXT STEPS GUIDANCE
+#     output.append("\n🚀 NEXT SESSION RECOMMENDATIONS:")
+#
+#     # Open questions
+#     cursor = conn.execute("""
+#         SELECT question FROM decisions
+#         WHERE status = 'OPEN'
+#         ORDER BY timestamp DESC
+#         LIMIT 3
+#     """)
+#     questions = cursor.fetchall()
+#
+#     if questions:
+#         output.append("\n❓ Open Questions:")
+#         for q in questions:
+#             output.append(f"   • {q['question']}")
+#         handover['next_steps']['questions'] = [q['question'] for q in questions]
+#
+#     # Suggest next actions based on state
+#     if pending_todos:
+#         output.append(f"\n💡 Start with high-priority TODOs")
+#     if errors:
+#         output.append(f"💡 Address the {len(errors)} error(s) first")
+#     if not locked_contexts:
+#         output.append("💡 Consider locking important decisions/code with lock_context()")
+#
+#     # Store comprehensive handover in database
+#     handover_json = json.dumps(handover, indent=2)
+#
+#     # Update session with handover package
+#     conn.execute("""
+#         UPDATE sessions 
+#         SET summary = ?, last_active = ?
+#         WHERE id = ?
+#     """, (handover_json, time.time(), session_id))
+#
+#     # Create a special handover memory entry
+#     conn.execute("""
+#         INSERT INTO memory_entries (category, content, metadata, timestamp, session_id)
+#         VALUES ('handover', ?, ?, ?, ?)
+#     """, (f"Session handover: {hours}h {minutes}m of work", handover_json, time.time(), session_id))
+#
+#     conn.commit()
+#
+#     output.append("\n" + "=" * 50)
+#     output.append("✅ Handover package saved. Use wake_up() to resume.")
+#     output.append("Your context and progress are preserved!")
+#
+#     return "\n".join(output)
 
 @mcp.tool()
 async def get_last_handover(project: Optional[str] = None) -> str:
