@@ -337,7 +337,11 @@ class AutoClosingPostgreSQLConnection:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit - guarantee connection is released"""
+        """Context manager exit - commit on success, rollback on error"""
+        if exc_type is None:
+            self.conn.commit()  # Success - commit transaction
+        else:
+            self.conn.rollback()  # Error - rollback transaction
         self.close()
         return False  # Don't suppress exceptions
 
