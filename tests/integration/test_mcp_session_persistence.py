@@ -251,10 +251,11 @@ async def test_middleware_should_reject_expired_session(middleware, session_stor
     # Act
     response = await middleware.dispatch(mock_request, mock_next)
 
-    # Assert - Should return 400 with helpful message
-    assert response.status_code == 400
+    # Assert - Should return 401 Unauthorized (not 400 Bad Request)
+    # Expired sessions are authentication failures, not malformed requests
+    assert response.status_code == 401
     body = response.body.decode()
-    assert 'expired' in body.lower()
+    assert 'expired' in body.lower() or 'inactive' in body.lower()
     assert 'restart' in body.lower()
 
 
