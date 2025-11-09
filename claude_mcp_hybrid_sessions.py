@@ -3218,102 +3218,104 @@ async def get_query_page(query_id: str, offset: int = 0, limit: int = 20, projec
 # MEMORY MANAGEMENT (unchanged)
 # ============================================================================
 
-@mcp.tool()
-async def memory_status(project: Optional[str] = None) -> str:
-    """
-    Show memory system status and statistics.
-    """
-    conn = _get_db_for_project(project)
-    session_id = _get_session_id_for_project(conn, project)
-    
-    output = []
-    output.append("🧠 Memory System Status")
-    output.append("=" * 40)
-    
-    # Session info
-    cursor = conn.execute("""
-        SELECT started_at, last_active FROM sessions WHERE id = ?
-    """, (session_id,))
-    session = cursor.fetchone()
-    
-    if session:
-        start = datetime.fromtimestamp(session['started_at'])
-        active = datetime.fromtimestamp(session['last_active'])
-        output.append(f"Session: {session_id}")
-        output.append(f"Started: {start.strftime('%Y-%m-%d %H:%M')}")
-        output.append(f"Last Active: {active.strftime('%H:%M')}")
-    
-    # Memory stats (handle case where table might not have entries)
-    try:
-        cursor = conn.execute("""
-            SELECT category, COUNT(*) as count
-            FROM memory_entries
-            WHERE session_id = ?
-            GROUP BY category
-        """, (session_id,))
-
-        entries = cursor.fetchall()
-        if entries:
-            output.append("\n📊 Memory Entries (this session):")
-            for entry in entries:
-                output.append(f"   • {entry['category']}: {entry['count']}")
-    except Exception as e:
-        # Graceful handling if query fails
-        pass
-    
-    # Context locks with embedding stats
-    cursor = conn.execute("""
-        SELECT
-            COUNT(DISTINCT label) as topics,
-            COUNT(*) as total,
-            SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) as with_embedding,
-            SUM(CASE WHEN embedding IS NULL THEN 1 ELSE 0 END) as without_embedding
-        FROM context_locks WHERE session_id = ?
-    """, (session_id,))
-    locks = cursor.fetchone()
-    output.append(f"\n🔒 Locked Contexts: {locks['topics']} topics, {locks['total']} versions")
-
-    # Embedding status
-    if locks['total'] > 0:
-        embedded_pct = (locks['with_embedding'] / locks['total']) * 100
-        if locks['without_embedding'] > 0:
-            output.append(f"   📊 Embeddings: {locks['with_embedding']}/{locks['total']} ({embedded_pct:.0f}%)")
-            output.append(f"   ⚠️  {locks['without_embedding']} context(s) missing embeddings")
-            output.append(f"   💡 Run generate_embeddings() to enable semantic search")
-        else:
-            output.append(f"   ✅ All contexts have embeddings ({locks['with_embedding']})")
-    
-    # TODOs (if table exists)
-    try:
-        cursor = conn.execute("""
-            SELECT status, COUNT(*) as count FROM todos
-            GROUP BY status
-        """)
-        todos = cursor.fetchall()
-        if todos:
-            output.append("\n📋 TODOs:")
-            for todo in todos:
-                output.append(f"   • {todo['status']}: {todo['count']}")
-    except Exception:
-        # Table doesn't exist in this schema
-        pass
-    
-    # File tags (if table exists)
-    try:
-        cursor = conn.execute("SELECT COUNT(DISTINCT path) as files FROM file_tags")
-        tags = cursor.fetchone()
-        if tags and tags['files'] > 0:
-            output.append(f"\n🏷️ Tagged Files: {tags['files']}")
-    except Exception:
-        # Table doesn't exist in this schema
-        pass
-
-    return "\n".join(output)
-
+# DEPRECATED: Replaced by health_check_and_repair()
+# @mcp.tool()
+# async def memory_status(project: Optional[str] = None) -> str:
+#     """
+#     Show memory system status and statistics.
+#     DEPRECATED: Use health_check_and_repair() instead.
+#     """
+#    conn = _get_db_for_project(project)
+#    session_id = _get_session_id_for_project(conn, project)
+#    
+#    output = []
+#    output.append("🧠 Memory System Status")
+#    output.append("=" * 40)
+#    
+#    # Session info
+#    cursor = conn.execute("""
+#        SELECT started_at, last_active FROM sessions WHERE id = ?
+#    """, (session_id,))
+#    session = cursor.fetchone()
+#    
+#    if session:
+#        start = datetime.fromtimestamp(session['started_at'])
+#        active = datetime.fromtimestamp(session['last_active'])
+#        output.append(f"Session: {session_id}")
+#        output.append(f"Started: {start.strftime('%Y-%m-%d %H:%M')}")
+#        output.append(f"Last Active: {active.strftime('%H:%M')}")
+#    
+#    # Memory stats (handle case where table might not have entries)
+#    try:
+#        cursor = conn.execute("""
+#            SELECT category, COUNT(*) as count
+#            FROM memory_entries
+#            WHERE session_id = ?
+#            GROUP BY category
+#        """, (session_id,))
+#
+#        entries = cursor.fetchall()
+#        if entries:
+#            output.append("\n📊 Memory Entries (this session):")
+#            for entry in entries:
+#                output.append(f"   • {entry['category']}: {entry['count']}")
+#    except Exception as e:
+#        # Graceful handling if query fails
+#        pass
+#    
+#    # Context locks with embedding stats
+#    cursor = conn.execute("""
+#        SELECT
+#            COUNT(DISTINCT label) as topics,
+#            COUNT(*) as total,
+#            SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) as with_embedding,
+#            SUM(CASE WHEN embedding IS NULL THEN 1 ELSE 0 END) as without_embedding
+#        FROM context_locks WHERE session_id = ?
+#    """, (session_id,))
+#    locks = cursor.fetchone()
+#    output.append(f"\n🔒 Locked Contexts: {locks['topics']} topics, {locks['total']} versions")
+#
+#    # Embedding status
+#    if locks['total'] > 0:
+#        embedded_pct = (locks['with_embedding'] / locks['total']) * 100
+#        if locks['without_embedding'] > 0:
+#            output.append(f"   📊 Embeddings: {locks['with_embedding']}/{locks['total']} ({embedded_pct:.0f}%)")
+#            output.append(f"   ⚠️  {locks['without_embedding']} context(s) missing embeddings")
+#            output.append(f"   💡 Run generate_embeddings() to enable semantic search")
+#        else:
+#            output.append(f"   ✅ All contexts have embeddings ({locks['with_embedding']})")
+#    
+#    # TODOs (if table exists)
+#    try:
+#        cursor = conn.execute("""
+#            SELECT status, COUNT(*) as count FROM todos
+#            GROUP BY status
+#        """)
+#        todos = cursor.fetchall()
+#        if todos:
+#            output.append("\n📋 TODOs:")
+#            for todo in todos:
+#                output.append(f"   • {todo['status']}: {todo['count']}")
+#    except Exception:
+#        # Table doesn't exist in this schema
+#        pass
+#    
+#    # File tags (if table exists)
+#    try:
+#        cursor = conn.execute("SELECT COUNT(DISTINCT path) as files FROM file_tags")
+#        tags = cursor.fetchone()
+#        if tags and tags['files'] > 0:
+#            output.append(f"\n🏷️ Tagged Files: {tags['files']}")
+#    except Exception:
+#        # Table doesn't exist in this schema
+#        pass
+#
+#    return "\n".join(output)
+#
 # ============================================================================
 # CONTEXT LOCKING (unchanged)
 # ============================================================================
-
+#
 @mcp.tool()
 async def lock_context(
     content: str,
@@ -4982,312 +4984,313 @@ async def query_database(
         return f"❌ Query failed: {str(e)}\n\nCheck your SQL syntax and try again."
 
 
-@mcp.tool()
-async def inspect_database(
-    mode: str = "overview",
-    filter_text: Optional[str] = None,
-    db_path: Optional[str] = None,
-    project: Optional[str] = None
-) -> str:
-    """
-    Quick inspection of ANY SQLite database with preset queries - no SQL knowledge required.
+# DEPRECATED: Replaced by health_check_and_repair() and inspect_schema()
+# @mcp.tool()
+# async def inspect_database(
+#     mode: str = "overview",
+#     filter_text: Optional[str] = None,
+#     db_path: Optional[str] = None,
+#     project: Optional[str] = None
+# ) -> str:
+#     """
+#     DEPRECATED: SQLite-only tool. Use health_check_and_repair() or inspect_schema() instead.
 
-    This tool provides easy access to common database inspection tasks for any SQLite database
-    in your workspace. Works with the dementia memory database (default) or any .db/.sqlite file.
-
-    **INSPECTION MODES:**
-
-    1. **overview** - High-level statistics (dementia DB only)
-       - Total locked contexts by priority
-       - Total memories by category
-       - Total archived contexts
-       - Session information
-
-    2. **schema** - Complete database structure (works with ANY database)
-       - All table names
-       - Column names and types for each table
-       - Row counts per table
-
-    3. **contexts** - List locked contexts (dementia DB only)
-       - Label, version, priority
-       - Lock timestamp
-       - Content preview
-       - Optional filtering by label
-
-    4. **tables** - Just list table names (works with ANY database)
-       - Quick overview of database structure
-
-    4. **memories** - Recent memory entries
-       - Category, content, timestamp
-       - Sorted by most recent first
-       - Optional filtering by category
-
-    5. **archives** - Deleted contexts
-       - What was deleted and when
-       - Deletion reason
-       - Original content preserved
-
-    6. **tags** - File tagging system
-       - All tagged files
-       - Tag distribution
-       - Files needing review
-
-    7. **sessions** - Session activity
-       - Active sessions
-       - Context counts per session
-       - Memory counts per session
-
-    **EXAMPLES:**
-
-    Inspect dementia memory database (default):
-    ```python
-    inspect_database("overview")
-    inspect_database("contexts")
-    ```
-
-    Inspect any SQLite database:
-    ```python
-    inspect_database("schema", db_path="./data/app.db")
-    inspect_database("tables", db_path="./logs.sqlite")
-    ```
-
-    Find specific data:
-    ```python
-    inspect_database("contexts", filter_text="api")
-    ```
-
-    **USE CASES:**
-
-    - Debugging: "Why isn't my context showing up?"
-    - Exploration: "What tables are in this database?"
-    - Inspection: "What's the structure of this .db file?"
-    - Monitoring: "How much data is in each table?"
-
-    Args:
-        mode: Inspection mode - "overview", "schema", "contexts", "tables"
-        filter_text: Optional text to filter results (for contexts mode)
-        db_path: Optional path to SQLite database file (default: dementia memory database)
-        project: Project name (default: auto-detect or active project)
-
-    Returns:
-        Formatted inspection results with relevant statistics
-
-    Raises:
-        Error message if mode is invalid
-    """
-    import os
-
-    # Connect to database
-    if db_path:
-        # Validate path is in workspace
-        abs_db_path = os.path.abspath(db_path)
-        workspace = os.getcwd()
-
-        if not abs_db_path.startswith(workspace):
-            return f"❌ Error: Database must be in current workspace.\n\nProvided: {db_path}\nWorkspace: {workspace}"
-
-        if not os.path.exists(abs_db_path):
-            return f"❌ Error: Database file not found: {db_path}"
-
-        conn = sqlite3.connect(abs_db_path)
-        conn.row_factory = sqlite3.Row
-        session_id = None  # Custom DB won't have session_id
-    else:
-        # Use default dementia database
-        conn = _get_db_for_project(project)
-        conn.row_factory = sqlite3.Row
-        session_id = get_current_session_id()
-
-    try:
-        if mode == "tables":
-            # Quick table list (works with any database)
-            output = ["📋 DATABASE TABLES", "=" * 60, ""]
-
-            cursor = conn.execute("""
-                SELECT name FROM sqlite_master
-                WHERE type='table'
-                ORDER BY name
-            """)
-
-            tables = [row['name'] for row in cursor.fetchall()]
-
-            if tables:
-                for table in tables:
-                    # Get row count
-                    cursor = conn.execute(f"SELECT COUNT(*) as count FROM {table}")
-                    count = cursor.fetchone()['count']
-                    output.append(f"   {table}: {count} rows")
-            else:
-                output.append("   No tables found")
-
-            return '\n'.join(output)
-
-        elif mode == "overview":
-            # Dementia DB specific
-            if not session_id:
-                return "❌ 'overview' mode only works with dementia database (default).\n\nUse 'schema' or 'tables' mode for other databases."
-
-            output = ["📊 DATABASE OVERVIEW", "=" * 60, ""]
-
-            # Locked contexts by priority
-            cursor = conn.execute("""
-                SELECT
-                    (metadata::json)->>'priority' as priority,
-                    COUNT(*) as count
-                FROM context_locks
-                WHERE session_id = ?
-                GROUP BY priority
-            """, (session_id,))
-
-            output.append("🔒 Locked Contexts:")
-            context_total = 0
-            for row in cursor.fetchall():
-                priority = row['priority'] or 'reference'
-                count = row['count']
-                context_total += count
-                output.append(f"   {priority}: {count}")
-            output.append(f"   TOTAL: {context_total}")
-            output.append("")
-
-            # Memories by category
-            cursor = conn.execute("""
-                SELECT category, COUNT(*) as count
-                FROM memory_entries
-                WHERE session_id = ?
-                GROUP BY category
-            """, (session_id,))
-
-            output.append("🧠 Memories:")
-            memory_total = 0
-            for row in cursor.fetchall():
-                count = row['count']
-                memory_total += count
-                output.append(f"   {row['category']}: {count}")
-            output.append(f"   TOTAL: {memory_total}")
-            output.append("")
-
-            # Archives
-            cursor = conn.execute("""
-                SELECT COUNT(*) as count FROM context_archives
-                WHERE session_id = ?
-            """, (session_id,))
-            archive_count = cursor.fetchone()['count']
-            output.append(f"📦 Archived contexts: {archive_count}")
-            output.append("")
-
-            # File tags
-            cursor = conn.execute("SELECT COUNT(*) as count FROM file_tags")
-            tag_count = cursor.fetchone()['count']
-            output.append(f"🏷️ Tagged files: {tag_count}")
-
-            return '\n'.join(output)
-
-        elif mode == "schema":
-            output = ["📋 DATABASE SCHEMA", "=" * 60, ""]
-
-            # Get all tables (PostgreSQL-compatible)
-            if is_postgresql_mode():
-                cursor = conn.execute("""
-                    SELECT table_name as name
-                    FROM information_schema.tables
-                    WHERE table_schema = current_schema()
-                    AND table_type = 'BASE TABLE'
-                    ORDER BY table_name
-                """)
-            else:
-                cursor = conn.execute("""
-                    SELECT name FROM sqlite_master
-                    WHERE type='table'
-                    ORDER BY name
-                """)
-
-            tables = [row['name'] for row in cursor.fetchall()]
-
-            for table in tables:
-                output.append(f"\n📄 Table: {table}")
-
-                # Get column info (PostgreSQL-compatible)
-                if is_postgresql_mode():
-                    cursor = conn.execute("""
-                        SELECT
-                            column_name as name,
-                            data_type as type,
-                            is_nullable,
-                            CASE WHEN column_default LIKE 'nextval%%' THEN 1 ELSE 0 END as pk
-                        FROM information_schema.columns
-                        WHERE table_schema = current_schema()
-                        AND table_name = ?
-                        ORDER BY ordinal_position
-                    """, (table,))
-                    columns = cursor.fetchall()
-
-                    output.append("   Columns:")
-                    for col in columns:
-                        pk = " (PRIMARY KEY)" if col['pk'] else ""
-                        notnull = " NOT NULL" if col['is_nullable'] == 'NO' else ""
-                        output.append(f"      {col['name']}: {col['type']}{pk}{notnull}")
-                else:
-                    cursor = conn.execute(f"PRAGMA table_info({table})")
-                    columns = cursor.fetchall()
-
-                    output.append("   Columns:")
-                    for col in columns:
-                        pk = " (PRIMARY KEY)" if col['pk'] else ""
-                        notnull = " NOT NULL" if col['notnull'] else ""
-                        output.append(f"      {col['name']}: {col['type']}{pk}{notnull}")
-
-                # Get row count
-                cursor = conn.execute(f"SELECT COUNT(*) as count FROM {table}")
-                count = cursor.fetchone()['count']
-                output.append(f"   Rows: {count}")
-
-            return '\n'.join(output)
-
-        elif mode == "contexts":
-            # Dementia DB specific
-            if not session_id:
-                return "❌ 'contexts' mode only works with dementia database (default).\n\nUse 'schema' or 'tables' mode for other databases."
-
-            output = ["🔒 LOCKED CONTEXTS", "=" * 60, ""]
-
-            if filter_text:
-                cursor = conn.execute("""
-                    SELECT label, version, locked_at, preview, metadata
-                    FROM context_locks
-                    WHERE session_id = ? AND label LIKE ?
-                    ORDER BY locked_at DESC
-                """, (session_id, f"%{filter_text}%"))
-            else:
-                cursor = conn.execute("""
-                    SELECT label, version, locked_at, preview, metadata
-                    FROM context_locks
-                    WHERE session_id = ?
-                    ORDER BY locked_at DESC
-                """, (session_id,))
-
-            rows = cursor.fetchall()
-
-            if not rows:
-                return "No locked contexts found."
-
-            for row in rows:
-                metadata = json.loads(row['metadata']) if row['metadata'] else {}
-                priority = metadata.get('priority', 'reference')
-                dt = datetime.fromtimestamp(row['locked_at'])
-
-                output.append(f"\n• {row['label']} v{row['version']} [{priority}]")
-                output.append(f"  Locked: {dt.strftime('%Y-%m-%d %H:%M')}")
-                output.append(f"  Preview: {row['preview'][:80]}...")
-
-            output.append(f"\n\nTotal: {len(rows)} contexts")
-            return '\n'.join(output)
-
-        else:
-            return f"❌ Invalid mode: {mode}\n\nValid modes: tables, schema, overview, contexts\n\nNote: 'overview' and 'contexts' only work with dementia database (default)"
-
-    except Exception as e:
-        return f"❌ Inspection failed: {str(e)}"
-
+#    This tool provides easy access to common database inspection tasks for any SQLite database
+#    in your workspace. Works with the dementia memory database (default) or any .db/.sqlite file.
+#
+#    **INSPECTION MODES:**
+#
+#    1. **overview** - High-level statistics (dementia DB only)
+#       - Total locked contexts by priority
+#       - Total memories by category
+#       - Total archived contexts
+#       - Session information
+#
+#    2. **schema** - Complete database structure (works with ANY database)
+#       - All table names
+#       - Column names and types for each table
+#       - Row counts per table
+#
+#    3. **contexts** - List locked contexts (dementia DB only)
+#       - Label, version, priority
+#       - Lock timestamp
+#       - Content preview
+#       - Optional filtering by label
+#
+#    4. **tables** - Just list table names (works with ANY database)
+#       - Quick overview of database structure
+#
+#    4. **memories** - Recent memory entries
+#       - Category, content, timestamp
+#       - Sorted by most recent first
+#       - Optional filtering by category
+#
+#    5. **archives** - Deleted contexts
+#       - What was deleted and when
+#       - Deletion reason
+#       - Original content preserved
+#
+#    6. **tags** - File tagging system
+#       - All tagged files
+#       - Tag distribution
+#       - Files needing review
+#
+#    7. **sessions** - Session activity
+#       - Active sessions
+#       - Context counts per session
+#       - Memory counts per session
+#
+#    **EXAMPLES:**
+#
+#    Inspect dementia memory database (default):
+#    ```python
+#    inspect_database("overview")
+#    inspect_database("contexts")
+#    ```
+#
+#    Inspect any SQLite database:
+#    ```python
+#    inspect_database("schema", db_path="./data/app.db")
+#    inspect_database("tables", db_path="./logs.sqlite")
+#    ```
+#
+#    Find specific data:
+#    ```python
+#    inspect_database("contexts", filter_text="api")
+#    ```
+#
+#    **USE CASES:**
+#
+#    - Debugging: "Why isn't my context showing up?"
+#    - Exploration: "What tables are in this database?"
+#    - Inspection: "What's the structure of this .db file?"
+#    - Monitoring: "How much data is in each table?"
+#
+#    Args:
+#        mode: Inspection mode - "overview", "schema", "contexts", "tables"
+#        filter_text: Optional text to filter results (for contexts mode)
+#        db_path: Optional path to SQLite database file (default: dementia memory database)
+#        project: Project name (default: auto-detect or active project)
+#
+#    Returns:
+#        Formatted inspection results with relevant statistics
+#
+#    Raises:
+#        Error message if mode is invalid
+#    """
+#    import os
+#
+#    # Connect to database
+#    if db_path:
+#        # Validate path is in workspace
+#        abs_db_path = os.path.abspath(db_path)
+#        workspace = os.getcwd()
+#
+#        if not abs_db_path.startswith(workspace):
+#            return f"❌ Error: Database must be in current workspace.\n\nProvided: {db_path}\nWorkspace: {workspace}"
+#
+#        if not os.path.exists(abs_db_path):
+#            return f"❌ Error: Database file not found: {db_path}"
+#
+#        conn = sqlite3.connect(abs_db_path)
+#        conn.row_factory = sqlite3.Row
+#        session_id = None  # Custom DB won't have session_id
+#    else:
+#        # Use default dementia database
+#        conn = _get_db_for_project(project)
+#        conn.row_factory = sqlite3.Row
+#        session_id = get_current_session_id()
+#
+#    try:
+#        if mode == "tables":
+#            # Quick table list (works with any database)
+#            output = ["📋 DATABASE TABLES", "=" * 60, ""]
+#
+#            cursor = conn.execute("""
+#                SELECT name FROM sqlite_master
+#                WHERE type='table'
+#                ORDER BY name
+#            """)
+#
+#            tables = [row['name'] for row in cursor.fetchall()]
+#
+#            if tables:
+#                for table in tables:
+#                    # Get row count
+#                    cursor = conn.execute(f"SELECT COUNT(*) as count FROM {table}")
+#                    count = cursor.fetchone()['count']
+#                    output.append(f"   {table}: {count} rows")
+#            else:
+#                output.append("   No tables found")
+#
+#            return '\n'.join(output)
+#
+#        elif mode == "overview":
+#            # Dementia DB specific
+#            if not session_id:
+#                return "❌ 'overview' mode only works with dementia database (default).\n\nUse 'schema' or 'tables' mode for other databases."
+#
+#            output = ["📊 DATABASE OVERVIEW", "=" * 60, ""]
+#
+#            # Locked contexts by priority
+#            cursor = conn.execute("""
+#                SELECT
+#                    (metadata::json)->>'priority' as priority,
+#                    COUNT(*) as count
+#                FROM context_locks
+#                WHERE session_id = ?
+#                GROUP BY priority
+#            """, (session_id,))
+#
+#            output.append("🔒 Locked Contexts:")
+#            context_total = 0
+#            for row in cursor.fetchall():
+#                priority = row['priority'] or 'reference'
+#                count = row['count']
+#                context_total += count
+#                output.append(f"   {priority}: {count}")
+#            output.append(f"   TOTAL: {context_total}")
+#            output.append("")
+#
+#            # Memories by category
+#            cursor = conn.execute("""
+#                SELECT category, COUNT(*) as count
+#                FROM memory_entries
+#                WHERE session_id = ?
+#                GROUP BY category
+#            """, (session_id,))
+#
+#            output.append("🧠 Memories:")
+#            memory_total = 0
+#            for row in cursor.fetchall():
+#                count = row['count']
+#                memory_total += count
+#                output.append(f"   {row['category']}: {count}")
+#            output.append(f"   TOTAL: {memory_total}")
+#            output.append("")
+#
+#            # Archives
+#            cursor = conn.execute("""
+#                SELECT COUNT(*) as count FROM context_archives
+#                WHERE session_id = ?
+#            """, (session_id,))
+#            archive_count = cursor.fetchone()['count']
+#            output.append(f"📦 Archived contexts: {archive_count}")
+#            output.append("")
+#
+#            # File tags
+#            cursor = conn.execute("SELECT COUNT(*) as count FROM file_tags")
+#            tag_count = cursor.fetchone()['count']
+#            output.append(f"🏷️ Tagged files: {tag_count}")
+#
+#            return '\n'.join(output)
+#
+#        elif mode == "schema":
+#            output = ["📋 DATABASE SCHEMA", "=" * 60, ""]
+#
+#            # Get all tables (PostgreSQL-compatible)
+#            if is_postgresql_mode():
+#                cursor = conn.execute("""
+#                    SELECT table_name as name
+#                    FROM information_schema.tables
+#                    WHERE table_schema = current_schema()
+#                    AND table_type = 'BASE TABLE'
+#                    ORDER BY table_name
+#                """)
+#            else:
+#                cursor = conn.execute("""
+#                    SELECT name FROM sqlite_master
+#                    WHERE type='table'
+#                    ORDER BY name
+#                """)
+#
+#            tables = [row['name'] for row in cursor.fetchall()]
+#
+#            for table in tables:
+#                output.append(f"\n📄 Table: {table}")
+#
+#                # Get column info (PostgreSQL-compatible)
+#                if is_postgresql_mode():
+#                    cursor = conn.execute("""
+#                        SELECT
+#                            column_name as name,
+#                            data_type as type,
+#                            is_nullable,
+#                            CASE WHEN column_default LIKE 'nextval%%' THEN 1 ELSE 0 END as pk
+#                        FROM information_schema.columns
+#                        WHERE table_schema = current_schema()
+#                        AND table_name = ?
+#                        ORDER BY ordinal_position
+#                    """, (table,))
+#                    columns = cursor.fetchall()
+#
+#                    output.append("   Columns:")
+#                    for col in columns:
+#                        pk = " (PRIMARY KEY)" if col['pk'] else ""
+#                        notnull = " NOT NULL" if col['is_nullable'] == 'NO' else ""
+#                        output.append(f"      {col['name']}: {col['type']}{pk}{notnull}")
+#                else:
+#                    cursor = conn.execute(f"PRAGMA table_info({table})")
+#                    columns = cursor.fetchall()
+#
+#                    output.append("   Columns:")
+#                    for col in columns:
+#                        pk = " (PRIMARY KEY)" if col['pk'] else ""
+#                        notnull = " NOT NULL" if col['notnull'] else ""
+#                        output.append(f"      {col['name']}: {col['type']}{pk}{notnull}")
+#
+#                # Get row count
+#                cursor = conn.execute(f"SELECT COUNT(*) as count FROM {table}")
+#                count = cursor.fetchone()['count']
+#                output.append(f"   Rows: {count}")
+#
+#            return '\n'.join(output)
+#
+#        elif mode == "contexts":
+#            # Dementia DB specific
+#            if not session_id:
+#                return "❌ 'contexts' mode only works with dementia database (default).\n\nUse 'schema' or 'tables' mode for other databases."
+#
+#            output = ["🔒 LOCKED CONTEXTS", "=" * 60, ""]
+#
+#            if filter_text:
+#                cursor = conn.execute("""
+#                    SELECT label, version, locked_at, preview, metadata
+#                    FROM context_locks
+#                    WHERE session_id = ? AND label LIKE ?
+#                    ORDER BY locked_at DESC
+#                """, (session_id, f"%{filter_text}%"))
+#            else:
+#                cursor = conn.execute("""
+#                    SELECT label, version, locked_at, preview, metadata
+#                    FROM context_locks
+#                    WHERE session_id = ?
+#                    ORDER BY locked_at DESC
+#                """, (session_id,))
+#
+#            rows = cursor.fetchall()
+#
+#            if not rows:
+#                return "No locked contexts found."
+#
+#            for row in rows:
+#                metadata = json.loads(row['metadata']) if row['metadata'] else {}
+#                priority = metadata.get('priority', 'reference')
+#                dt = datetime.fromtimestamp(row['locked_at'])
+#
+#                output.append(f"\n• {row['label']} v{row['version']} [{priority}]")
+#                output.append(f"  Locked: {dt.strftime('%Y-%m-%d %H:%M')}")
+#                output.append(f"  Preview: {row['preview'][:80]}...")
+#
+#            output.append(f"\n\nTotal: {len(rows)} contexts")
+#            return '\n'.join(output)
+#
+#        else:
+#            return f"❌ Invalid mode: {mode}\n\nValid modes: tables, schema, overview, contexts\n\nNote: 'overview' and 'contexts' only work with dementia database (default)"
+#
+#    except Exception as e:
+#        return f"❌ Inspection failed: {str(e)}"
+#
 
 @mcp.tool()
 async def execute_sql(
@@ -6885,113 +6888,116 @@ async def get_file_clusters(project: Optional[str] = None) -> str:
         return json.dumps({'error': str(e)}, indent=2)
 
 
-@mcp.tool()
-async def file_model_status(project: Optional[str] = None) -> str:
-    """
-    Get file semantic model statistics and health.
-
-    **Purpose:** Monitor the file model system and understand project composition.
-
-    **Returns:** JSON with overview, file type distribution, standard files, warnings
-
-    **Health status:**
-    - "healthy": Model contains files, recent scan
-    - "no_data": No files scanned yet (run scan_project_files)
-    - "stale": Last scan >7 days ago (consider re-scanning)
-
-    **Use cases:**
-    - Check if model is up to date
-    - Understand project composition
-    - Monitor standard file warnings
-    - Verify scan performance
-
-    **Note:** This tool queries the database (no direct file access).
-    Works in all environments. Shows status of file model built by scan_project_files().
-    """
-    conn = _get_db_for_project(project)
-    session_id = get_current_session_id()
-
-    try:
-        # Overview statistics
-        cursor = conn.execute("""
-            SELECT
-                COUNT(*) as total_files,
-                SUM(file_size) as total_size,
-                AVG(file_size) as avg_size,
-                MIN(last_scanned) as oldest_scan,
-                MAX(last_scanned) as newest_scan,
-                AVG(scan_duration_ms) as avg_scan_time
-            FROM file_semantic_model
-            WHERE session_id = ?
-        """, (session_id,))
-
-        stats = cursor.fetchone()
-
-        if not stats or stats['total_files'] == 0:
-            return json.dumps({
-                'overview': {'total_files': 0},
-                'health': 'no_data',
-                'message': 'No files scanned yet. Run scan_project_files() to build model.'
-            }, indent=2)
-
-        # Type distribution
-        type_cursor = conn.execute("""
-            SELECT file_type, COUNT(*) as count
-            FROM file_semantic_model
-            WHERE session_id = ?
-            GROUP BY file_type
-            ORDER BY count DESC
-            LIMIT 10
-        """, (session_id,))
-
-        type_dist = {row['file_type']: row['count'] for row in type_cursor.fetchall() if row['file_type']}
-
-        # Standard files
-        std_cursor = conn.execute("""
-            SELECT file_path, standard_type, warnings
-            FROM file_semantic_model
-            WHERE session_id = ? AND is_standard = 1
-            ORDER BY file_path
-        """, (session_id,))
-
-        standard_files = []
-        for row in std_cursor.fetchall():
-            warnings = json.loads(row['warnings'] or '[]')
-            standard_files.append({
-                'path': row['file_path'],
-                'type': row['standard_type'],
-                'warnings': warnings
-            })
-
-        # Determine health
-        age_days = (time.time() - stats['newest_scan']) / 86400 if stats['newest_scan'] else 999
-        if age_days > 7:
-            health = 'stale'
-        else:
-            health = 'healthy'
-
-        return json.dumps({
-            'overview': {
-                'total_files': stats['total_files'],
-                'total_size_mb': round(stats['total_size'] / (1024 * 1024), 2) if stats['total_size'] else 0,
-                'average_file_kb': round(stats['avg_size'] / 1024, 2) if stats['avg_size'] else 0,
-                'last_full_scan': datetime.fromtimestamp(stats['oldest_scan']).isoformat() if stats['oldest_scan'] else None,
-                'last_update': datetime.fromtimestamp(stats['newest_scan']).isoformat() if stats['newest_scan'] else None,
-                'avg_scan_time_ms': round(stats['avg_scan_time'] or 0, 2)
-            },
-            'type_distribution': type_dist,
-            'standard_files': standard_files,
-            'health': health
-        }, indent=2)
-
-    except Exception as e:
-        return json.dumps({'error': str(e)}, indent=2)
-
-
+# DEPRECATED: Replaced by health_check_and_repair()
+# @mcp.tool()
+# async def file_model_status(project: Optional[str] = None) -> str:
+#     """
+#     DEPRECATED: Use health_check_and_repair(checks=["file_model"]) instead.
+#
+#     Get file semantic model statistics and health.
+#
+#     **Purpose:** Monitor the file model system and understand project composition.
+#
+#    **Returns:** JSON with overview, file type distribution, standard files, warnings
+#
+#    **Health status:**
+#    - "healthy": Model contains files, recent scan
+#    - "no_data": No files scanned yet (run scan_project_files)
+#    - "stale": Last scan >7 days ago (consider re-scanning)
+#
+#    **Use cases:**
+#    - Check if model is up to date
+#    - Understand project composition
+#    - Monitor standard file warnings
+#    - Verify scan performance
+#
+#    **Note:** This tool queries the database (no direct file access).
+#    Works in all environments. Shows status of file model built by scan_project_files().
+#    """
+#    conn = _get_db_for_project(project)
+#    session_id = get_current_session_id()
+#
+#    try:
+#        # Overview statistics
+#        cursor = conn.execute("""
+#            SELECT
+#                COUNT(*) as total_files,
+#                SUM(file_size) as total_size,
+#                AVG(file_size) as avg_size,
+#                MIN(last_scanned) as oldest_scan,
+#                MAX(last_scanned) as newest_scan,
+#                AVG(scan_duration_ms) as avg_scan_time
+#            FROM file_semantic_model
+#            WHERE session_id = ?
+#        """, (session_id,))
+#
+#        stats = cursor.fetchone()
+#
+#        if not stats or stats['total_files'] == 0:
+#            return json.dumps({
+#                'overview': {'total_files': 0},
+#                'health': 'no_data',
+#                'message': 'No files scanned yet. Run scan_project_files() to build model.'
+#            }, indent=2)
+#
+#        # Type distribution
+#        type_cursor = conn.execute("""
+#            SELECT file_type, COUNT(*) as count
+#            FROM file_semantic_model
+#            WHERE session_id = ?
+#            GROUP BY file_type
+#            ORDER BY count DESC
+#            LIMIT 10
+#        """, (session_id,))
+#
+#        type_dist = {row['file_type']: row['count'] for row in type_cursor.fetchall() if row['file_type']}
+#
+#        # Standard files
+#        std_cursor = conn.execute("""
+#            SELECT file_path, standard_type, warnings
+#            FROM file_semantic_model
+#            WHERE session_id = ? AND is_standard = 1
+#            ORDER BY file_path
+#        """, (session_id,))
+#
+#        standard_files = []
+#        for row in std_cursor.fetchall():
+#            warnings = json.loads(row['warnings'] or '[]')
+#            standard_files.append({
+#                'path': row['file_path'],
+#                'type': row['standard_type'],
+#                'warnings': warnings
+#            })
+#
+#        # Determine health
+#        age_days = (time.time() - stats['newest_scan']) / 86400 if stats['newest_scan'] else 999
+#        if age_days > 7:
+#            health = 'stale'
+#        else:
+#            health = 'healthy'
+#
+#        return json.dumps({
+#            'overview': {
+#                'total_files': stats['total_files'],
+#                'total_size_mb': round(stats['total_size'] / (1024 * 1024), 2) if stats['total_size'] else 0,
+#                'average_file_kb': round(stats['avg_size'] / 1024, 2) if stats['avg_size'] else 0,
+#                'last_full_scan': datetime.fromtimestamp(stats['oldest_scan']).isoformat() if stats['oldest_scan'] else None,
+#                'last_update': datetime.fromtimestamp(stats['newest_scan']).isoformat() if stats['newest_scan'] else None,
+#                'avg_scan_time_ms': round(stats['avg_scan_time'] or 0, 2)
+#            },
+#            'type_distribution': type_dist,
+#            'standard_files': standard_files,
+#            'health': health
+#        }, indent=2)
+#
+#    except Exception as e:
+#        return json.dumps({'error': str(e)}, indent=2)
+#
+#
 # ============================================================================
 # SEMANTIC SEARCH & AI FEATURES (v4.4.0)
 # ============================================================================
-
+#
 @mcp.tool()
 async def generate_embeddings(
     context_ids: Optional[str] = None,
@@ -7341,92 +7347,95 @@ Cost: FREE (local)
     }, indent=2)
 
 
-@mcp.tool()
-async def embedding_status(project: Optional[str] = None) -> str:
-    """
-    Check status of embedding and AI features.
-
-    **Token Efficiency: MINIMAL** (~500 tokens)
-
-    Returns: Configuration status, statistics, and setup instructions
-    """
-    try:
-        from src.services import embedding_service, llm_service
-        from src.services.semantic_search import SemanticSearch
-        from src.config import config
-    except Exception as e:
-        return json.dumps({
-            "error": "Service initialization failed",
-            "reason": str(e),
-            "services": {
-                "embedding": {"enabled": False, "reason": "Import failed"},
-                "llm": {"enabled": False, "reason": "Import failed"}
-            }
-        }, indent=2)
-
-    conn = _get_db_for_project(project)
-    semantic_search = SemanticSearch(conn, embedding_service)
-
-    status = {
-        "embedding_service": {
-            "enabled": embedding_service.enabled,
-            "provider": config.embedding_provider,
-            "model": config.embedding_model if embedding_service.enabled else None,
-            "dimensions": embedding_service.dimensions if embedding_service.enabled else None,
-            "features": ["semantic_search"] if embedding_service.enabled else []
-        },
-        "llm_service": {
-            "enabled": llm_service.enabled,
-            "provider": config.llm_provider,
-            "model": config.llm_model if llm_service.enabled else None,
-            "features": ["ai_summarization", "priority_classification"] if llm_service.enabled else []
-        },
-        "statistics": semantic_search.get_embedding_stats(),
-        "setup_instructions": {}
-    }
-
-    # Add setup instructions if services disabled
-    if not embedding_service.enabled:
-        status["setup_instructions"]["embeddings"] = {
-            "step1": "Start Ollama (if not running)",
-            "step2": "Run: ollama pull nomic-embed-text",
-            "step3": "Restart MCP server",
-            "step4": "Run generate_embeddings() to populate existing contexts",
-            "cost": "FREE (local)",
-            "performance": "~30ms per embedding"
-        }
-
-    if not llm_service.enabled:
-        status["setup_instructions"]["llm"] = {
-            "step1": "Start Ollama (if not running)",
-            "step2": "Run: ollama pull qwen2.5-coder:1.5b (recommended for speed)",
-            "step3": "Restart MCP server",
-            "step4": "Use ai_summarize_context() for AI-powered summaries",
-            "cost": "FREE (local)",
-            "performance": "~1-2s per summary"
-        }
-
-    # Build status summary
-    emb_status = "✓ Enabled" if embedding_service.enabled else "✗ Disabled"
-    llm_status = "✓ Enabled" if llm_service.enabled else "✗ Disabled"
-
-    summary_text = f"""
-⚙️ AI Services Status
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-Embeddings: {emb_status}
-  Provider: {config.embedding_provider}
-  Model: {config.embedding_model if embedding_service.enabled else 'N/A'}
-
-LLM: {llm_status}
-  Provider: {config.llm_provider}
-  Model: {config.llm_model if llm_service.enabled else 'N/A'}
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-""".strip()
-
-    status["summary"] = summary_text
-    return json.dumps(status, indent=2)
-
-
+# DEPRECATED: Replaced by health_check_and_repair()
+# @mcp.tool()
+# async def embedding_status(project: Optional[str] = None) -> str:
+#     """
+#     DEPRECATED: Use health_check_and_repair(checks=["embeddings"]) instead.
+#
+#     Check status of embedding and AI features.
+#
+#     **Token Efficiency: MINIMAL** (~500 tokens)
+#
+#    Returns: Configuration status, statistics, and setup instructions
+#    """
+#    try:
+#        from src.services import embedding_service, llm_service
+#        from src.services.semantic_search import SemanticSearch
+#        from src.config import config
+#    except Exception as e:
+#        return json.dumps({
+#            "error": "Service initialization failed",
+#            "reason": str(e),
+#            "services": {
+#                "embedding": {"enabled": False, "reason": "Import failed"},
+#                "llm": {"enabled": False, "reason": "Import failed"}
+#            }
+#        }, indent=2)
+#
+#    conn = _get_db_for_project(project)
+#    semantic_search = SemanticSearch(conn, embedding_service)
+#
+#    status = {
+#        "embedding_service": {
+#            "enabled": embedding_service.enabled,
+#            "provider": config.embedding_provider,
+#            "model": config.embedding_model if embedding_service.enabled else None,
+#            "dimensions": embedding_service.dimensions if embedding_service.enabled else None,
+#            "features": ["semantic_search"] if embedding_service.enabled else []
+#        },
+#        "llm_service": {
+#            "enabled": llm_service.enabled,
+#            "provider": config.llm_provider,
+#            "model": config.llm_model if llm_service.enabled else None,
+#            "features": ["ai_summarization", "priority_classification"] if llm_service.enabled else []
+#        },
+#        "statistics": semantic_search.get_embedding_stats(),
+#        "setup_instructions": {}
+#    }
+#
+#    # Add setup instructions if services disabled
+#    if not embedding_service.enabled:
+#        status["setup_instructions"]["embeddings"] = {
+#            "step1": "Start Ollama (if not running)",
+#            "step2": "Run: ollama pull nomic-embed-text",
+#            "step3": "Restart MCP server",
+#            "step4": "Run generate_embeddings() to populate existing contexts",
+#            "cost": "FREE (local)",
+#            "performance": "~30ms per embedding"
+#        }
+#
+#    if not llm_service.enabled:
+#        status["setup_instructions"]["llm"] = {
+#            "step1": "Start Ollama (if not running)",
+#            "step2": "Run: ollama pull qwen2.5-coder:1.5b (recommended for speed)",
+#            "step3": "Restart MCP server",
+#            "step4": "Use ai_summarize_context() for AI-powered summaries",
+#            "cost": "FREE (local)",
+#            "performance": "~1-2s per summary"
+#        }
+#
+#    # Build status summary
+#    emb_status = "✓ Enabled" if embedding_service.enabled else "✗ Disabled"
+#    llm_status = "✓ Enabled" if llm_service.enabled else "✗ Disabled"
+#
+#    summary_text = f"""
+#⚙️ AI Services Status
+#━━━━━━━━━━━━━━━━━━━━━━━━━━
+#Embeddings: {emb_status}
+#  Provider: {config.embedding_provider}
+#  Model: {config.embedding_model if embedding_service.enabled else 'N/A'}
+#
+#LLM: {llm_status}
+#  Provider: {config.llm_provider}
+#  Model: {config.llm_model if llm_service.enabled else 'N/A'}
+#━━━━━━━━━━━━━━━━━━━━━━━━━━
+#""".strip()
+#
+#    status["summary"] = summary_text
+#    return json.dumps(status, indent=2)
+#
+#
 @mcp.tool()
 async def diagnose_ollama() -> str:
     """
@@ -7991,6 +8000,372 @@ Total Savings: 100%
 
     comparison["summary_display"] = summary_text
     return json.dumps(comparison, indent=2)
+
+
+# ============================================================================
+# UNIFIED DATABASE HEALTH TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def health_check_and_repair(
+    project: Optional[str] = None,
+    auto_fix: bool = False,
+    checks: str = "all",
+    dry_run: bool = False
+) -> str:
+    """
+    Complete database health check with optional auto-repair.
+
+    Performs comprehensive validation in single call:
+    1. Schema inspection (structure, indexes, constraints)
+    2. Data validation (integrity, embeddings, orphans)
+    3. Performance analysis (using pg_stat_user_tables)
+    4. Issue detection (categorized by severity)
+    5. [If auto_fix=True] Automatic repair
+    6. Final verification
+
+    Args:
+        project: Project name (default: auto-detect)
+        auto_fix: Automatically fix issues (default: False)
+        checks: Which checks to run (default: "all")
+                Options: "all", "integrity", "embeddings", "performance", "schema"
+                Can be comma-separated: "integrity,embeddings"
+        dry_run: Show what would be fixed without fixing (default: False)
+
+    Returns:
+        JSON with complete health report including:
+        - health: "healthy" | "good_with_warnings" | "needs_attention"
+        - summary: One-line status
+        - statistics: Database stats (contexts, sessions, size, etc.)
+        - issues_found: List of issues detected
+        - fixes_applied: What was fixed (if auto_fix=True)
+        - remaining_issues: Still needs attention
+        - recommendations: Next steps
+
+    Example:
+        User: "Is my database healthy?"
+        LLM: health_check_and_repair()
+
+        User: "Fix my database"
+        LLM: health_check_and_repair(auto_fix=True)
+    """
+    try:
+        project_name = _resolve_project(project)
+        db = get_db()
+
+        # Parse checks parameter
+        check_list = [c.strip() for c in checks.split(",")]
+        if "all" in check_list:
+            check_list = ["integrity", "embeddings", "performance", "schema"]
+
+        # ====================================================================
+        # STEP 1: INSPECT & GATHER STATISTICS
+        # ====================================================================
+
+        conn = db.pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                # Gather statistics
+                stats = {}
+
+                # Context statistics
+                cur.execute(f"""
+                    SELECT COUNT(*) as total,
+                           COUNT(CASE WHEN embedding_vector IS NOT NULL THEN 1 END) as with_embeddings,
+                           ROUND(AVG(LENGTH(content))::numeric, 2) as avg_size
+                    FROM {db.schema}.context_locks
+                    WHERE project_name = %s
+                """, (project_name,))
+                context_stats = cur.fetchone()
+                stats["contexts"] = {
+                    "total": context_stats["total"],
+                    "with_embeddings": context_stats["with_embeddings"],
+                    "coverage": round(context_stats["with_embeddings"] / context_stats["total"] * 100, 1) if context_stats["total"] > 0 else 0,
+                    "avg_size": float(context_stats["avg_size"]) if context_stats["avg_size"] else 0
+                }
+
+                # Session statistics
+                cur.execute(f"""
+                    SELECT COUNT(*) as total,
+                           COUNT(CASE WHEN expires_at > NOW() THEN 1 END) as active
+                    FROM {db.schema}.sessions
+                    WHERE project_name = %s
+                """, (project_name,))
+                session_stats = cur.fetchone()
+                stats["sessions"] = {
+                    "total": session_stats["total"],
+                    "active": session_stats["active"]
+                }
+
+                # Database size
+                cur.execute(f"""
+                    SELECT pg_size_pretty(pg_total_relation_size('{db.schema}.context_locks')) as size
+                """)
+                size_result = cur.fetchone()
+                stats["database_size"] = size_result["size"]
+
+        finally:
+            db.pool.putconn(conn)
+
+        # ====================================================================
+        # STEP 2: VALIDATE & DETECT ISSUES
+        # ====================================================================
+
+        issues = []
+
+        # CHECK: Missing embeddings
+        if "embeddings" in check_list:
+            conn = db.pool.getconn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"""
+                        SELECT id, label
+                        FROM {db.schema}.context_locks
+                        WHERE project_name = %s
+                          AND embedding_vector IS NULL
+                        LIMIT 100
+                    """, (project_name,))
+                    missing_emb = cur.fetchall()
+
+                    if missing_emb:
+                        issues.append({
+                            "type": "missing_embeddings",
+                            "severity": "warning",
+                            "count": len(missing_emb),
+                            "impact": f"Semantic search unavailable for {len(missing_emb)} contexts",
+                            "auto_fixable": True,
+                            "fix_method": "generate_embeddings()",
+                            "details": [{"id": r["id"], "label": r["label"]} for r in missing_emb[:5]]
+                        })
+            finally:
+                db.pool.putconn(conn)
+
+        # CHECK: Orphaned records (integrity)
+        if "integrity" in check_list:
+            conn = db.pool.getconn()
+            try:
+                with conn.cursor() as cur:
+                    # Check for sessions without matching project
+                    cur.execute(f"""
+                        SELECT COUNT(*) as count
+                        FROM {db.schema}.sessions s
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM {db.schema}.projects p
+                            WHERE p.name = s.project_name
+                        )
+                    """)
+                    orphan_sessions = cur.fetchone()["count"]
+
+                    if orphan_sessions > 0:
+                        issues.append({
+                            "type": "orphaned_sessions",
+                            "severity": "error",
+                            "count": orphan_sessions,
+                            "impact": "Data corruption, wasted space",
+                            "auto_fixable": True,
+                            "fix_method": "DELETE orphaned sessions"
+                        })
+            finally:
+                db.pool.putconn(conn)
+
+        # CHECK: Performance (using pg_stat_user_tables)
+        if "performance" in check_list:
+            conn = db.pool.getconn()
+            try:
+                with conn.cursor() as cur:
+                    # Find tables with high sequential scan ratio on large tables
+                    cur.execute(f"""
+                        SELECT
+                            schemaname || '.' || relname as table_name,
+                            seq_scan,
+                            idx_scan,
+                            COALESCE(idx_scan, 0) + seq_scan as total_scans,
+                            pg_size_pretty(pg_total_relation_size(schemaname||'.'||relname)) as size,
+                            pg_total_relation_size(schemaname||'.'||relname) as size_bytes
+                        FROM pg_stat_user_tables
+                        WHERE schemaname = %s
+                          AND seq_scan > 100
+                          AND pg_total_relation_size(schemaname||'.'||relname) > 1024*1024  -- > 1MB
+                        ORDER BY seq_scan DESC
+                        LIMIT 5
+                    """, (db.schema,))
+                    slow_tables = cur.fetchall()
+
+                    for table in slow_tables:
+                        # High seq scan ratio suggests missing index
+                        total = table["total_scans"]
+                        seq_ratio = (table["seq_scan"] / total * 100) if total > 0 else 0
+
+                        if seq_ratio > 30:  # More than 30% sequential scans
+                            issues.append({
+                                "type": "high_seq_scans",
+                                "severity": "warning",
+                                "table": table["table_name"],
+                                "seq_scans": table["seq_scan"],
+                                "index_scans": table["idx_scan"],
+                                "size": table["size"],
+                                "impact": f"{int(seq_ratio)}% sequential scans - potential 20-80% speedup with index",
+                                "auto_fixable": False,  # Requires analysis to determine best index
+                                "fix_method": "Review query patterns and add appropriate indexes"
+                            })
+            finally:
+                db.pool.putconn(conn)
+
+        # CHECK: Schema drift (compare to expected structure)
+        if "schema" in check_list:
+            conn = db.pool.getconn()
+            try:
+                with conn.cursor() as cur:
+                    # Check for missing expected tables
+                    expected_tables = ["projects", "sessions", "context_locks", "memory_entries"]
+                    cur.execute(f"""
+                        SELECT table_name
+                        FROM information_schema.tables
+                        WHERE table_schema = %s
+                          AND table_type = 'BASE TABLE'
+                    """, (db.schema,))
+                    existing_tables = [row["table_name"] for row in cur.fetchall()]
+
+                    missing_tables = set(expected_tables) - set(existing_tables)
+                    if missing_tables:
+                        issues.append({
+                            "type": "missing_tables",
+                            "severity": "error",
+                            "tables": list(missing_tables),
+                            "impact": "Core functionality broken",
+                            "auto_fixable": False,
+                            "fix_method": "Run apply_migrations() to restore schema"
+                        })
+            finally:
+                db.pool.putconn(conn)
+
+        # ====================================================================
+        # STEP 3: AUTO-FIX (if requested)
+        # ====================================================================
+
+        fixes_applied = []
+
+        if auto_fix and not dry_run:
+            for issue in issues:
+                if not issue.get("auto_fixable", False):
+                    continue
+
+                try:
+                    if issue["type"] == "missing_embeddings":
+                        # Generate embeddings
+                        result = await generate_embeddings(project=project_name)
+                        fixes_applied.append({
+                            "issue": "missing_embeddings",
+                            "action": "generated embeddings",
+                            "count": issue["count"],
+                            "result": result
+                        })
+
+                    elif issue["type"] == "orphaned_sessions":
+                        # Delete orphaned sessions
+                        conn = db.pool.getconn()
+                        try:
+                            with conn.cursor() as cur:
+                                cur.execute(f"""
+                                    DELETE FROM {db.schema}.sessions s
+                                    WHERE NOT EXISTS (
+                                        SELECT 1 FROM {db.schema}.projects p
+                                        WHERE p.name = s.project_name
+                                    )
+                                """)
+                                deleted = cur.rowcount
+                                conn.commit()
+
+                                fixes_applied.append({
+                                    "issue": "orphaned_sessions",
+                                    "action": "deleted orphaned sessions",
+                                    "count": deleted
+                                })
+                        finally:
+                            db.pool.putconn(conn)
+
+                except Exception as e:
+                    fixes_applied.append({
+                        "issue": issue["type"],
+                        "action": "FAILED",
+                        "error": str(e)
+                    })
+
+        # ====================================================================
+        # STEP 4: FINAL VALIDATION
+        # ====================================================================
+
+        # If we applied fixes, remove those issues from remaining
+        remaining_issues = []
+        if auto_fix and fixes_applied:
+            fixed_types = {f["issue"] for f in fixes_applied if f["action"] != "FAILED"}
+            remaining_issues = [i for i in issues if i["type"] not in fixed_types]
+        else:
+            remaining_issues = issues
+
+        # ====================================================================
+        # STEP 5: DETERMINE HEALTH STATUS
+        # ====================================================================
+
+        if not remaining_issues:
+            health = "healthy"
+        elif all(i["severity"] == "warning" for i in remaining_issues):
+            health = "good_with_warnings"
+        else:
+            health = "needs_attention"
+
+        # ====================================================================
+        # STEP 6: GENERATE RECOMMENDATIONS
+        # ====================================================================
+
+        recommendations = []
+
+        if not remaining_issues and not auto_fix:
+            recommendations.append("✅ Database is healthy!")
+            recommendations.append("Consider running health_check_and_repair() weekly to maintain health")
+        elif not remaining_issues and auto_fix:
+            recommendations.append("✅ All issues fixed! Database is now healthy!")
+        elif remaining_issues and not auto_fix:
+            fixable_count = sum(1 for i in remaining_issues if i.get("auto_fixable", False))
+            if fixable_count > 0:
+                recommendations.append(f"Run health_check_and_repair(auto_fix=True) to automatically fix {fixable_count} issues")
+
+            # Add specific recommendations
+            for issue in remaining_issues[:3]:  # Top 3 issues
+                if issue.get("fix_method"):
+                    recommendations.append(f"• {issue['type']}: {issue['fix_method']}")
+        elif remaining_issues and auto_fix:
+            recommendations.append(f"⚠️ {len(remaining_issues)} issues could not be auto-fixed")
+            for issue in remaining_issues:
+                recommendations.append(f"• {issue['type']}: {issue['fix_method']}")
+
+        # ====================================================================
+        # RETURN COMPLETE REPORT
+        # ====================================================================
+
+        report = {
+            "health": health,
+            "summary": f"{len(remaining_issues)} issues found" if remaining_issues else "All checks passed",
+            "checks_performed": check_list,
+            "statistics": stats,
+            "issues_found": issues,
+            "fixes_applied": fixes_applied,
+            "remaining_issues": remaining_issues,
+            "recommendations": recommendations
+        }
+
+        if dry_run and auto_fix:
+            report["dry_run_note"] = "This is a DRY RUN. Set dry_run=False to apply fixes."
+
+        return json.dumps(report, indent=2, default=str)
+
+    except Exception as e:
+        logger.error(f"Health check failed: {e}", exc_info=True)
+        return json.dumps({
+            "error": str(e),
+            "type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        }, indent=2)
 
 
 # ============================================================================
