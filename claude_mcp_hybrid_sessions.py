@@ -187,16 +187,6 @@ def _get_local_session_id() -> Optional[str]:
     """Get current local session ID."""
     return _local_session_id
 
-def _update_session_activity():
-    """Update session activity timestamp in database."""
-    global _session_store, _local_session_id
-
-    if _session_store and _local_session_id:
-        try:
-            _session_store.update_activity(_local_session_id)
-        except Exception as e:
-            print(f"⚠️  Failed to update session activity: {e}", file=sys.stderr)
-
 # Session-level active project tracking (per conversation)
 _active_projects = {}  # {session_id: project_name}
 
