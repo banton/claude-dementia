@@ -2002,94 +2002,94 @@ async def switch_project(name: str) -> str:
 
 
 @mcp.tool()
-async def get_active_project() -> str:
-    """
-    Show which project is currently active for this conversation.
-
-    Returns:
-        JSON with active project name and stats
-
-    Example:
-        User: "Which project am I using?"
-        Claude: get_active_project()
-    """
-    import json
-
-    try:
-        # Get current project using fallback logic
-        current_project = _get_project_for_context()
-
-        # Check if it exists
-        import psycopg2
-        from psycopg2.extras import RealDictCursor
-
-        conn = psycopg2.connect(config.database_url)
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-
-        cur.execute("""
-            SELECT schema_name
-            FROM information_schema.schemata
-            WHERE schema_name = %s
-        """, (current_project,))
-
-        exists = cur.fetchone() is not None
-
-        if exists:
-            # Get stats
-            cur.execute(f'SELECT COUNT(*) as count FROM "{current_project}".sessions')
-            sessions = cur.fetchone()['count']
-
-            cur.execute(f'SELECT COUNT(*) as count FROM "{current_project}".context_locks')
-            contexts = cur.fetchone()['count']
-
-            cur.execute(f'SELECT COUNT(*) as count FROM "{current_project}".memory_entries')
-            memories = cur.fetchone()['count']
-
-            conn.close()
-
-            return json.dumps({
-                "success": True,
-                "project": current_project,
-                "exists": True,
-                "stats": {
-                    "sessions": sessions,
-                    "contexts": contexts,
-                    "memories": memories
-                },
-                "detection": _get_detection_source()
-            })
-        else:
-            conn.close()
-
-            return json.dumps({
-                "success": True,
-                "project": current_project,
-                "exists": False,
-                "message": "Project will be created on first use",
-                "detection": _get_detection_source()
-            })
-
-    except Exception as e:
-        return json.dumps({
-            "success": False,
-            "error": str(e)
-        })
-
-
-def _get_detection_source() -> str:
-    """Helper to explain how current project was determined."""
-    try:
-        session_id = get_current_session_id()
-        if session_id in _active_projects:
-            return "session_switch"
-    except:
-        pass
-
-    if _get_db_adapter().schema and _get_db_adapter().schema != 'default':
-        return "auto_detected_from_directory"
-
-    return "default_fallback"
-
+#async def get_active_project() -> str:
+#    """
+#    Show which project is currently active for this conversation.
+#
+#    Returns:
+#        JSON with active project name and stats
+#
+#    Example:
+#        User: "Which project am I using?"
+#        Claude: get_active_project()
+#    """
+#    import json
+#
+#    try:
+#        # Get current project using fallback logic
+#        current_project = _get_project_for_context()
+#
+#        # Check if it exists
+#        import psycopg2
+#        from psycopg2.extras import RealDictCursor
+#
+#        conn = psycopg2.connect(config.database_url)
+#        cur = conn.cursor(cursor_factory=RealDictCursor)
+#
+#        cur.execute("""
+#            SELECT schema_name
+#            FROM information_schema.schemata
+#            WHERE schema_name = %s
+#        """, (current_project,))
+#
+#        exists = cur.fetchone() is not None
+#
+#        if exists:
+#            # Get stats
+#            cur.execute(f'SELECT COUNT(*) as count FROM "{current_project}".sessions')
+#            sessions = cur.fetchone()['count']
+#
+#            cur.execute(f'SELECT COUNT(*) as count FROM "{current_project}".context_locks')
+#            contexts = cur.fetchone()['count']
+#
+#            cur.execute(f'SELECT COUNT(*) as count FROM "{current_project}".memory_entries')
+#            memories = cur.fetchone()['count']
+#
+#            conn.close()
+#
+#            return json.dumps({
+#                "success": True,
+#                "project": current_project,
+#                "exists": True,
+#                "stats": {
+#                    "sessions": sessions,
+#                    "contexts": contexts,
+#                    "memories": memories
+#                },
+#                "detection": _get_detection_source()
+#            })
+#        else:
+#            conn.close()
+#
+#            return json.dumps({
+#                "success": True,
+#                "project": current_project,
+#                "exists": False,
+#                "message": "Project will be created on first use",
+#                "detection": _get_detection_source()
+#            })
+#
+#    except Exception as e:
+#        return json.dumps({
+#            "success": False,
+#            "error": str(e)
+#        })
+#
+#
+#def _get_detection_source() -> str:
+#    """Helper to explain how current project was determined."""
+#    try:
+#        session_id = get_current_session_id()
+#        if session_id in _active_projects:
+#            return "session_switch"
+#    except:
+#        pass
+#
+#    if _get_db_adapter().schema and _get_db_adapter().schema != 'default':
+#        return "auto_detected_from_directory"
+#
+#    return "default_fallback"
+#
 
 @mcp.tool()
 async def create_project(name: str) -> str:
@@ -2424,160 +2424,160 @@ async def delete_project(name: str, confirm: bool = False) -> str:
 
 
 @mcp.tool()
-async def select_project_for_session(project_name: str) -> str:
-    """
-    Select which project to work on for this MCP session.
-
-    IMPORTANT: This must be called when starting a new session before using other tools.
-    When you connect, the system will prompt you to select a project if needed.
-
-    Args:
-        project_name: Project name to work on (e.g., 'innkeeper', 'linkedin', 'default')
-
-    Returns:
-        Confirmation with loaded handover from previous session (if exists)
-
-    Example:
-        select_project_for_session('innkeeper')
-        → ✅ Project 'innkeeper' selected
-          📦 Previous session: You were fixing authentication bug...
-    """
-    import json
-    import re
-    from mcp_session_store import PostgreSQLSessionStore
-
-    try:
-        # Get current session ID (from context - will be set by middleware)
-        session_id = getattr(config, '_current_session_id', None)
-
-        if not session_id:
-            return json.dumps({
-                "success": False,
-                "error": "No active session found. This should not happen."
-            }, indent=2)
-
-        # Sanitize project name
-        safe_name = re.sub(r'[^a-z0-9]', '_', project_name.lower())
-        safe_name = re.sub(r'_+', '_', safe_name).strip('_')[:32]
-
-        # Get database adapter
-        adapter = _get_db_adapter()
-        session_store = PostgreSQLSessionStore(adapter.pool)
-
-        # Get current session
-        session = session_store.get_session(session_id)
-        if not session:
-            return json.dumps({
-                "success": False,
-                "error": "Session not found in database"
-            }, indent=2)
-
-        # Check if project exists (for non-default projects)
-        if project_name != 'default':
-            import psycopg2
-            conn = psycopg2.connect(config.database_url)
-            cur = conn.cursor()
-
-            # Check if schema exists
-            cur.execute("""
-                SELECT schema_name
-                FROM information_schema.schemata
-                WHERE schema_name = %s
-            """, (safe_name,))
-
-            schema_exists = cur.fetchone() is not None
-            conn.close()
-
-            if not schema_exists:
-                # Get available projects for suggestion
-                session_store_temp = PostgreSQLSessionStore(adapter.pool)
-                projects = session_store_temp.get_projects_with_stats()
-                project_names = [p['project_name'] for p in projects]
-
-                return json.dumps({
-                    "success": False,
-                    "error": f"Project '{project_name}' doesn't exist",
-                    "available_projects": project_names,
-                    "suggestion": f"Create it first: create_project('{project_name}')"
-                }, indent=2)
-
-        # Update session with selected project
-        conn = adapter.pool.getconn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE mcp_sessions
-                    SET project_name = %s
-                    WHERE session_id = %s
-                """, (project_name, session_id))
-                conn.commit()
-        finally:
-            adapter.pool.putconn(conn)
-
-        # Switch active project globally
-        _set_active_project(project_name)
-
-        # Load previous handover for this project
-        try:
-            handover_result = await get_last_handover(project=project_name)
-
-            # Parse handover result (it's JSON string)
-            handover_data = json.loads(handover_result)
-
-            if handover_data.get('handover'):
-                handover_summary = handover_data['handover']
-                work_done = handover_summary.get('work_done', [])
-                next_steps = handover_summary.get('next_steps', [])
-
-                result = f"✅ Project '{project_name}' selected\n\n"
-                result += "📦 Previous Session Handover:\n"
-                result += "─" * 50 + "\n"
-
-                if work_done:
-                    result += "\nWork Done:\n"
-                    for item in work_done[:5]:  # Show max 5 items
-                        result += f"  • {item}\n"
-
-                if next_steps:
-                    result += "\nNext Steps:\n"
-                    for item in next_steps[:3]:
-                        result += f"  • {item}\n"
-
-                result += "\n" + "─" * 50 + "\n"
-                result += "\nYou can now continue your work."
-
-                return result
-            else:
-                # No previous handover
-                return f"""✅ Project '{project_name}' selected
-
-This is a new session for this project (no previous handover found).
-
-You can now use other tools."""
-
-        except Exception as handover_error:
-            # No handover found or error loading it
-            return f"""✅ Project '{project_name}' selected
-
-No previous session handover found. This may be:
-- Your first session in this project
-- Previous session had no activity
-- Handover not yet created
-
-You can now use other tools."""
-
-    except Exception as e:
-        return json.dumps({
-            "success": False,
-            "error": f"Failed to select project: {str(e)}"
-        }, indent=2)
-
-
+#async def select_project_for_session(project_name: str) -> str:
+#    """
+#    Select which project to work on for this MCP session.
+#
+#    IMPORTANT: This must be called when starting a new session before using other tools.
+#    When you connect, the system will prompt you to select a project if needed.
+#
+#    Args:
+#        project_name: Project name to work on (e.g., 'innkeeper', 'linkedin', 'default')
+#
+#    Returns:
+#        Confirmation with loaded handover from previous session (if exists)
+#
+#    Example:
+#        select_project_for_session('innkeeper')
+#        → ✅ Project 'innkeeper' selected
+#          📦 Previous session: You were fixing authentication bug...
+#    """
+#    import json
+#    import re
+#    from mcp_session_store import PostgreSQLSessionStore
+#
+#    try:
+#        # Get current session ID (from context - will be set by middleware)
+#        session_id = getattr(config, '_current_session_id', None)
+#
+#        if not session_id:
+#            return json.dumps({
+#                "success": False,
+#                "error": "No active session found. This should not happen."
+#            }, indent=2)
+#
+#        # Sanitize project name
+#        safe_name = re.sub(r'[^a-z0-9]', '_', project_name.lower())
+#        safe_name = re.sub(r'_+', '_', safe_name).strip('_')[:32]
+#
+#        # Get database adapter
+#        adapter = _get_db_adapter()
+#        session_store = PostgreSQLSessionStore(adapter.pool)
+#
+#        # Get current session
+#        session = session_store.get_session(session_id)
+#        if not session:
+#            return json.dumps({
+#                "success": False,
+#                "error": "Session not found in database"
+#            }, indent=2)
+#
+#        # Check if project exists (for non-default projects)
+#        if project_name != 'default':
+#            import psycopg2
+#            conn = psycopg2.connect(config.database_url)
+#            cur = conn.cursor()
+#
+#            # Check if schema exists
+#            cur.execute("""
+#                SELECT schema_name
+#                FROM information_schema.schemata
+#                WHERE schema_name = %s
+#            """, (safe_name,))
+#
+#            schema_exists = cur.fetchone() is not None
+#            conn.close()
+#
+#            if not schema_exists:
+#                # Get available projects for suggestion
+#                session_store_temp = PostgreSQLSessionStore(adapter.pool)
+#                projects = session_store_temp.get_projects_with_stats()
+#                project_names = [p['project_name'] for p in projects]
+#
+#                return json.dumps({
+#                    "success": False,
+#                    "error": f"Project '{project_name}' doesn't exist",
+#                    "available_projects": project_names,
+#                    "suggestion": f"Create it first: create_project('{project_name}')"
+#                }, indent=2)
+#
+#        # Update session with selected project
+#        conn = adapter.pool.getconn()
+#        try:
+#            with conn.cursor() as cur:
+#                cur.execute("""
+#                    UPDATE mcp_sessions
+#                    SET project_name = %s
+#                    WHERE session_id = %s
+#                """, (project_name, session_id))
+#                conn.commit()
+#        finally:
+#            adapter.pool.putconn(conn)
+#
+#        # Switch active project globally
+#        _set_active_project(project_name)
+#
+#        # Load previous handover for this project
+#        try:
+#            handover_result = await get_last_handover(project=project_name)
+#
+#            # Parse handover result (it's JSON string)
+#            handover_data = json.loads(handover_result)
+#
+#            if handover_data.get('handover'):
+#                handover_summary = handover_data['handover']
+#                work_done = handover_summary.get('work_done', [])
+#                next_steps = handover_summary.get('next_steps', [])
+#
+#                result = f"✅ Project '{project_name}' selected\n\n"
+#                result += "📦 Previous Session Handover:\n"
+#                result += "─" * 50 + "\n"
+#
+#                if work_done:
+#                    result += "\nWork Done:\n"
+#                    for item in work_done[:5]:  # Show max 5 items
+#                        result += f"  • {item}\n"
+#
+#                if next_steps:
+#                    result += "\nNext Steps:\n"
+#                    for item in next_steps[:3]:
+#                        result += f"  • {item}\n"
+#
+#                result += "\n" + "─" * 50 + "\n"
+#                result += "\nYou can now continue your work."
+#
+#                return result
+#            else:
+#                # No previous handover
+#                return f"""✅ Project '{project_name}' selected
+#
+#This is a new session for this project (no previous handover found).
+#
+#You can now use other tools."""
+#
+#        except Exception as handover_error:
+#            # No handover found or error loading it
+#            return f"""✅ Project '{project_name}' selected
+#
+#No previous session handover found. This may be:
+#- Your first session in this project
+#- Previous session had no activity
+#- Handover not yet created
+#
+#You can now use other tools."""
+#
+#    except Exception as e:
+#        return json.dumps({
+#            "success": False,
+#            "error": f"Failed to select project: {str(e)}"
+#        }, indent=2)
+#
+#
 # ============================================================================
 # SESSION MANAGEMENT (unchanged from before)
 # ============================================================================
-
-@mcp.tool()
+#
+#@mcp.tool()
 async def wake_up(project: Optional[str] = None) -> str:
     """
     Initialize session and load available context for LLM orientation.
@@ -4476,208 +4476,208 @@ async def search_contexts(
 
 
 @mcp.tool()
-async def memory_analytics(project: Optional[str] = None) -> str:
-    """
-    Analyze memory system usage and health.
-
-    **Purpose:** Understand memory patterns, identify waste, get recommendations
-
-    **Returns:** JSON with comprehensive analytics:
-    - Overview: Total contexts, size, age
-    - Most accessed: Top 10 frequently used contexts
-    - Least accessed: Never-accessed contexts (candidates for cleanup)
-    - Largest contexts: Storage hogs
-    - Stale contexts: Not accessed in 30+ days
-    - By priority: Distribution across priority levels
-    - Recommendations: Actionable cleanup suggestions
-
-    **Use cases:**
-    - Identify unused contexts for cleanup
-    - Find most valuable contexts (high access count)
-    - Monitor storage usage
-    - Optimize memory system
-    - Plan capacity
-
-    **Example output:**
-    ```json
-    {
-      "overview": {
-        "total_contexts": 42,
-        "total_size_mb": 5.2,
-        "average_size_kb": 127
-      },
-      "recommendations": [
-        "Consider unlocking 8 stale contexts (not accessed in 30+ days)",
-        "12 contexts never accessed - verify still needed"
-      ]
-    }
-    ```
-    """
-    conn = _get_db_for_project(project)
-    session_id = _get_session_id_for_project(conn, project)
-
-    analytics = {
-        "overview": {},
-        "most_accessed": [],
-        "least_accessed": [],
-        "largest_contexts": [],
-        "stale_contexts": [],
-        "by_priority": {},
-        "recommendations": []
-    }
-
-    # Overview statistics
-    cursor = conn.execute("""
-        SELECT
-            COUNT(*) as total,
-            SUM(LENGTH(content)) as total_bytes,
-            AVG(LENGTH(content)) as avg_bytes,
-            MIN(locked_at) as oldest,
-            MAX(locked_at) as newest
-        FROM context_locks
-        WHERE session_id = ?
-    """, (session_id,))
-    overview = cursor.fetchone()
-
-    if overview and overview['total'] > 0:
-        analytics["overview"] = {
-            "total_contexts": int(overview['total']),
-            "total_size_mb": round(float(overview['total_bytes']) / (1024*1024), 2),
-            "average_size_kb": round(float(overview['avg_bytes']) / 1024, 2),
-            "oldest_context_age_days": round((time.time() - float(overview['oldest'])) / 86400, 1),
-            "newest_context_age_days": round((time.time() - float(overview['newest'])) / 86400, 1)
-        }
-    else:
-        return json.dumps({
-            "message": "No contexts found in memory",
-            "overview": {"total_contexts": 0}
-        }, indent=2)
-
-    # Most accessed (top 10)
-    cursor = conn.execute("""
-        SELECT
-            label, version, access_count,
-            last_accessed, LENGTH(content) as size_bytes
-        FROM context_locks
-        WHERE session_id = ? AND access_count > 0
-        ORDER BY access_count DESC
-        LIMIT 10
-    """, (session_id,))
-    analytics["most_accessed"] = [
-        {
-            "label": row['label'],
-            "version": row['version'],
-            "access_count": int(row['access_count']),
-            "size_kb": round(float(row['size_bytes']) / 1024, 2),
-            "last_accessed_days_ago": round((time.time() - float(row['last_accessed'])) / 86400, 1) if row['last_accessed'] else None
-        }
-        for row in cursor.fetchall()
-    ]
-
-    # Least accessed (never accessed)
-    cursor = conn.execute("""
-        SELECT
-            label, version, locked_at, LENGTH(content) as size_bytes
-        FROM context_locks
-        WHERE session_id = ? AND (access_count IS NULL OR access_count = 0)
-        ORDER BY locked_at DESC
-        LIMIT 10
-    """, (session_id,))
-    analytics["least_accessed"] = [
-        {
-            "label": row['label'],
-            "version": row['version'],
-            "locked_days_ago": round((time.time() - float(row['locked_at'])) / 86400, 1),
-            "size_kb": round(float(row['size_bytes']) / 1024, 2)
-        }
-        for row in cursor.fetchall()
-    ]
-
-    # Largest contexts (top 10 storage hogs)
-    cursor = conn.execute("""
-        SELECT
-            label, version, LENGTH(content) as size_bytes, access_count
-        FROM context_locks
-        WHERE session_id = ?
-        ORDER BY LENGTH(content) DESC
-        LIMIT 10
-    """, (session_id,))
-    analytics["largest_contexts"] = [
-        {
-            "label": row['label'],
-            "version": row['version'],
-            "size_kb": round(float(row['size_bytes']) / 1024, 2),
-            "access_count": int(row['access_count']) if row['access_count'] else 0
-        }
-        for row in cursor.fetchall()
-    ]
-
-    # Stale contexts (not accessed in 30+ days)
-    thirty_days_ago = time.time() - (30 * 86400)
-    cursor = conn.execute("""
-        SELECT
-            label, version, last_accessed, LENGTH(content) as size_bytes
-        FROM context_locks
-        WHERE session_id = ?
-          AND (last_accessed IS NULL OR last_accessed < ?)
-        ORDER BY last_accessed ASC NULLS FIRST
-    """, (session_id, thirty_days_ago))
-    analytics["stale_contexts"] = [
-        {
-            "label": row['label'],
-            "version": row['version'],
-            "days_since_access": round((time.time() - float(row['last_accessed'])) / 86400, 1) if row['last_accessed'] else "never",
-            "size_kb": round(float(row['size_bytes']) / 1024, 2)
-        }
-        for row in cursor.fetchall()
-    ]
-
-    # By priority distribution
-    cursor = conn.execute("""
-        SELECT
-            (metadata::json)->>'priority' as priority,
-            COUNT(*) as count,
-            SUM(LENGTH(content)) as total_bytes
-        FROM context_locks
-        WHERE session_id = ?
-        GROUP BY (metadata::json)->>'priority'
-    """, (session_id,))
-
-    analytics["by_priority"] = {}
-    for row in cursor.fetchall():
-        priority = row['priority'] or 'reference'
-        analytics["by_priority"][priority] = {
-            "count": int(row['count']),
-            "size_mb": round(float(row['total_bytes']) / (1024*1024), 2)
-        }
-
-    # Generate recommendations
-    if len(analytics["stale_contexts"]) > 0:
-        analytics["recommendations"].append(
-            f"Consider unlocking {len(analytics['stale_contexts'])} stale contexts (not accessed in 30+ days)"
-        )
-
-    if len(analytics["least_accessed"]) > 5:
-        analytics["recommendations"].append(
-            f"{len(analytics['least_accessed'])} contexts have never been accessed - verify they're still needed"
-        )
-
-    total_mb = analytics["overview"]["total_size_mb"]
-    capacity_mb = 50  # Current limit
-    usage_percent = (total_mb / capacity_mb) * 100
-
-    if usage_percent > 80:
-        analytics["recommendations"].append(
-            f"Memory usage at {total_mb}MB ({usage_percent:.1f}% of {capacity_mb}MB limit) - consider cleanup"
-        )
-
-    if not analytics["recommendations"]:
-        analytics["recommendations"].append("Memory system looks healthy - no immediate actions needed")
-
-    return json.dumps(analytics, indent=2)
-
-
-@mcp.tool()
+#async def memory_analytics(project: Optional[str] = None) -> str:
+#    """
+#    Analyze memory system usage and health.
+#
+#    **Purpose:** Understand memory patterns, identify waste, get recommendations
+#
+#    **Returns:** JSON with comprehensive analytics:
+#    - Overview: Total contexts, size, age
+#    - Most accessed: Top 10 frequently used contexts
+#    - Least accessed: Never-accessed contexts (candidates for cleanup)
+#    - Largest contexts: Storage hogs
+#    - Stale contexts: Not accessed in 30+ days
+#    - By priority: Distribution across priority levels
+#    - Recommendations: Actionable cleanup suggestions
+#
+#    **Use cases:**
+#    - Identify unused contexts for cleanup
+#    - Find most valuable contexts (high access count)
+#    - Monitor storage usage
+#    - Optimize memory system
+#    - Plan capacity
+#
+#    **Example output:**
+#    ```json
+#    {
+#      "overview": {
+#        "total_contexts": 42,
+#        "total_size_mb": 5.2,
+#        "average_size_kb": 127
+#      },
+#      "recommendations": [
+#        "Consider unlocking 8 stale contexts (not accessed in 30+ days)",
+#        "12 contexts never accessed - verify still needed"
+#      ]
+#    }
+#    ```
+#    """
+#    conn = _get_db_for_project(project)
+#    session_id = _get_session_id_for_project(conn, project)
+#
+#    analytics = {
+#        "overview": {},
+#        "most_accessed": [],
+#        "least_accessed": [],
+#        "largest_contexts": [],
+#        "stale_contexts": [],
+#        "by_priority": {},
+#        "recommendations": []
+#    }
+#
+#    # Overview statistics
+#    cursor = conn.execute("""
+#        SELECT
+#            COUNT(*) as total,
+#            SUM(LENGTH(content)) as total_bytes,
+#            AVG(LENGTH(content)) as avg_bytes,
+#            MIN(locked_at) as oldest,
+#            MAX(locked_at) as newest
+#        FROM context_locks
+#        WHERE session_id = ?
+#    """, (session_id,))
+#    overview = cursor.fetchone()
+#
+#    if overview and overview['total'] > 0:
+#        analytics["overview"] = {
+#            "total_contexts": int(overview['total']),
+#            "total_size_mb": round(float(overview['total_bytes']) / (1024*1024), 2),
+#            "average_size_kb": round(float(overview['avg_bytes']) / 1024, 2),
+#            "oldest_context_age_days": round((time.time() - float(overview['oldest'])) / 86400, 1),
+#            "newest_context_age_days": round((time.time() - float(overview['newest'])) / 86400, 1)
+#        }
+#    else:
+#        return json.dumps({
+#            "message": "No contexts found in memory",
+#            "overview": {"total_contexts": 0}
+#        }, indent=2)
+#
+#    # Most accessed (top 10)
+#    cursor = conn.execute("""
+#        SELECT
+#            label, version, access_count,
+#            last_accessed, LENGTH(content) as size_bytes
+#        FROM context_locks
+#        WHERE session_id = ? AND access_count > 0
+#        ORDER BY access_count DESC
+#        LIMIT 10
+#    """, (session_id,))
+#    analytics["most_accessed"] = [
+#        {
+#            "label": row['label'],
+#            "version": row['version'],
+#            "access_count": int(row['access_count']),
+#            "size_kb": round(float(row['size_bytes']) / 1024, 2),
+#            "last_accessed_days_ago": round((time.time() - float(row['last_accessed'])) / 86400, 1) if row['last_accessed'] else None
+#        }
+#        for row in cursor.fetchall()
+#    ]
+#
+#    # Least accessed (never accessed)
+#    cursor = conn.execute("""
+#        SELECT
+#            label, version, locked_at, LENGTH(content) as size_bytes
+#        FROM context_locks
+#        WHERE session_id = ? AND (access_count IS NULL OR access_count = 0)
+#        ORDER BY locked_at DESC
+#        LIMIT 10
+#    """, (session_id,))
+#    analytics["least_accessed"] = [
+#        {
+#            "label": row['label'],
+#            "version": row['version'],
+#            "locked_days_ago": round((time.time() - float(row['locked_at'])) / 86400, 1),
+#            "size_kb": round(float(row['size_bytes']) / 1024, 2)
+#        }
+#        for row in cursor.fetchall()
+#    ]
+#
+#    # Largest contexts (top 10 storage hogs)
+#    cursor = conn.execute("""
+#        SELECT
+#            label, version, LENGTH(content) as size_bytes, access_count
+#        FROM context_locks
+#        WHERE session_id = ?
+#        ORDER BY LENGTH(content) DESC
+#        LIMIT 10
+#    """, (session_id,))
+#    analytics["largest_contexts"] = [
+#        {
+#            "label": row['label'],
+#            "version": row['version'],
+#            "size_kb": round(float(row['size_bytes']) / 1024, 2),
+#            "access_count": int(row['access_count']) if row['access_count'] else 0
+#        }
+#        for row in cursor.fetchall()
+#    ]
+#
+#    # Stale contexts (not accessed in 30+ days)
+#    thirty_days_ago = time.time() - (30 * 86400)
+#    cursor = conn.execute("""
+#        SELECT
+#            label, version, last_accessed, LENGTH(content) as size_bytes
+#        FROM context_locks
+#        WHERE session_id = ?
+#          AND (last_accessed IS NULL OR last_accessed < ?)
+#        ORDER BY last_accessed ASC NULLS FIRST
+#    """, (session_id, thirty_days_ago))
+#    analytics["stale_contexts"] = [
+#        {
+#            "label": row['label'],
+#            "version": row['version'],
+#            "days_since_access": round((time.time() - float(row['last_accessed'])) / 86400, 1) if row['last_accessed'] else "never",
+#            "size_kb": round(float(row['size_bytes']) / 1024, 2)
+#        }
+#        for row in cursor.fetchall()
+#    ]
+#
+#    # By priority distribution
+#    cursor = conn.execute("""
+#        SELECT
+#            (metadata::json)->>'priority' as priority,
+#            COUNT(*) as count,
+#            SUM(LENGTH(content)) as total_bytes
+#        FROM context_locks
+#        WHERE session_id = ?
+#        GROUP BY (metadata::json)->>'priority'
+#    """, (session_id,))
+#
+#    analytics["by_priority"] = {}
+#    for row in cursor.fetchall():
+#        priority = row['priority'] or 'reference'
+#        analytics["by_priority"][priority] = {
+#            "count": int(row['count']),
+#            "size_mb": round(float(row['total_bytes']) / (1024*1024), 2)
+#        }
+#
+#    # Generate recommendations
+#    if len(analytics["stale_contexts"]) > 0:
+#        analytics["recommendations"].append(
+#            f"Consider unlocking {len(analytics['stale_contexts'])} stale contexts (not accessed in 30+ days)"
+#        )
+#
+#    if len(analytics["least_accessed"]) > 5:
+#        analytics["recommendations"].append(
+#            f"{len(analytics['least_accessed'])} contexts have never been accessed - verify they're still needed"
+#        )
+#
+#    total_mb = analytics["overview"]["total_size_mb"]
+#    capacity_mb = 50  # Current limit
+#    usage_percent = (total_mb / capacity_mb) * 100
+#
+#    if usage_percent > 80:
+#        analytics["recommendations"].append(
+#            f"Memory usage at {total_mb}MB ({usage_percent:.1f}% of {capacity_mb}MB limit) - consider cleanup"
+#        )
+#
+#    if not analytics["recommendations"]:
+#        analytics["recommendations"].append("Memory system looks healthy - no immediate actions needed")
+#
+#    return json.dumps(analytics, indent=2)
+#
+#
+#@mcp.tool()
 async def sync_project_memory(
     path: Optional[str] = None,
     confirm: bool = False,
@@ -4799,10 +4799,9 @@ async def query_database(
     project: Optional[str] = None
 ) -> str:
     """
-    Execute read-only SQL queries against ANY SQLite database for debugging and inspection.
+    Execute read-only SQL queries against the PostgreSQL database for debugging and inspection.
 
-    This tool allows direct querying of any SQLite database in your workspace. Works with
-    the dementia memory database (default) or any .db/.sqlite file you specify.
+    This tool allows direct querying of the project's PostgreSQL database.
 
     **SAFETY FEATURES:**
     - Read-only enforcement: Only SELECT queries are allowed
@@ -4813,20 +4812,17 @@ async def query_database(
 
     **COMMON USE CASES:**
 
-    1. Query dementia memory database (default):
+    1. Query project database:
        query_database("SELECT label, version FROM context_locks")
 
-    2. Query any SQLite database in workspace:
-       query_database("SELECT * FROM users", db_path="./data/app.db")
+    2. Query with parameters:
+       query_database("SELECT * FROM context_locks WHERE label = ?", params=["api_spec"])
 
-    3. Query with parameters:
-       query_database("SELECT * FROM logs WHERE level = ?", params=["ERROR"], db_path="./logs.db")
+    3. List all tables:
+       query_database("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
 
-    4. List all tables in a database:
-       query_database("SELECT name FROM sqlite_master WHERE type='table'", db_path="./mydb.sqlite")
-
-    5. Check row counts:
-       query_database("SELECT COUNT(*) as count FROM my_table", db_path="./data.db")
+    4. Check row counts:
+       query_database("SELECT COUNT(*) as count FROM context_locks")
 
     **OUTPUT FORMATS:**
     - "table": ASCII table with headers and separators (default, best for readability)
@@ -5308,7 +5304,7 @@ async def execute_sql(
     project: Optional[str] = None
 ) -> str:
     """
-    Execute write operations (INSERT, UPDATE, DELETE) on SQLite databases with comprehensive safety.
+    Execute write operations (INSERT, UPDATE, DELETE) on PostgreSQL database with comprehensive safety.
 
     This tool enables full SQL write capabilities while maintaining multiple layers of protection
     against accidental data loss or corruption. All operations are wrapped in transactions and
@@ -6381,518 +6377,518 @@ Versioned Contexts: {len(version_stats)}
 
 
 @mcp.tool()
-async def scan_project_files(
-    full_scan: bool = False,
-    max_files: int = 10000,
-    respect_gitignore: bool = True,
-    project: Optional[str] = None
-) -> str:
-    """
-    Scan project files and build/update semantic model.
-
-    **Purpose:** Build intelligent understanding of project structure with automatic
-    change detection and semantic analysis.
-
-    **Parameters:**
-    - full_scan: bool = False
-      Force full rescan (default: incremental using mtime+size+hash)
-    - max_files: int = 10000
-      Safety limit for large projects
-    - respect_gitignore: bool = True
-      Skip files/directories in .gitignore
-
-    **How it works:**
-    1. Walk filesystem (respecting .gitignore)
-    2. Detect changes using three-stage detection:
-       - Stage 1: mtime check (instant)
-       - Stage 2: size check (instant)
-       - Stage 3: hash check (only if needed)
-    3. Analyze changed/new files:
-       - Extract imports, exports, dependencies
-       - Detect file type and language
-       - Recognize standard files (.env, package.json, etc)
-       - Generate warnings for config issues
-    4. Build semantic clusters (authentication, api, database, etc)
-
-    **Returns:** JSON with scan results, changes detected, warnings
-
-    **Example output:**
-    ```json
-    {
-      "scan_type": "incremental",
-      "scan_time_ms": 52.3,
-      "total_files": 247,
-      "changes": {
-        "added": 2,
-        "modified": 3,
-        "deleted": 0,
-        "unchanged": 242
-      },
-      "file_types": {
-        "python": 45,
-        "javascript": 38,
-        "markdown": 12
-      },
-      "clusters": ["authentication", "api", "database", "tests"],
-      "warnings": [
-        ".env not in .gitignore - may expose secrets"
-      ]
-    }
-    ```
-
-    **Best practices:**
-    - Runs automatically during wake_up() (incremental)
-    - Use full_scan=True after major changes (git pull, branch switch)
-    - Results persist in database for fast future scans
-
-    **IMPORTANT - Local Development Only:**
-    This tool uses direct Python filesystem access (os.walk) and is designed
-    for local development environments only. It will not work properly in:
-    - Claude Desktop (requires per-file permissions, causes timeout)
-    - Mobile devices (no filesystem access)
-    - Browser environments (restricted file access)
-
-    For Claude Desktop, use the filesystem MCP server instead:
-    - mcp__filesystem__list_directory() for file listing
-    - mcp__filesystem__read_file() for file contents
-    - Then use our semantic analysis tools on the results
-    """
-    # Check if project selection is required
-    project_check = _check_project_selection_required(project)
-    if project_check:
-        return project_check
-
-    # Check if we have filesystem access
-    project_root = os.getcwd()
-
-    try:
-        # Quick access test - try to list current directory
-        test_list = os.listdir(project_root)
-        if not test_list:
-            return json.dumps({
-                "error": "No filesystem access",
-                "message": "This tool requires filesystem access which may not be available in Claude Desktop",
-                "suggestion": "This tool is designed for local development environments"
-            }, indent=2)
-    except (PermissionError, OSError) as e:
-        return json.dumps({
-            "error": "Filesystem access denied",
-            "message": str(e),
-            "suggestion": "This tool requires filesystem permissions to scan project files"
-        }, indent=2)
-
-    conn = _get_db_for_project(project)
-    session_id = get_current_session_id()
-
-    start_time = time.time()
-
-    try:
-        # Load stored model
-        stored_model = load_stored_file_model(conn, session_id)
-
-        # Walk filesystem
-        all_files = walk_project_files(project_root, respect_gitignore, max_files)
-
-        # Detect changes
-        changes = {
-            'added': [],
-            'modified': [],
-            'deleted': [],
-            'unchanged': []
-        }
-
-        files_to_analyze = []
-
-        for file_path in all_files:
-            stored_meta = stored_model.get(file_path)
-
-            if full_scan:
-                # Full scan - analyze everything
-                files_to_analyze.append(file_path)
-                if stored_meta:
-                    changes['modified'].append(file_path)
-                else:
-                    changes['added'].append(file_path)
-            else:
-                # Incremental scan - detect changes
-                changed, new_hash, hash_method = detect_file_change(file_path, stored_meta)
-
-                if not stored_meta:
-                    changes['added'].append(file_path)
-                    files_to_analyze.append(file_path)
-                elif changed:
-                    changes['modified'].append(file_path)
-                    files_to_analyze.append(file_path)
-                else:
-                    changes['unchanged'].append(file_path)
-
-        # Find deleted files
-        stored_paths = set(stored_model.keys())
-        current_paths = set(all_files)
-        deleted_paths = stored_paths - current_paths
-
-        for deleted_path in deleted_paths:
-            changes['deleted'].append(deleted_path)
-            mark_file_deleted(conn, session_id, deleted_path)
-
-        # Analyze changed/new files
-        analyzed_files = []
-
-        for file_path in files_to_analyze:
-            try:
-                # Get file stats
-                stat = os.stat(file_path)
-                file_size = stat.st_size
-                modified_time = stat.st_mtime
-
-                # Compute hash
-                content_hash, hash_method = compute_file_hash(file_path, file_size)
-
-                # Detect file type
-                file_type, language, is_standard, standard_type = detect_file_type(file_path)
-
-                # Generate warnings for standard files
-                warnings = check_standard_file_warnings(file_path, file_type, standard_type, project_root)
-
-                # Semantic analysis
-                semantics = analyze_file_semantics(file_path, file_type, language)
-
-                # Build metadata
-                metadata = {
-                    'file_size': file_size,
-                    'content_hash': content_hash,
-                    'modified_time': modified_time,
-                    'hash_method': hash_method,
-                    'file_type': file_type,
-                    'language': language,
-                    'is_standard': is_standard,
-                    'standard_type': standard_type,
-                    'warnings': warnings,
-                    'imports': semantics.get('imports', []),
-                    'exports': semantics.get('exports', []),
-                    'contains': semantics.get('contains', {})
-                }
-
-                analyzed_files.append({
-                    'file_path': file_path,
-                    **metadata
-                })
-
-                # Store in database
-                store_file_metadata(conn, session_id, file_path, metadata, 0)
-
-                # Record change
-                if file_path in changes['added']:
-                    record_file_change(conn, session_id, file_path, 'added', None, content_hash, file_size)
-                elif file_path in changes['modified']:
-                    old_hash = stored_model[file_path].get('content_hash')
-                    old_size = stored_model[file_path].get('file_size', 0)
-                    size_delta = file_size - old_size
-                    record_file_change(conn, session_id, file_path, 'modified', old_hash, content_hash, size_delta)
-
-            except Exception as e:
-                # Skip files that can't be analyzed
-                continue
-
-        # Build clusters
-        clusters_dict = cluster_files_by_semantics(analyzed_files)
-
-        # Update cluster names in database
-        for cluster_name, file_paths in clusters_dict.items():
-            for file_path in file_paths:
-                conn.execute("""
-                    UPDATE file_semantic_model
-                    SET cluster_name = ?
-                    WHERE session_id = ? AND file_path = ?
-                """, (cluster_name, session_id, file_path))
-
-        conn.commit()
-
-        # Get file type distribution
-        type_cursor = conn.execute("""
-            SELECT file_type, COUNT(*) as count
-            FROM file_semantic_model
-            WHERE session_id = ?
-            GROUP BY file_type
-            ORDER BY count DESC
-        """, (session_id,))
-
-        file_types = {row['file_type']: row['count'] for row in type_cursor.fetchall()}
-
-        # Get all warnings
-        warnings_cursor = conn.execute("""
-            SELECT warnings
-            FROM file_semantic_model
-            WHERE session_id = ? AND warnings IS NOT NULL AND warnings != '[]'
-        """, (session_id,))
-
-        all_warnings = []
-        for row in warnings_cursor.fetchall():
-            try:
-                file_warnings = json.loads(row['warnings'])
-                all_warnings.extend(file_warnings)
-            except:
-                pass
-
-        scan_time_ms = (time.time() - start_time) * 1000
-
-        return json.dumps({
-            'scan_type': 'full' if full_scan else 'incremental',
-            'scan_time_ms': round(scan_time_ms, 2),
-            'total_files': len(all_files),
-            'changes': {
-                'added': len(changes['added']),
-                'modified': len(changes['modified']),
-                'deleted': len(changes['deleted']),
-                'unchanged': len(changes['unchanged'])
-            },
-            'file_types': file_types,
-            'clusters': list(clusters_dict.keys()),
-            'warnings': list(set(all_warnings))[:10]  # Top 10 unique warnings
-        }, indent=2)
-
-    except Exception as e:
-        return json.dumps({
-            'error': str(e),
-            'scan_type': 'full' if full_scan else 'incremental'
-        }, indent=2)
-
-
-@mcp.tool()
-async def query_files(
-    query: str,
-    file_type: Optional[str] = None,
-    cluster: Optional[str] = None,
-    limit: int = 20,
-    project: Optional[str] = None
-) -> str:
-    """
-    Search file semantic model by content, path, imports, or exports.
-
-    **Purpose:** Find files by what they contain or do, not just their name.
-
-    **Parameters:**
-    - query: str (required)
-      Search term - searches in: file_path, purpose, imports, exports
-    - file_type: str (optional)
-      Filter by type: 'python', 'javascript', 'markdown', 'config', etc.
-    - cluster: str (optional)
-      Filter by semantic cluster: 'authentication', 'api', 'database', etc.
-    - limit: int = 20
-      Maximum results to return
-
-    **Returns:** JSON with matching files and their semantic information
-
-    **Example queries:**
-    ```python
-    # Find authentication-related files
-    query_files("authentication")
-
-    # Find Python files that import FastAPI
-    query_files("fastapi", file_type="python")
-
-    # Find all API endpoint files
-    query_files("", cluster="api")
-
-    # Find files that export specific functions
-    query_files("authenticate_user")
-    ```
-
-    **Best practices:**
-    - Search broadly first, then filter with file_type/cluster
-    - Empty query with cluster returns all files in that cluster
-    - Results ordered by relevance (path match > imports/exports match)
-
-    **Note:** This tool queries the database (no direct file access).
-    Works in all environments. Run scan_project_files() first to build the model
-    (local dev only) or populate database manually.
-    """
-    # Check if project selection is required
-    project_check = _check_project_selection_required(project)
-    if project_check:
-        return project_check
-
-    conn = _get_db_for_project(project)
-    session_id = get_current_session_id()
-
-    try:
-        # Build SQL query
-        sql = """
-            SELECT
-                file_path, file_type, language, purpose,
-                imports, exports, dependencies, used_by, contains,
-                cluster_name, is_standard, standard_type, warnings,
-                file_size, modified_time, last_scanned
-            FROM file_semantic_model
-            WHERE session_id = ?
-        """
-
-        params = [session_id]
-
-        # Add search filter
-        if query:
-            sql += """
-                AND (
-                    file_path LIKE ?
-                    OR purpose LIKE ?
-                    OR imports LIKE ?
-                    OR exports LIKE ?
-                )
-            """
-            search_pattern = f'%{query}%'
-            params.extend([search_pattern, search_pattern, search_pattern, search_pattern])
-
-        # Add file_type filter
-        if file_type:
-            sql += " AND file_type = ?"
-            params.append(file_type)
-
-        # Add cluster filter
-        if cluster:
-            sql += " AND cluster_name = ?"
-            params.append(cluster)
-
-        sql += f" LIMIT {limit}"
-
-        cursor = conn.execute(sql, params)
-        results = cursor.fetchall()
-
-        # Format results
-        formatted = []
-        for row in results:
-            formatted.append({
-                'path': row['file_path'],
-                'type': row['file_type'],
-                'language': row['language'],
-                'purpose': row['purpose'],
-                'imports': json.loads(row['imports'] or '[]'),
-                'exports': json.loads(row['exports'] or '[]'),
-                'dependencies': json.loads(row['dependencies'] or '[]'),
-                'used_by': json.loads(row['used_by'] or '[]'),
-                'contains': json.loads(row['contains'] or '{}'),
-                'cluster': row['cluster_name'],
-                'is_standard': bool(row['is_standard']),
-                'standard_type': row['standard_type'],
-                'warnings': json.loads(row['warnings'] or '[]'),
-                'size_kb': round(row['file_size'] / 1024, 2) if row['file_size'] else 0,
-                'modified': datetime.fromtimestamp(row['modified_time']).isoformat() if row['modified_time'] else None,
-                'last_scanned': datetime.fromtimestamp(row['last_scanned']).isoformat() if row['last_scanned'] else None
-            })
-
-        return json.dumps({
-            'query': query,
-            'filters': {
-                'file_type': file_type,
-                'cluster': cluster,
-                'limit': limit
-            },
-            'total_found': len(formatted),
-            'results': formatted
-        }, indent=2)
-
-    except Exception as e:
-        return json.dumps({
-            'error': str(e),
-            'query': query
-        }, indent=2)
-
-
-@mcp.tool()
-async def get_file_clusters(project: Optional[str] = None) -> str:
-    """
-    Get semantic file clusters showing how files are grouped.
-
-    **Purpose:** Understand project organization through automatic semantic grouping.
-
-    **What are clusters?**
-    Files are automatically grouped by:
-    - Directory structure (src/auth → authentication cluster)
-    - File naming patterns (auth.py, login.js → authentication)
-    - Import relationships (files that import each other)
-    - Semantic keywords (database, api, test, etc.)
-
-    **Returns:** JSON with clusters, file counts, and sample files
-
-    **Common clusters:**
-    - authentication: Auth/login/user management
-    - api: API endpoints and routes
-    - database: Database models, migrations, queries
-    - tests: Test files and test utilities
-    - configuration: Config files (.env, yaml, json)
-    - documentation: README, docs, guides
-    - misc: Uncategorized files
-
-    **Use cases:**
-    - Understand project structure at a glance
-    - Find all files related to a feature
-    - Navigate large codebases
-    - Identify architectural patterns
-
-    **Note:** This tool queries the database (no direct file access).
-    Works in all environments. Requires file model built by scan_project_files() first.
-    """
-    conn = _get_db_for_project(project)
-    session_id = get_current_session_id()
-
-    try:
-        # Get cluster summary
-        cursor = conn.execute("""
-            SELECT
-                cluster_name,
-                COUNT(*) as file_count,
-                SUM(file_size) as total_size
-            FROM file_semantic_model
-            WHERE session_id = ?
-            GROUP BY cluster_name
-            ORDER BY file_count DESC
-        """, (session_id,))
-
-        clusters = []
-        for row in cursor.fetchall():
-            cluster_name = row['cluster_name']
-            if not cluster_name:
-                cluster_name = 'misc'
-
-            # Get file types in this cluster
-            types_cursor = conn.execute("""
-                SELECT DISTINCT file_type
-                FROM file_semantic_model
-                WHERE session_id = ? AND (cluster_name = ? OR (cluster_name IS NULL AND ? = 'misc'))
-            """, (session_id, cluster_name if cluster_name != 'misc' else None, cluster_name))
-
-            file_types = [r['file_type'] for r in types_cursor.fetchall() if r['file_type']]
-
-            # Get sample files (top 5)
-            samples_cursor = conn.execute("""
-                SELECT file_path, purpose
-                FROM file_semantic_model
-                WHERE session_id = ? AND (cluster_name = ? OR (cluster_name IS NULL AND ? = 'misc'))
-                ORDER BY file_size DESC
-                LIMIT 5
-            """, (session_id, cluster_name if cluster_name != 'misc' else None, cluster_name))
-
-            sample_files = [
-                {'path': r['file_path'], 'purpose': r['purpose']}
-                for r in samples_cursor.fetchall()
-            ]
-
-            clusters.append({
-                'name': cluster_name,
-                'file_count': row['file_count'],
-                'total_size_mb': round(row['total_size'] / (1024 * 1024), 2) if row['total_size'] else 0,
-                'file_types': file_types,
-                'sample_files': sample_files
-            })
-
-        return json.dumps({
-            'total_clusters': len(clusters),
-            'clusters': clusters
-        }, indent=2)
-
-    except Exception as e:
-        return json.dumps({'error': str(e)}, indent=2)
-
-
+#async def scan_project_files(
+#    full_scan: bool = False,
+#    max_files: int = 10000,
+#    respect_gitignore: bool = True,
+#    project: Optional[str] = None
+#) -> str:
+#    """
+#    Scan project files and build/update semantic model.
+#
+#    **Purpose:** Build intelligent understanding of project structure with automatic
+#    change detection and semantic analysis.
+#
+#    **Parameters:**
+#    - full_scan: bool = False
+#      Force full rescan (default: incremental using mtime+size+hash)
+#    - max_files: int = 10000
+#      Safety limit for large projects
+#    - respect_gitignore: bool = True
+#      Skip files/directories in .gitignore
+#
+#    **How it works:**
+#    1. Walk filesystem (respecting .gitignore)
+#    2. Detect changes using three-stage detection:
+#       - Stage 1: mtime check (instant)
+#       - Stage 2: size check (instant)
+#       - Stage 3: hash check (only if needed)
+#    3. Analyze changed/new files:
+#       - Extract imports, exports, dependencies
+#       - Detect file type and language
+#       - Recognize standard files (.env, package.json, etc)
+#       - Generate warnings for config issues
+#    4. Build semantic clusters (authentication, api, database, etc)
+#
+#    **Returns:** JSON with scan results, changes detected, warnings
+#
+#    **Example output:**
+#    ```json
+#    {
+#      "scan_type": "incremental",
+#      "scan_time_ms": 52.3,
+#      "total_files": 247,
+#      "changes": {
+#        "added": 2,
+#        "modified": 3,
+#        "deleted": 0,
+#        "unchanged": 242
+#      },
+#      "file_types": {
+#        "python": 45,
+#        "javascript": 38,
+#        "markdown": 12
+#      },
+#      "clusters": ["authentication", "api", "database", "tests"],
+#      "warnings": [
+#        ".env not in .gitignore - may expose secrets"
+#      ]
+#    }
+#    ```
+#
+#    **Best practices:**
+#    - Runs automatically during wake_up() (incremental)
+#    - Use full_scan=True after major changes (git pull, branch switch)
+#    - Results persist in database for fast future scans
+#
+#    **IMPORTANT - Local Development Only:**
+#    This tool uses direct Python filesystem access (os.walk) and is designed
+#    for local development environments only. It will not work properly in:
+#    - Claude Desktop (requires per-file permissions, causes timeout)
+#    - Mobile devices (no filesystem access)
+#    - Browser environments (restricted file access)
+#
+#    For Claude Desktop, use the filesystem MCP server instead:
+#    - mcp__filesystem__list_directory() for file listing
+#    - mcp__filesystem__read_file() for file contents
+#    - Then use our semantic analysis tools on the results
+#    """
+#    # Check if project selection is required
+#    project_check = _check_project_selection_required(project)
+#    if project_check:
+#        return project_check
+#
+#    # Check if we have filesystem access
+#    project_root = os.getcwd()
+#
+#    try:
+#        # Quick access test - try to list current directory
+#        test_list = os.listdir(project_root)
+#        if not test_list:
+#            return json.dumps({
+#                "error": "No filesystem access",
+#                "message": "This tool requires filesystem access which may not be available in Claude Desktop",
+#                "suggestion": "This tool is designed for local development environments"
+#            }, indent=2)
+#    except (PermissionError, OSError) as e:
+#        return json.dumps({
+#            "error": "Filesystem access denied",
+#            "message": str(e),
+#            "suggestion": "This tool requires filesystem permissions to scan project files"
+#        }, indent=2)
+#
+#    conn = _get_db_for_project(project)
+#    session_id = get_current_session_id()
+#
+#    start_time = time.time()
+#
+#    try:
+#        # Load stored model
+#        stored_model = load_stored_file_model(conn, session_id)
+#
+#        # Walk filesystem
+#        all_files = walk_project_files(project_root, respect_gitignore, max_files)
+#
+#        # Detect changes
+#        changes = {
+#            'added': [],
+#            'modified': [],
+#            'deleted': [],
+#            'unchanged': []
+#        }
+#
+#        files_to_analyze = []
+#
+#        for file_path in all_files:
+#            stored_meta = stored_model.get(file_path)
+#
+#            if full_scan:
+#                # Full scan - analyze everything
+#                files_to_analyze.append(file_path)
+#                if stored_meta:
+#                    changes['modified'].append(file_path)
+#                else:
+#                    changes['added'].append(file_path)
+#            else:
+#                # Incremental scan - detect changes
+#                changed, new_hash, hash_method = detect_file_change(file_path, stored_meta)
+#
+#                if not stored_meta:
+#                    changes['added'].append(file_path)
+#                    files_to_analyze.append(file_path)
+#                elif changed:
+#                    changes['modified'].append(file_path)
+#                    files_to_analyze.append(file_path)
+#                else:
+#                    changes['unchanged'].append(file_path)
+#
+#        # Find deleted files
+#        stored_paths = set(stored_model.keys())
+#        current_paths = set(all_files)
+#        deleted_paths = stored_paths - current_paths
+#
+#        for deleted_path in deleted_paths:
+#            changes['deleted'].append(deleted_path)
+#            mark_file_deleted(conn, session_id, deleted_path)
+#
+#        # Analyze changed/new files
+#        analyzed_files = []
+#
+#        for file_path in files_to_analyze:
+#            try:
+#                # Get file stats
+#                stat = os.stat(file_path)
+#                file_size = stat.st_size
+#                modified_time = stat.st_mtime
+#
+#                # Compute hash
+#                content_hash, hash_method = compute_file_hash(file_path, file_size)
+#
+#                # Detect file type
+#                file_type, language, is_standard, standard_type = detect_file_type(file_path)
+#
+#                # Generate warnings for standard files
+#                warnings = check_standard_file_warnings(file_path, file_type, standard_type, project_root)
+#
+#                # Semantic analysis
+#                semantics = analyze_file_semantics(file_path, file_type, language)
+#
+#                # Build metadata
+#                metadata = {
+#                    'file_size': file_size,
+#                    'content_hash': content_hash,
+#                    'modified_time': modified_time,
+#                    'hash_method': hash_method,
+#                    'file_type': file_type,
+#                    'language': language,
+#                    'is_standard': is_standard,
+#                    'standard_type': standard_type,
+#                    'warnings': warnings,
+#                    'imports': semantics.get('imports', []),
+#                    'exports': semantics.get('exports', []),
+#                    'contains': semantics.get('contains', {})
+#                }
+#
+#                analyzed_files.append({
+#                    'file_path': file_path,
+#                    **metadata
+#                })
+#
+#                # Store in database
+#                store_file_metadata(conn, session_id, file_path, metadata, 0)
+#
+#                # Record change
+#                if file_path in changes['added']:
+#                    record_file_change(conn, session_id, file_path, 'added', None, content_hash, file_size)
+#                elif file_path in changes['modified']:
+#                    old_hash = stored_model[file_path].get('content_hash')
+#                    old_size = stored_model[file_path].get('file_size', 0)
+#                    size_delta = file_size - old_size
+#                    record_file_change(conn, session_id, file_path, 'modified', old_hash, content_hash, size_delta)
+#
+#            except Exception as e:
+#                # Skip files that can't be analyzed
+#                continue
+#
+#        # Build clusters
+#        clusters_dict = cluster_files_by_semantics(analyzed_files)
+#
+#        # Update cluster names in database
+#        for cluster_name, file_paths in clusters_dict.items():
+#            for file_path in file_paths:
+#                conn.execute("""
+#                    UPDATE file_semantic_model
+#                    SET cluster_name = ?
+#                    WHERE session_id = ? AND file_path = ?
+#                """, (cluster_name, session_id, file_path))
+#
+#        conn.commit()
+#
+#        # Get file type distribution
+#        type_cursor = conn.execute("""
+#            SELECT file_type, COUNT(*) as count
+#            FROM file_semantic_model
+#            WHERE session_id = ?
+#            GROUP BY file_type
+#            ORDER BY count DESC
+#        """, (session_id,))
+#
+#        file_types = {row['file_type']: row['count'] for row in type_cursor.fetchall()}
+#
+#        # Get all warnings
+#        warnings_cursor = conn.execute("""
+#            SELECT warnings
+#            FROM file_semantic_model
+#            WHERE session_id = ? AND warnings IS NOT NULL AND warnings != '[]'
+#        """, (session_id,))
+#
+#        all_warnings = []
+#        for row in warnings_cursor.fetchall():
+#            try:
+#                file_warnings = json.loads(row['warnings'])
+#                all_warnings.extend(file_warnings)
+#            except:
+#                pass
+#
+#        scan_time_ms = (time.time() - start_time) * 1000
+#
+#        return json.dumps({
+#            'scan_type': 'full' if full_scan else 'incremental',
+#            'scan_time_ms': round(scan_time_ms, 2),
+#            'total_files': len(all_files),
+#            'changes': {
+#                'added': len(changes['added']),
+#                'modified': len(changes['modified']),
+#                'deleted': len(changes['deleted']),
+#                'unchanged': len(changes['unchanged'])
+#            },
+#            'file_types': file_types,
+#            'clusters': list(clusters_dict.keys()),
+#            'warnings': list(set(all_warnings))[:10]  # Top 10 unique warnings
+#        }, indent=2)
+#
+#    except Exception as e:
+#        return json.dumps({
+#            'error': str(e),
+#            'scan_type': 'full' if full_scan else 'incremental'
+#        }, indent=2)
+#
+#
+#@mcp.tool()
+#async def query_files(
+#    query: str,
+#    file_type: Optional[str] = None,
+#    cluster: Optional[str] = None,
+#    limit: int = 20,
+#    project: Optional[str] = None
+#) -> str:
+#    """
+#    Search file semantic model by content, path, imports, or exports.
+#
+#    **Purpose:** Find files by what they contain or do, not just their name.
+#
+#    **Parameters:**
+#    - query: str (required)
+#      Search term - searches in: file_path, purpose, imports, exports
+#    - file_type: str (optional)
+#      Filter by type: 'python', 'javascript', 'markdown', 'config', etc.
+#    - cluster: str (optional)
+#      Filter by semantic cluster: 'authentication', 'api', 'database', etc.
+#    - limit: int = 20
+#      Maximum results to return
+#
+#    **Returns:** JSON with matching files and their semantic information
+#
+#    **Example queries:**
+#    ```python
+#    # Find authentication-related files
+#    query_files("authentication")
+#
+#    # Find Python files that import FastAPI
+#    query_files("fastapi", file_type="python")
+#
+#    # Find all API endpoint files
+#    query_files("", cluster="api")
+#
+#    # Find files that export specific functions
+#    query_files("authenticate_user")
+#    ```
+#
+#    **Best practices:**
+#    - Search broadly first, then filter with file_type/cluster
+#    - Empty query with cluster returns all files in that cluster
+#    - Results ordered by relevance (path match > imports/exports match)
+#
+#    **Note:** This tool queries the database (no direct file access).
+#    Works in all environments. Run scan_project_files() first to build the model
+#    (local dev only) or populate database manually.
+#    """
+#    # Check if project selection is required
+#    project_check = _check_project_selection_required(project)
+#    if project_check:
+#        return project_check
+#
+#    conn = _get_db_for_project(project)
+#    session_id = get_current_session_id()
+#
+#    try:
+#        # Build SQL query
+#        sql = """
+#            SELECT
+#                file_path, file_type, language, purpose,
+#                imports, exports, dependencies, used_by, contains,
+#                cluster_name, is_standard, standard_type, warnings,
+#                file_size, modified_time, last_scanned
+#            FROM file_semantic_model
+#            WHERE session_id = ?
+#        """
+#
+#        params = [session_id]
+#
+#        # Add search filter
+#        if query:
+#            sql += """
+#                AND (
+#                    file_path LIKE ?
+#                    OR purpose LIKE ?
+#                    OR imports LIKE ?
+#                    OR exports LIKE ?
+#                )
+#            """
+#            search_pattern = f'%{query}%'
+#            params.extend([search_pattern, search_pattern, search_pattern, search_pattern])
+#
+#        # Add file_type filter
+#        if file_type:
+#            sql += " AND file_type = ?"
+#            params.append(file_type)
+#
+#        # Add cluster filter
+#        if cluster:
+#            sql += " AND cluster_name = ?"
+#            params.append(cluster)
+#
+#        sql += f" LIMIT {limit}"
+#
+#        cursor = conn.execute(sql, params)
+#        results = cursor.fetchall()
+#
+#        # Format results
+#        formatted = []
+#        for row in results:
+#            formatted.append({
+#                'path': row['file_path'],
+#                'type': row['file_type'],
+#                'language': row['language'],
+#                'purpose': row['purpose'],
+#                'imports': json.loads(row['imports'] or '[]'),
+#                'exports': json.loads(row['exports'] or '[]'),
+#                'dependencies': json.loads(row['dependencies'] or '[]'),
+#                'used_by': json.loads(row['used_by'] or '[]'),
+#                'contains': json.loads(row['contains'] or '{}'),
+#                'cluster': row['cluster_name'],
+#                'is_standard': bool(row['is_standard']),
+#                'standard_type': row['standard_type'],
+#                'warnings': json.loads(row['warnings'] or '[]'),
+#                'size_kb': round(row['file_size'] / 1024, 2) if row['file_size'] else 0,
+#                'modified': datetime.fromtimestamp(row['modified_time']).isoformat() if row['modified_time'] else None,
+#                'last_scanned': datetime.fromtimestamp(row['last_scanned']).isoformat() if row['last_scanned'] else None
+#            })
+#
+#        return json.dumps({
+#            'query': query,
+#            'filters': {
+#                'file_type': file_type,
+#                'cluster': cluster,
+#                'limit': limit
+#            },
+#            'total_found': len(formatted),
+#            'results': formatted
+#        }, indent=2)
+#
+#    except Exception as e:
+#        return json.dumps({
+#            'error': str(e),
+#            'query': query
+#        }, indent=2)
+#
+#
+#@mcp.tool()
+#async def get_file_clusters(project: Optional[str] = None) -> str:
+#    """
+#    Get semantic file clusters showing how files are grouped.
+#
+#    **Purpose:** Understand project organization through automatic semantic grouping.
+#
+#    **What are clusters?**
+#    Files are automatically grouped by:
+#    - Directory structure (src/auth → authentication cluster)
+#    - File naming patterns (auth.py, login.js → authentication)
+#    - Import relationships (files that import each other)
+#    - Semantic keywords (database, api, test, etc.)
+#
+#    **Returns:** JSON with clusters, file counts, and sample files
+#
+#    **Common clusters:**
+#    - authentication: Auth/login/user management
+#    - api: API endpoints and routes
+#    - database: Database models, migrations, queries
+#    - tests: Test files and test utilities
+#    - configuration: Config files (.env, yaml, json)
+#    - documentation: README, docs, guides
+#    - misc: Uncategorized files
+#
+#    **Use cases:**
+#    - Understand project structure at a glance
+#    - Find all files related to a feature
+#    - Navigate large codebases
+#    - Identify architectural patterns
+#
+#    **Note:** This tool queries the database (no direct file access).
+#    Works in all environments. Requires file model built by scan_project_files() first.
+#    """
+#    conn = _get_db_for_project(project)
+#    session_id = get_current_session_id()
+#
+#    try:
+#        # Get cluster summary
+#        cursor = conn.execute("""
+#            SELECT
+#                cluster_name,
+#                COUNT(*) as file_count,
+#                SUM(file_size) as total_size
+#            FROM file_semantic_model
+#            WHERE session_id = ?
+#            GROUP BY cluster_name
+#            ORDER BY file_count DESC
+#        """, (session_id,))
+#
+#        clusters = []
+#        for row in cursor.fetchall():
+#            cluster_name = row['cluster_name']
+#            if not cluster_name:
+#                cluster_name = 'misc'
+#
+#            # Get file types in this cluster
+#            types_cursor = conn.execute("""
+#                SELECT DISTINCT file_type
+#                FROM file_semantic_model
+#                WHERE session_id = ? AND (cluster_name = ? OR (cluster_name IS NULL AND ? = 'misc'))
+#            """, (session_id, cluster_name if cluster_name != 'misc' else None, cluster_name))
+#
+#            file_types = [r['file_type'] for r in types_cursor.fetchall() if r['file_type']]
+#
+#            # Get sample files (top 5)
+#            samples_cursor = conn.execute("""
+#                SELECT file_path, purpose
+#                FROM file_semantic_model
+#                WHERE session_id = ? AND (cluster_name = ? OR (cluster_name IS NULL AND ? = 'misc'))
+#                ORDER BY file_size DESC
+#                LIMIT 5
+#            """, (session_id, cluster_name if cluster_name != 'misc' else None, cluster_name))
+#
+#            sample_files = [
+#                {'path': r['file_path'], 'purpose': r['purpose']}
+#                for r in samples_cursor.fetchall()
+#            ]
+#
+#            clusters.append({
+#                'name': cluster_name,
+#                'file_count': row['file_count'],
+#                'total_size_mb': round(row['total_size'] / (1024 * 1024), 2) if row['total_size'] else 0,
+#                'file_types': file_types,
+#                'sample_files': sample_files
+#            })
+#
+#        return json.dumps({
+#            'total_clusters': len(clusters),
+#            'clusters': clusters
+#        }, indent=2)
+#
+#    except Exception as e:
+#        return json.dumps({'error': str(e)}, indent=2)
+#
+#
 # DEPRECATED: Replaced by health_check_and_repair()
 # @mcp.tool()
 # async def file_model_status(project: Optional[str] = None) -> str:
@@ -7003,7 +6999,7 @@ async def get_file_clusters(project: Optional[str] = None) -> str:
 # SEMANTIC SEARCH & AI FEATURES (v4.4.0)
 # ============================================================================
 #
-@mcp.tool()
+#@mcp.tool()
 async def generate_embeddings(
     context_ids: Optional[str] = None,
     regenerate: bool = False,
@@ -7442,588 +7438,588 @@ Cost: FREE (local)
 #
 #
 @mcp.tool()
-async def diagnose_ollama() -> str:
-    """
-    Run diagnostics on Ollama connection and model availability.
-
-    **Token Efficiency: MINIMAL** (~500 tokens)
-
-    This tool helps troubleshoot embedding/LLM failures by checking:
-    - Is Ollama running?
-    - Are required models installed?
-    - Can we connect to the API?
-    - What models are available?
-
-    Use this when generate_embeddings() or ai_summarize_context() fail.
-    """
-    import requests
-    from src.config import config
-
-    diagnostics = {
-        "timestamp": time.time(),
-        "ollama_url": config.ollama_base_url,
-        "required_models": {
-            "embedding": config.embedding_model,
-            "llm": config.llm_model
-        },
-        "tests": {}
-    }
-
-    # Test 1: Can we reach Ollama?
-    try:
-        response = requests.get(f"{config.ollama_base_url}/api/tags", timeout=5)
-        diagnostics["tests"]["connection"] = {
-            "status": "✓ SUCCESS",
-            "code": response.status_code,
-            "reachable": True
-        }
-
-        if response.status_code == 200:
-            models_data = response.json()
-            installed_models = [m['name'] for m in models_data.get('models', [])]
-            diagnostics["tests"]["installed_models"] = {
-                "status": "✓ SUCCESS",
-                "models": installed_models,
-                "count": len(installed_models)
-            }
-
-            # Test 2: Check if required models are installed
-            embedding_installed = any(m.startswith(config.embedding_model) for m in installed_models)
-            llm_installed = any(m.startswith(config.llm_model) for m in installed_models)
-
-            diagnostics["tests"]["required_models"] = {
-                "embedding": {
-                    "model": config.embedding_model,
-                    "installed": embedding_installed,
-                    "status": "✓ FOUND" if embedding_installed else "✗ MISSING"
-                },
-                "llm": {
-                    "model": config.llm_model,
-                    "installed": llm_installed,
-                    "status": "✓ FOUND" if llm_installed else "✗ MISSING"
-                }
-            }
-        else:
-            diagnostics["tests"]["error"] = f"HTTP {response.status_code}: {response.text[:200]}"
-
-    except requests.exceptions.ConnectionError:
-        diagnostics["tests"]["connection"] = {
-            "status": "✗ FAILED",
-            "reachable": False,
-            "error": f"Cannot connect to {config.ollama_base_url}",
-            "fix": "Start Ollama: 'ollama serve' or check if running"
-        }
-    except requests.exceptions.Timeout:
-        diagnostics["tests"]["connection"] = {
-            "status": "✗ TIMEOUT",
-            "reachable": False,
-            "error": "Request timed out after 5s",
-            "fix": "Ollama may be overloaded or not responding"
-        }
-    except Exception as e:
-        diagnostics["tests"]["connection"] = {
-            "status": "✗ ERROR",
-            "reachable": False,
-            "error": f"{type(e).__name__}: {str(e)}"
-        }
-
-    # Build summary
-    conn_ok = diagnostics["tests"].get("connection", {}).get("reachable", False)
-    emb_ok = diagnostics["tests"].get("required_models", {}).get("embedding", {}).get("installed", False)
-    llm_ok = diagnostics["tests"].get("required_models", {}).get("llm", {}).get("installed", False)
-
-    summary_lines = [
-        "🔍 Ollama Diagnostics",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"Connection: {'✓ OK' if conn_ok else '✗ FAILED'}",
-        f"Embedding Model ({config.embedding_model}): {'✓ Installed' if emb_ok else '✗ Missing'}",
-        f"LLM Model ({config.llm_model}): {'✓ Installed' if llm_ok else '✗ Missing'}",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    ]
-
-    diagnostics["summary"] = "\n".join(summary_lines)
-
-    # Add recommended fixes
-    if not conn_ok:
-        diagnostics["fix"] = "Start Ollama with: ollama serve"
-    elif not emb_ok or not llm_ok:
-        fixes = []
-        if not emb_ok:
-            fixes.append(f"ollama pull {config.embedding_model}")
-        if not llm_ok:
-            fixes.append(f"ollama pull {config.llm_model}")
-        diagnostics["fix"] = " && ".join(fixes)
-
-    return json.dumps(diagnostics, indent=2)
-
-
-@mcp.tool()
-async def test_single_embedding(text: str = "Test embedding", project: Optional[str] = None) -> str:
-    """
-    Test embedding generation with a single text and capture detailed debug output.
-
-    **Token Efficiency: DEBUG** (~1KB)
-
-    Args:
-        text: Text to generate embedding for (default: "Test embedding")
-
-    Returns: Detailed test results including any stderr debug/error output
-
-    Use this to debug why embeddings are failing - it will show the actual
-    Ollama API request/response cycle.
-    """
-    import sys
-    import io
-    from contextlib import redirect_stderr
-
-    try:
-        from src.services import embedding_service
-    except Exception as e:
-        return json.dumps({
-            "error": "Service initialization failed",
-            "reason": str(e)
-        }, indent=2)
-
-    # Capture stderr output
-    stderr_capture = io.StringIO()
-
-    result = {
-        "test_input": text,
-        "text_length": len(text),
-        "service_enabled": embedding_service.enabled,
-        "model": embedding_service.model,
-        "base_url": embedding_service.base_url
-    }
-
-    try:
-        # Try to generate embedding while capturing stderr
-        with redirect_stderr(stderr_capture):
-            embedding = embedding_service.generate_embedding(text)
-
-        stderr_output = stderr_capture.getvalue()
-
-        if embedding:
-            result["status"] = "✓ SUCCESS"
-            result["embedding_dimensions"] = len(embedding)
-            result["embedding_sample"] = embedding[:5]  # First 5 values
-        else:
-            result["status"] = "✗ FAILED"
-            result["embedding"] = None
-
-        # Include captured debug/error messages
-        if stderr_output:
-            result["debug_output"] = stderr_output.split('\n')
-
-    except Exception as e:
-        result["status"] = "✗ EXCEPTION"
-        result["error"] = f"{type(e).__name__}: {str(e)}"
-        import traceback
-        result["traceback"] = traceback.format_exc()
-
-        stderr_output = stderr_capture.getvalue()
-        if stderr_output:
-            result["debug_output"] = stderr_output.split('\n')
-
-    # Build summary
-    summary_lines = [
-        "🧪 Embedding Test Results",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"Status: {result.get('status', 'UNKNOWN')}",
-        f"Service: {'Enabled' if result['service_enabled'] else 'Disabled'}",
-        f"Model: {result['model']}",
-        f"Text: {len(text)} chars",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    ]
-
-    result["summary"] = "\n".join(summary_lines)
-
-    return json.dumps(result, indent=2)
-
-
-@mcp.tool()
-async def scan_and_analyze_directory(
-    directory: str,
-    pattern: str = "*.md",
-    recursive: bool = True,
-    store_in_table: Optional[str] = None,
-    max_files: int = 1000,
-    project: Optional[str] = None
-) -> str:
-    """
-    Scan directory and analyze text files with metadata extraction.
-
-    **Token Efficiency: SUMMARY** (~2-5KB depending on file count)
-
-    Args:
-        directory: Directory path to scan (absolute or relative)
-        pattern: File pattern to match (default: "*.md")
-                 Examples: "*.txt", "*.md", "*.py", "*"
-        recursive: Scan subdirectories recursively (default: True)
-        store_in_table: Optional workspace table name to store results
-        max_files: Maximum files to process (default: 1000, prevents runaway)
-
-    Returns: Summary statistics and per-file breakdown
-
-    This tool bridges the gap between filesystem access and database storage,
-    enabling complex file analysis workflows.
-
-    **IMPORTANT - Local Development Only:**
-    This tool uses direct Python filesystem access (Path.glob, os.walk) and is
-    designed for local development environments only. It will not work in:
-    - Claude Desktop (requires per-file permissions)
-    - Mobile devices (no filesystem access)
-    - Browser environments (restricted file access)
-
-    For Claude Desktop, use filesystem MCP tools instead.
-
-    Example:
-        # Recursive scan (all subdirectories)
-        scan_and_analyze_directory(
-            directory="/path/to/manuscripts",
-            pattern="*.md",
-            recursive=True,
-            store_in_table="manuscript_analysis"
-        )
-
-        # Non-recursive scan (top-level only)
-        scan_and_analyze_directory(
-            directory="/path/to/docs",
-            pattern="*.txt",
-            recursive=False
-        )
-    """
-    import os
-    import glob
-    from pathlib import Path
-    from datetime import datetime
-
-    try:
-        # Expand and validate directory
-        dir_path = Path(directory).expanduser().resolve()
-        if not dir_path.exists():
-            return json.dumps({
-                "error": "Directory not found",
-                "path": str(dir_path)
-            }, indent=2)
-
-        if not dir_path.is_dir():
-            return json.dumps({
-                "error": "Path is not a directory",
-                "path": str(dir_path)
-            }, indent=2)
-
-        # Find matching files
-        if recursive:
-            pattern_path = str(dir_path / "**" / pattern)
-            matching_files = glob.glob(pattern_path, recursive=True)
-        else:
-            pattern_path = str(dir_path / pattern)
-            matching_files = glob.glob(pattern_path, recursive=False)
-
-        matching_files = [f for f in matching_files if os.path.isfile(f)]
-
-        if len(matching_files) > max_files:
-            return json.dumps({
-                "error": "Too many files found",
-                "found": len(matching_files),
-                "max_allowed": max_files,
-                "suggestion": "Use more specific pattern or increase max_files"
-            }, indent=2)
-
-        if not matching_files:
-            return json.dumps({
-                "message": "No files found",
-                "directory": str(dir_path),
-                "pattern": pattern
-            }, indent=2)
-
-        # Analyze each file
-        results = []
-        total_size = 0
-        total_lines = 0
-        total_words = 0
-        total_chars = 0
-
-        for file_path in matching_files[:max_files]:
-            try:
-                stat = os.stat(file_path)
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-
-                lines = content.count('\n') + 1
-                words = len(content.split())
-                chars = len(content)
-
-                rel_path = os.path.relpath(file_path, dir_path)
-
-                results.append({
-                    "file": rel_path,
-                    "size_bytes": stat.st_size,
-                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                    "lines": lines,
-                    "words": words,
-                    "chars": chars
-                })
-
-                total_size += stat.st_size
-                total_lines += lines
-                total_words += words
-                total_chars += chars
-
-            except Exception as e:
-                results.append({
-                    "file": os.path.relpath(file_path, dir_path),
-                    "error": f"{type(e).__name__}: {str(e)[:100]}"
-                })
-
-        # Store in workspace table if requested
-        if store_in_table:
-            conn = _get_db_for_project(project)
-
-            # Create table if doesn't exist (PostgreSQL-compatible)
-            if is_postgresql_mode():
-                conn.execute(f"""
-                    CREATE TABLE IF NOT EXISTS {store_in_table} (
-                        id SERIAL PRIMARY KEY,
-                        file TEXT,
-                        size_bytes INTEGER,
-                        modified TEXT,
-                        lines INTEGER,
-                        words INTEGER,
-                        chars INTEGER,
-                        error TEXT,
-                        scanned_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
-                    )
-                """)
-            else:
-                conn.execute(f"""
-                    CREATE TABLE IF NOT EXISTS {store_in_table} (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        file TEXT,
-                        size_bytes INTEGER,
-                        modified TEXT,
-                        lines INTEGER,
-                        words INTEGER,
-                        chars INTEGER,
-                        error TEXT,
-                        scanned_at REAL DEFAULT (strftime('%s', 'now'))
-                    )
-                """)
-
-            # Insert results
-            for result in results:
-                conn.execute(f"""
-                    INSERT INTO {store_in_table}
-                    (file, size_bytes, modified, lines, words, chars, error)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    result.get("file"),
-                    result.get("size_bytes"),
-                    result.get("modified"),
-                    result.get("lines"),
-                    result.get("words"),
-                    result.get("chars"),
-                    result.get("error")
-                ))
-
-            conn.commit()
-
-        # Build summary
-        summary_text = f"""
-📁 Directory Scan Results
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-Directory: {dir_path.name}/
-Pattern: {pattern}
-Files Found: {len(results)}
-
-Totals:
-  Size: {total_size:,} bytes ({total_size/1024/1024:.2f} MB)
-  Lines: {total_lines:,}
-  Words: {total_words:,}
-  Characters: {total_chars:,}
-
-Average per file:
-  Size: {total_size//len(results) if results else 0:,} bytes
-  Lines: {total_lines//len(results) if results else 0:,}
-  Words: {total_words//len(results) if results else 0:,}
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-""".strip()
-
-        response = {
-            "summary": summary_text,
-            "files_processed": len(results),
-            "statistics": {
-                "total_size_bytes": total_size,
-                "total_lines": total_lines,
-                "total_words": total_words,
-                "total_chars": total_chars
-            },
-            "sample_files": results[:5]  # Show only first 5 as sample
-        }
-
-        if len(results) > 5:
-            response["note"] = f"Showing 5 sample files of {len(results)} total. Full data stored in table."
-
-        if store_in_table:
-            response["stored_in"] = store_in_table
-            response["query_help"] = f"Use: query_database(\"SELECT * FROM {store_in_table} ORDER BY words DESC LIMIT 10\")"
-
-        # Use compact JSON (no indent) to reduce response size
-        return json.dumps(response)
-
-    except Exception as e:
-        import traceback
-        return json.dumps({
-            "error": "Scan failed",
-            "exception": f"{type(e).__name__}: {str(e)}",
-            "traceback": traceback.format_exc()
-        })
-
-
-@mcp.tool()
-async def usage_statistics(days: int = 30, project: Optional[str] = None) -> str:
-    """
-    Get detailed token usage statistics for cost analysis.
-
-    **Token Efficiency: SUMMARY** (~2-3KB)
-
-    Args:
-        days: Number of days to analyze (default: 30)
-
-    Returns: Detailed usage statistics including:
-        - Operation counts
-        - Token counts by operation type
-        - Performance metrics (avg duration)
-        - Model breakdown
-
-    Example:
-        usage_statistics()  # Last 30 days
-        usage_statistics(days=7)  # Last week
-        usage_statistics(days=90)  # Last quarter
-    """
-    try:
-        from src.services import init_token_tracker
-    except Exception as e:
-        return json.dumps({
-            "error": "Token tracker initialization failed",
-            "reason": str(e)
-        }, indent=2)
-
-    conn = _get_db_for_project(project)
-    tracker = init_token_tracker(conn)
-
-    stats = tracker.get_usage_stats(days=days)
-
-    # Build user-friendly summary
-    total_ops = stats['summary']['total_operations']
-    total_tokens = stats['summary']['total_tokens']
-
-    summary_text = f"""
-📊 Token Usage Statistics
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-Period: Last {days} days
-Total Operations: {total_ops:,}
-Total Tokens: {total_tokens:,}
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-""".strip()
-
-    stats["summary_display"] = summary_text
-    return json.dumps(stats, indent=2)
-
-
-@mcp.tool()
-async def cost_comparison(days: int = 30, project: Optional[str] = None) -> str:
-    """
-    Compare actual costs (FREE with Ollama) vs OpenAI API costs.
-
-    **Token Efficiency: SUMMARY** (~2-3KB)
-
-    Args:
-        days: Number of days to analyze (default: 30)
-
-    Returns: Cost comparison showing:
-        - Actual cost: $0.00 (Ollama)
-        - OpenAI embedding cost (if you used text-embedding-3-small)
-        - OpenAI GPT-3.5 cost (if you used GPT-3.5 Turbo)
-        - OpenAI GPT-4 cost (if you used GPT-4 Turbo)
-        - Total savings
-
-    This tool helps justify using local models by showing:
-    - How much you would have spent with OpenAI
-    - Token usage patterns
-    - Performance metrics
-
-    Example:
-        cost_comparison()  # Monthly comparison
-        cost_comparison(days=7)  # Weekly
-        cost_comparison(days=365)  # Annual projection
-    """
-    try:
-        from src.services import init_token_tracker
-    except Exception as e:
-        return json.dumps({
-            "error": "Token tracker initialization failed",
-            "reason": str(e)
-        }, indent=2)
-
-    conn = _get_db_for_project(project)
-    tracker = init_token_tracker(conn)
-
-    comparison = tracker.get_cost_comparison(days=days)
-
-    # Calculate annual projection
-    if days > 0:
-        daily_savings = {}
-        for alt_name, alt_data in comparison['cost_comparison']['alternatives'].items():
-            daily_cost = alt_data['cost_usd'] / days
-            annual_cost = daily_cost * 365
-            daily_savings[alt_name] = {
-                'daily_avg': daily_cost,
-                'annual_projected': annual_cost
-            }
-
-        comparison['projections'] = daily_savings
-
-    # Build user-friendly summary
-    alternatives = comparison['cost_comparison']['alternatives']
-    gpt4_savings = alternatives.get('openai_gpt4', {}).get('cost_usd', 0)
-    gpt35_savings = alternatives.get('openai_gpt35', {}).get('cost_usd', 0)
-
-    summary_text = f"""
-💰 Cost Comparison
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-Period: Last {days} days
-Actual Cost: $0.00 (Ollama)
-
-Savings vs OpenAI:
-  GPT-4: ${gpt4_savings:.2f}
-  GPT-3.5: ${gpt35_savings:.2f}
-
-Total Savings: 100%
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-""".strip()
-
-    comparison["summary_display"] = summary_text
-    return json.dumps(comparison, indent=2)
-
-
+#async def diagnose_ollama() -> str:
+#    """
+#    Run diagnostics on Ollama connection and model availability.
+#
+#    **Token Efficiency: MINIMAL** (~500 tokens)
+#
+#    This tool helps troubleshoot embedding/LLM failures by checking:
+#    - Is Ollama running?
+#    - Are required models installed?
+#    - Can we connect to the API?
+#    - What models are available?
+#
+#    Use this when generate_embeddings() or ai_summarize_context() fail.
+#    """
+#    import requests
+#    from src.config import config
+#
+#    diagnostics = {
+#        "timestamp": time.time(),
+#        "ollama_url": config.ollama_base_url,
+#        "required_models": {
+#            "embedding": config.embedding_model,
+#            "llm": config.llm_model
+#        },
+#        "tests": {}
+#    }
+#
+#    # Test 1: Can we reach Ollama?
+#    try:
+#        response = requests.get(f"{config.ollama_base_url}/api/tags", timeout=5)
+#        diagnostics["tests"]["connection"] = {
+#            "status": "✓ SUCCESS",
+#            "code": response.status_code,
+#            "reachable": True
+#        }
+#
+#        if response.status_code == 200:
+#            models_data = response.json()
+#            installed_models = [m['name'] for m in models_data.get('models', [])]
+#            diagnostics["tests"]["installed_models"] = {
+#                "status": "✓ SUCCESS",
+#                "models": installed_models,
+#                "count": len(installed_models)
+#            }
+#
+#            # Test 2: Check if required models are installed
+#            embedding_installed = any(m.startswith(config.embedding_model) for m in installed_models)
+#            llm_installed = any(m.startswith(config.llm_model) for m in installed_models)
+#
+#            diagnostics["tests"]["required_models"] = {
+#                "embedding": {
+#                    "model": config.embedding_model,
+#                    "installed": embedding_installed,
+#                    "status": "✓ FOUND" if embedding_installed else "✗ MISSING"
+#                },
+#                "llm": {
+#                    "model": config.llm_model,
+#                    "installed": llm_installed,
+#                    "status": "✓ FOUND" if llm_installed else "✗ MISSING"
+#                }
+#            }
+#        else:
+#            diagnostics["tests"]["error"] = f"HTTP {response.status_code}: {response.text[:200]}"
+#
+#    except requests.exceptions.ConnectionError:
+#        diagnostics["tests"]["connection"] = {
+#            "status": "✗ FAILED",
+#            "reachable": False,
+#            "error": f"Cannot connect to {config.ollama_base_url}",
+#            "fix": "Start Ollama: 'ollama serve' or check if running"
+#        }
+#    except requests.exceptions.Timeout:
+#        diagnostics["tests"]["connection"] = {
+#            "status": "✗ TIMEOUT",
+#            "reachable": False,
+#            "error": "Request timed out after 5s",
+#            "fix": "Ollama may be overloaded or not responding"
+#        }
+#    except Exception as e:
+#        diagnostics["tests"]["connection"] = {
+#            "status": "✗ ERROR",
+#            "reachable": False,
+#            "error": f"{type(e).__name__}: {str(e)}"
+#        }
+#
+#    # Build summary
+#    conn_ok = diagnostics["tests"].get("connection", {}).get("reachable", False)
+#    emb_ok = diagnostics["tests"].get("required_models", {}).get("embedding", {}).get("installed", False)
+#    llm_ok = diagnostics["tests"].get("required_models", {}).get("llm", {}).get("installed", False)
+#
+#    summary_lines = [
+#        "🔍 Ollama Diagnostics",
+#        "━━━━━━━━━━━━━━━━━━━━━━━━━━",
+#        f"Connection: {'✓ OK' if conn_ok else '✗ FAILED'}",
+#        f"Embedding Model ({config.embedding_model}): {'✓ Installed' if emb_ok else '✗ Missing'}",
+#        f"LLM Model ({config.llm_model}): {'✓ Installed' if llm_ok else '✗ Missing'}",
+#        "━━━━━━━━━━━━━━━━━━━━━━━━━━"
+#    ]
+#
+#    diagnostics["summary"] = "\n".join(summary_lines)
+#
+#    # Add recommended fixes
+#    if not conn_ok:
+#        diagnostics["fix"] = "Start Ollama with: ollama serve"
+#    elif not emb_ok or not llm_ok:
+#        fixes = []
+#        if not emb_ok:
+#            fixes.append(f"ollama pull {config.embedding_model}")
+#        if not llm_ok:
+#            fixes.append(f"ollama pull {config.llm_model}")
+#        diagnostics["fix"] = " && ".join(fixes)
+#
+#    return json.dumps(diagnostics, indent=2)
+#
+#
+#@mcp.tool()
+#async def test_single_embedding(text: str = "Test embedding", project: Optional[str] = None) -> str:
+#    """
+#    Test embedding generation with a single text and capture detailed debug output.
+#
+#    **Token Efficiency: DEBUG** (~1KB)
+#
+#    Args:
+#        text: Text to generate embedding for (default: "Test embedding")
+#
+#    Returns: Detailed test results including any stderr debug/error output
+#
+#    Use this to debug why embeddings are failing - it will show the actual
+#    Ollama API request/response cycle.
+#    """
+#    import sys
+#    import io
+#    from contextlib import redirect_stderr
+#
+#    try:
+#        from src.services import embedding_service
+#    except Exception as e:
+#        return json.dumps({
+#            "error": "Service initialization failed",
+#            "reason": str(e)
+#        }, indent=2)
+#
+#    # Capture stderr output
+#    stderr_capture = io.StringIO()
+#
+#    result = {
+#        "test_input": text,
+#        "text_length": len(text),
+#        "service_enabled": embedding_service.enabled,
+#        "model": embedding_service.model,
+#        "base_url": embedding_service.base_url
+#    }
+#
+#    try:
+#        # Try to generate embedding while capturing stderr
+#        with redirect_stderr(stderr_capture):
+#            embedding = embedding_service.generate_embedding(text)
+#
+#        stderr_output = stderr_capture.getvalue()
+#
+#        if embedding:
+#            result["status"] = "✓ SUCCESS"
+#            result["embedding_dimensions"] = len(embedding)
+#            result["embedding_sample"] = embedding[:5]  # First 5 values
+#        else:
+#            result["status"] = "✗ FAILED"
+#            result["embedding"] = None
+#
+#        # Include captured debug/error messages
+#        if stderr_output:
+#            result["debug_output"] = stderr_output.split('\n')
+#
+#    except Exception as e:
+#        result["status"] = "✗ EXCEPTION"
+#        result["error"] = f"{type(e).__name__}: {str(e)}"
+#        import traceback
+#        result["traceback"] = traceback.format_exc()
+#
+#        stderr_output = stderr_capture.getvalue()
+#        if stderr_output:
+#            result["debug_output"] = stderr_output.split('\n')
+#
+#    # Build summary
+#    summary_lines = [
+#        "🧪 Embedding Test Results",
+#        "━━━━━━━━━━━━━━━━━━━━━━━━━━",
+#        f"Status: {result.get('status', 'UNKNOWN')}",
+#        f"Service: {'Enabled' if result['service_enabled'] else 'Disabled'}",
+#        f"Model: {result['model']}",
+#        f"Text: {len(text)} chars",
+#        "━━━━━━━━━━━━━━━━━━━━━━━━━━"
+#    ]
+#
+#    result["summary"] = "\n".join(summary_lines)
+#
+#    return json.dumps(result, indent=2)
+#
+#
+#@mcp.tool()
+#async def scan_and_analyze_directory(
+#    directory: str,
+#    pattern: str = "*.md",
+#    recursive: bool = True,
+#    store_in_table: Optional[str] = None,
+#    max_files: int = 1000,
+#    project: Optional[str] = None
+#) -> str:
+#    """
+#    Scan directory and analyze text files with metadata extraction.
+#
+#    **Token Efficiency: SUMMARY** (~2-5KB depending on file count)
+#
+#    Args:
+#        directory: Directory path to scan (absolute or relative)
+#        pattern: File pattern to match (default: "*.md")
+#                 Examples: "*.txt", "*.md", "*.py", "*"
+#        recursive: Scan subdirectories recursively (default: True)
+#        store_in_table: Optional workspace table name to store results
+#        max_files: Maximum files to process (default: 1000, prevents runaway)
+#
+#    Returns: Summary statistics and per-file breakdown
+#
+#    This tool bridges the gap between filesystem access and database storage,
+#    enabling complex file analysis workflows.
+#
+#    **IMPORTANT - Local Development Only:**
+#    This tool uses direct Python filesystem access (Path.glob, os.walk) and is
+#    designed for local development environments only. It will not work in:
+#    - Claude Desktop (requires per-file permissions)
+#    - Mobile devices (no filesystem access)
+#    - Browser environments (restricted file access)
+#
+#    For Claude Desktop, use filesystem MCP tools instead.
+#
+#    Example:
+#        # Recursive scan (all subdirectories)
+#        scan_and_analyze_directory(
+#            directory="/path/to/manuscripts",
+#            pattern="*.md",
+#            recursive=True,
+#            store_in_table="manuscript_analysis"
+#        )
+#
+#        # Non-recursive scan (top-level only)
+#        scan_and_analyze_directory(
+#            directory="/path/to/docs",
+#            pattern="*.txt",
+#            recursive=False
+#        )
+#    """
+#    import os
+#    import glob
+#    from pathlib import Path
+#    from datetime import datetime
+#
+#    try:
+#        # Expand and validate directory
+#        dir_path = Path(directory).expanduser().resolve()
+#        if not dir_path.exists():
+#            return json.dumps({
+#                "error": "Directory not found",
+#                "path": str(dir_path)
+#            }, indent=2)
+#
+#        if not dir_path.is_dir():
+#            return json.dumps({
+#                "error": "Path is not a directory",
+#                "path": str(dir_path)
+#            }, indent=2)
+#
+#        # Find matching files
+#        if recursive:
+#            pattern_path = str(dir_path / "**" / pattern)
+#            matching_files = glob.glob(pattern_path, recursive=True)
+#        else:
+#            pattern_path = str(dir_path / pattern)
+#            matching_files = glob.glob(pattern_path, recursive=False)
+#
+#        matching_files = [f for f in matching_files if os.path.isfile(f)]
+#
+#        if len(matching_files) > max_files:
+#            return json.dumps({
+#                "error": "Too many files found",
+#                "found": len(matching_files),
+#                "max_allowed": max_files,
+#                "suggestion": "Use more specific pattern or increase max_files"
+#            }, indent=2)
+#
+#        if not matching_files:
+#            return json.dumps({
+#                "message": "No files found",
+#                "directory": str(dir_path),
+#                "pattern": pattern
+#            }, indent=2)
+#
+#        # Analyze each file
+#        results = []
+#        total_size = 0
+#        total_lines = 0
+#        total_words = 0
+#        total_chars = 0
+#
+#        for file_path in matching_files[:max_files]:
+#            try:
+#                stat = os.stat(file_path)
+#                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+#                    content = f.read()
+#
+#                lines = content.count('\n') + 1
+#                words = len(content.split())
+#                chars = len(content)
+#
+#                rel_path = os.path.relpath(file_path, dir_path)
+#
+#                results.append({
+#                    "file": rel_path,
+#                    "size_bytes": stat.st_size,
+#                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+#                    "lines": lines,
+#                    "words": words,
+#                    "chars": chars
+#                })
+#
+#                total_size += stat.st_size
+#                total_lines += lines
+#                total_words += words
+#                total_chars += chars
+#
+#            except Exception as e:
+#                results.append({
+#                    "file": os.path.relpath(file_path, dir_path),
+#                    "error": f"{type(e).__name__}: {str(e)[:100]}"
+#                })
+#
+#        # Store in workspace table if requested
+#        if store_in_table:
+#            conn = _get_db_for_project(project)
+#
+#            # Create table if doesn't exist (PostgreSQL-compatible)
+#            if is_postgresql_mode():
+#                conn.execute(f"""
+#                    CREATE TABLE IF NOT EXISTS {store_in_table} (
+#                        id SERIAL PRIMARY KEY,
+#                        file TEXT,
+#                        size_bytes INTEGER,
+#                        modified TEXT,
+#                        lines INTEGER,
+#                        words INTEGER,
+#                        chars INTEGER,
+#                        error TEXT,
+#                        scanned_at DOUBLE PRECISION DEFAULT EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
+#                    )
+#                """)
+#            else:
+#                conn.execute(f"""
+#                    CREATE TABLE IF NOT EXISTS {store_in_table} (
+#                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+#                        file TEXT,
+#                        size_bytes INTEGER,
+#                        modified TEXT,
+#                        lines INTEGER,
+#                        words INTEGER,
+#                        chars INTEGER,
+#                        error TEXT,
+#                        scanned_at REAL DEFAULT (strftime('%s', 'now'))
+#                    )
+#                """)
+#
+#            # Insert results
+#            for result in results:
+#                conn.execute(f"""
+#                    INSERT INTO {store_in_table}
+#                    (file, size_bytes, modified, lines, words, chars, error)
+#                    VALUES (?, ?, ?, ?, ?, ?, ?)
+#                """, (
+#                    result.get("file"),
+#                    result.get("size_bytes"),
+#                    result.get("modified"),
+#                    result.get("lines"),
+#                    result.get("words"),
+#                    result.get("chars"),
+#                    result.get("error")
+#                ))
+#
+#            conn.commit()
+#
+#        # Build summary
+#        summary_text = f"""
+#📁 Directory Scan Results
+#━━━━━━━━━━━━━━━━━━━━━━━━━━
+#Directory: {dir_path.name}/
+#Pattern: {pattern}
+#Files Found: {len(results)}
+#
+#Totals:
+#  Size: {total_size:,} bytes ({total_size/1024/1024:.2f} MB)
+#  Lines: {total_lines:,}
+#  Words: {total_words:,}
+#  Characters: {total_chars:,}
+#
+#Average per file:
+#  Size: {total_size//len(results) if results else 0:,} bytes
+#  Lines: {total_lines//len(results) if results else 0:,}
+#  Words: {total_words//len(results) if results else 0:,}
+#━━━━━━━━━━━━━━━━━━━━━━━━━━
+#""".strip()
+#
+#        response = {
+#            "summary": summary_text,
+#            "files_processed": len(results),
+#            "statistics": {
+#                "total_size_bytes": total_size,
+#                "total_lines": total_lines,
+#                "total_words": total_words,
+#                "total_chars": total_chars
+#            },
+#            "sample_files": results[:5]  # Show only first 5 as sample
+#        }
+#
+#        if len(results) > 5:
+#            response["note"] = f"Showing 5 sample files of {len(results)} total. Full data stored in table."
+#
+#        if store_in_table:
+#            response["stored_in"] = store_in_table
+#            response["query_help"] = f"Use: query_database(\"SELECT * FROM {store_in_table} ORDER BY words DESC LIMIT 10\")"
+#
+#        # Use compact JSON (no indent) to reduce response size
+#        return json.dumps(response)
+#
+#    except Exception as e:
+#        import traceback
+#        return json.dumps({
+#            "error": "Scan failed",
+#            "exception": f"{type(e).__name__}: {str(e)}",
+#            "traceback": traceback.format_exc()
+#        })
+#
+#
+#@mcp.tool()
+#async def usage_statistics(days: int = 30, project: Optional[str] = None) -> str:
+#    """
+#    Get detailed token usage statistics for cost analysis.
+#
+#    **Token Efficiency: SUMMARY** (~2-3KB)
+#
+#    Args:
+#        days: Number of days to analyze (default: 30)
+#
+#    Returns: Detailed usage statistics including:
+#        - Operation counts
+#        - Token counts by operation type
+#        - Performance metrics (avg duration)
+#        - Model breakdown
+#
+#    Example:
+#        usage_statistics()  # Last 30 days
+#        usage_statistics(days=7)  # Last week
+#        usage_statistics(days=90)  # Last quarter
+#    """
+#    try:
+#        from src.services import init_token_tracker
+#    except Exception as e:
+#        return json.dumps({
+#            "error": "Token tracker initialization failed",
+#            "reason": str(e)
+#        }, indent=2)
+#
+#    conn = _get_db_for_project(project)
+#    tracker = init_token_tracker(conn)
+#
+#    stats = tracker.get_usage_stats(days=days)
+#
+#    # Build user-friendly summary
+#    total_ops = stats['summary']['total_operations']
+#    total_tokens = stats['summary']['total_tokens']
+#
+#    summary_text = f"""
+#📊 Token Usage Statistics
+#━━━━━━━━━━━━━━━━━━━━━━━━━━
+#Period: Last {days} days
+#Total Operations: {total_ops:,}
+#Total Tokens: {total_tokens:,}
+#━━━━━━━━━━━━━━━━━━━━━━━━━━
+#""".strip()
+#
+#    stats["summary_display"] = summary_text
+#    return json.dumps(stats, indent=2)
+#
+#
+#@mcp.tool()
+#async def cost_comparison(days: int = 30, project: Optional[str] = None) -> str:
+#    """
+#    Compare actual costs (FREE with Ollama) vs OpenAI API costs.
+#
+#    **Token Efficiency: SUMMARY** (~2-3KB)
+#
+#    Args:
+#        days: Number of days to analyze (default: 30)
+#
+#    Returns: Cost comparison showing:
+#        - Actual cost: $0.00 (Ollama)
+#        - OpenAI embedding cost (if you used text-embedding-3-small)
+#        - OpenAI GPT-3.5 cost (if you used GPT-3.5 Turbo)
+#        - OpenAI GPT-4 cost (if you used GPT-4 Turbo)
+#        - Total savings
+#
+#    This tool helps justify using local models by showing:
+#    - How much you would have spent with OpenAI
+#    - Token usage patterns
+#    - Performance metrics
+#
+#    Example:
+#        cost_comparison()  # Monthly comparison
+#        cost_comparison(days=7)  # Weekly
+#        cost_comparison(days=365)  # Annual projection
+#    """
+#    try:
+#        from src.services import init_token_tracker
+#    except Exception as e:
+#        return json.dumps({
+#            "error": "Token tracker initialization failed",
+#            "reason": str(e)
+#        }, indent=2)
+#
+#    conn = _get_db_for_project(project)
+#    tracker = init_token_tracker(conn)
+#
+#    comparison = tracker.get_cost_comparison(days=days)
+#
+#    # Calculate annual projection
+#    if days > 0:
+#        daily_savings = {}
+#        for alt_name, alt_data in comparison['cost_comparison']['alternatives'].items():
+#            daily_cost = alt_data['cost_usd'] / days
+#            annual_cost = daily_cost * 365
+#            daily_savings[alt_name] = {
+#                'daily_avg': daily_cost,
+#                'annual_projected': annual_cost
+#            }
+#
+#        comparison['projections'] = daily_savings
+#
+#    # Build user-friendly summary
+#    alternatives = comparison['cost_comparison']['alternatives']
+#    gpt4_savings = alternatives.get('openai_gpt4', {}).get('cost_usd', 0)
+#    gpt35_savings = alternatives.get('openai_gpt35', {}).get('cost_usd', 0)
+#
+#    summary_text = f"""
+#💰 Cost Comparison
+#━━━━━━━━━━━━━━━━━━━━━━━━━━
+#Period: Last {days} days
+#Actual Cost: $0.00 (Ollama)
+#
+#Savings vs OpenAI:
+#  GPT-4: ${gpt4_savings:.2f}
+#  GPT-3.5: ${gpt35_savings:.2f}
+#
+#Total Savings: 100%
+#━━━━━━━━━━━━━━━━━━━━━━━━━━
+#""".strip()
+#
+#    comparison["summary_display"] = summary_text
+#    return json.dumps(comparison, indent=2)
+#
+#
 # ============================================================================
 # UNIFIED DATABASE HEALTH TOOLS
 # ============================================================================
-
-def _resolve_project(project: Optional[str] = None) -> str:
-    """
-    Resolve project name for unified database tools.
-    Uses _get_project_for_context for consistent resolution logic.
-
-    Args:
-        project: Optional project name
-
-    Returns:
-        str: Resolved project name
-    """
-    return _get_project_for_context(project)
-
+#
+#def _resolve_project(project: Optional[str] = None) -> str:
+#    """
+#    Resolve project name for unified database tools.
+#    Uses _get_project_for_context for consistent resolution logic.
+#
+#    Args:
+#        project: Optional project name
+#
+#    Returns:
+#        str: Resolved project name
+#    """
+#    return _get_project_for_context(project)
+#
 
 @mcp.tool()
 async def health_check_and_repair(
