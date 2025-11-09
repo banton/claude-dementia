@@ -82,8 +82,19 @@ class PostgreSQLAdapter:
 
         for attempt in range(max_retries):
             try:
+                # CRITICAL: Connection pool sizing for Neon + stdio mode
+                # - Neon free tier: 10 connection limit (shared across all clients)
+                # - Stdio mode: Single-threaded, max 3 concurrent uses (rare):
+                #   1. Main request processing
+                #   2. Background cleanup/validation (rare)
+                #   3. Schema initialization (startup only)
+                # - DO NOT increase beyond 3 without testing (causes pool exhaustion)
+                # - See commit ce86fc7 for historical context (connection pool exhaustion bug)
+                # - Each PostgreSQLAdapter creates its own pool, so multiple adapters
+                #   multiply the connection count (e.g., 3 projects × 3 connections = 9 total)
                 self.pool = psycopg2.pool.SimpleConnectionPool(
-                    1, 3,  # Allow 3 concurrent connections (request + lazy checks + finalization)
+                    1,  # min_connections: 1 (always keep one alive)
+                    3,  # max_connections: 3 (sufficient for stdio, prevents exhaustion)
                     self.database_url,
                     cursor_factory=RealDictCursor,  # Returns dict-like rows (compatible with SQLite)
                     connect_timeout=15  # Increased to 15s for Neon wakeup
