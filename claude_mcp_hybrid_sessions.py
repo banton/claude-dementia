@@ -191,9 +191,28 @@ def _check_project_selection_required(project: Optional[str] = None) -> Optional
     """
     global _session_store, _local_session_id
 
-    # If explicit project parameter provided, no check needed
+    # If explicit project parameter provided, validate it exists
     if project:
-        return None
+        # Validate project exists to prevent typos creating new schemas
+        if not _session_store:
+            return None  # No session management, can't validate
+
+        try:
+            projects = _session_store.get_projects_with_stats()
+            project_names = [p['project_name'] for p in projects]
+
+            if project not in project_names:
+                return json.dumps({
+                    "error": "INVALID_PROJECT",
+                    "message": f"⚠️  Project '{project}' does not exist",
+                    "available_projects": [p for p in project_names if p != '__PENDING__'],
+                    "instruction": "📌 Use an existing project name or create a new project first"
+                })
+        except Exception as e:
+            # Validation failed, but don't block tool - log warning
+            print(f"⚠️  Project validation failed: {e}", file=sys.stderr)
+
+        return None  # Project validated or validation unavailable
 
     # Check if session exists and has __PENDING__ project
     if not _session_store or not _local_session_id:
