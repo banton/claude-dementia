@@ -6242,20 +6242,21 @@ async def explore_context_tree(flat: bool = True, confirm_full: bool = False, pr
     if project_check:
         return project_check
 
-    conn = _get_db_for_project(project)
-    session_id = _get_session_id_for_project(conn, project)
+    # ✅ FIX: Use context manager to ensure connection is closed
+    with _get_db_for_project(project) as conn:
+        session_id = _get_session_id_for_project(conn, project)
 
-    # Get all contexts with previews (not full content - RLM optimization!)
-    # Flat mode: alphabetical order, Tree mode: most recent first
-    order_clause = "ORDER BY label" if flat else "ORDER BY locked_at DESC"
-    cursor = conn.execute(f"""
-        SELECT label, version, preview, key_concepts, metadata, locked_at
-        FROM context_locks
-        WHERE session_id = ?
-        {order_clause}
-    """, (session_id,))
+        # Get all contexts with previews (not full content - RLM optimization!)
+        # Flat mode: alphabetical order, Tree mode: most recent first
+        order_clause = "ORDER BY label" if flat else "ORDER BY locked_at DESC"
+        cursor = conn.execute(f"""
+            SELECT label, version, preview, key_concepts, metadata, locked_at
+            FROM context_locks
+            WHERE session_id = ?
+            {order_clause}
+        """, (session_id,))
 
-    contexts = cursor.fetchall()
+        contexts = cursor.fetchall()
 
     if not contexts:
         return "No locked contexts yet." if flat else "📭 No locked contexts yet.\n\n💡 Use lock_context() to save important information for future reference."
