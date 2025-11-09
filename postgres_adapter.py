@@ -44,6 +44,64 @@ import json
 # Load environment variables
 load_dotenv()
 
+# Shared connection pool across all schemas (prevents pool exhaustion)
+# All schemas share the same database, so we only need one pool
+_shared_pool = None
+_shared_pool_lock = None
+
+def _get_shared_pool(database_url: str):
+    """
+    Get or create the shared connection pool.
+
+    CRITICAL: All schemas share one pool to prevent connection exhaustion.
+    With Neon free tier (10 connections), we can't afford separate pools per schema.
+    """
+    global _shared_pool, _shared_pool_lock
+
+    if _shared_pool is None:
+        import threading
+        if _shared_pool_lock is None:
+            _shared_pool_lock = threading.Lock()
+
+        with _shared_pool_lock:
+            if _shared_pool is None:  # Double-check after acquiring lock
+                max_retries = 5
+                initial_delay = 2.0
+                delay = initial_delay
+
+                for attempt in range(max_retries):
+                    try:
+                        # Shared pool for ALL schemas (schema set via search_path per connection)
+                        # Neon free tier: 10 connections total
+                        # Stdio mode: max 3 concurrent uses across all schemas
+                        _shared_pool = psycopg2.pool.SimpleConnectionPool(
+                            1,  # min_connections: 1 (always keep one alive)
+                            3,  # max_connections: 3 (sufficient for stdio, prevents exhaustion)
+                            database_url,
+                            cursor_factory=RealDictCursor,
+                            connect_timeout=15
+                        )
+                        print(f"✅ Shared PostgreSQL connection pool initialized (min=1, max=3)", file=sys.stderr)
+                        break
+                    except Exception as e:
+                        error_msg = str(e).lower()
+                        is_cold_start = any(keyword in error_msg for keyword in [
+                            'ssl', 'timeout', 'connection refused', 'temporarily unavailable',
+                            'could not connect', 'server closed the connection',
+                            'connection timed out', 'network unreachable', 'suspended'
+                        ])
+
+                        if is_cold_start and attempt < max_retries - 1:
+                            jitter = random.uniform(0, delay * 0.3)
+                            wait_time = delay + jitter
+                            print(f"⏳ Neon database wakeup (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.2f}s...", file=sys.stderr)
+                            time.sleep(wait_time)
+                            delay *= 2
+                        else:
+                            raise ConnectionError(f"Failed to create shared connection pool after {max_retries} attempts: {e}")
+
+    return _shared_pool
+
 
 class PostgreSQLAdapter:
     """
@@ -71,62 +129,10 @@ class PostgreSQLAdapter:
         # Determine schema name
         self.schema = schema or self._get_schema_name()
 
-        # CRITICAL FIX: No app-side pooling when using Neon pooler endpoint
-        # Neon's pooler handles connection pooling - app should create/destroy connections
-        # Using pool with 1-1 effectively disables pooling while keeping same API
-        # (In stateless cloud, each request creates new adapter anyway)
-        max_retries = 5
-        initial_delay = 2.0
-        delay = initial_delay
-        last_error = None
-
-        for attempt in range(max_retries):
-            try:
-                # CRITICAL: Connection pool sizing for Neon + stdio mode
-                # - Neon free tier: 10 connection limit (shared across all clients)
-                # - Stdio mode: Single-threaded, max 3 concurrent uses (rare):
-                #   1. Main request processing
-                #   2. Background cleanup/validation (rare)
-                #   3. Schema initialization (startup only)
-                # - DO NOT increase beyond 3 without testing (causes pool exhaustion)
-                # - See commit ce86fc7 for historical context (connection pool exhaustion bug)
-                # - Each PostgreSQLAdapter creates its own pool, so multiple adapters
-                #   multiply the connection count (e.g., 3 projects × 3 connections = 9 total)
-                self.pool = psycopg2.pool.SimpleConnectionPool(
-                    1,  # min_connections: 1 (always keep one alive)
-                    3,  # max_connections: 3 (sufficient for stdio, prevents exhaustion)
-                    self.database_url,
-                    cursor_factory=RealDictCursor,  # Returns dict-like rows (compatible with SQLite)
-                    connect_timeout=15  # Increased to 15s for Neon wakeup
-                    # Note: statement_timeout removed from pool options (not supported by Neon pooler)
-                    # Instead, set per-connection in get_connection()
-                )
-                if attempt > 0:
-                    print(f"✅ PostgreSQL connection pool initialized after {attempt + 1} attempts (schema: {self.schema})", file=sys.stderr)
-                else:
-                    print(f"✅ PostgreSQL connection pool initialized (schema: {self.schema})", file=sys.stderr)
-                break  # Success!
-
-            except Exception as e:
-                last_error = e
-                error_msg = str(e).lower()
-
-                # Check if it's a cold start / suspension error
-                is_cold_start = any(keyword in error_msg for keyword in [
-                    'ssl', 'timeout', 'connection refused', 'temporarily unavailable',
-                    'could not connect', 'server closed the connection',
-                    'connection timed out', 'network unreachable', 'suspended'
-                ])
-
-                if is_cold_start and attempt < max_retries - 1:
-                    jitter = random.uniform(0, delay * 0.3)
-                    wait_time = delay + jitter
-                    print(f"⏳ Neon database wakeup (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.2f}s...", file=sys.stderr)
-                    time.sleep(wait_time)
-                    delay *= 2  # Exponential backoff
-                else:
-                    # Not a cold start error, or final attempt
-                    raise ConnectionError(f"Failed to create connection pool after {max_retries} attempts: {e}")
+        # Use shared connection pool (prevents pool exhaustion with multiple schemas)
+        # CRITICAL: All schemas share one pool since they're on the same database
+        # Schema isolation is achieved via search_path on each connection
+        self.pool = _get_shared_pool(self.database_url)
 
     def _get_schema_name(self) -> str:
         """
