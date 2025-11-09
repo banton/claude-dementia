@@ -111,8 +111,16 @@ def _get_cached_adapter(schema_name: str) -> PostgreSQLAdapter:
         )
         try:
             adapter.ensure_schema_exists()
-        except:
-            pass  # Schema might already exist
+        except Exception as e:
+            # Only ignore "schema already exists" errors, re-raise others
+            error_msg = str(e).lower()
+            if 'already exists' in error_msg or 'duplicate' in error_msg:
+                pass  # Schema exists, continue
+            else:
+                # Connection failure, permission error, etc - don't cache broken adapter
+                print(f"❌ Failed to ensure schema '{schema_name}': {e}", file=sys.stderr)
+                raise  # Re-raise to prevent caching broken adapter
+
         _adapter_cache[schema_name] = adapter
         print(f"✅ Cached new adapter for schema: {schema_name}", file=sys.stderr)
 
