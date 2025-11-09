@@ -7433,24 +7433,24 @@ async def ai_summarize_context(topic: str, project: Optional[str] = None) -> str
             "fallback": "Use recall_context(topic, preview_only=True) for extract-based summary"
         }, indent=2)
 
-    conn = _get_db_for_project(project)
+    # ✅ FIX: Use context manager to ensure connection is closed
+    with _get_db_for_project(project) as conn:
+        # Get context content
+        cursor = conn.execute("""
+            SELECT content, preview FROM context_locks
+            WHERE label = ?
+            ORDER BY version DESC LIMIT 1
+        """, (topic,))
 
-    # Get context content
-    cursor = conn.execute("""
-        SELECT content, preview FROM context_locks
-        WHERE label = ?
-        ORDER BY version DESC LIMIT 1
-    """, (topic,))
+        row = cursor.fetchone()
+        if not row:
+            return json.dumps({
+                "error": "Context not found",
+                "topic": topic
+            }, indent=2)
 
-    row = cursor.fetchone()
-    if not row:
-        return json.dumps({
-            "error": "Context not found",
-            "topic": topic
-        }, indent=2)
-
-    # Generate AI summary
-    summary = llm_service.summarize_context(row['content'])
+        # Generate AI summary
+        summary = llm_service.summarize_context(row['content'])
 
     if not summary:
         return json.dumps({
