@@ -6089,82 +6089,83 @@ async def check_contexts(text: str, project: Optional[str] = None) -> str:
 
     # Use project-aware database connection
     target_project = _get_project_for_context(project)
-    conn = _get_db_for_project(project)
     current_db_path = get_current_db_path()  # Dynamic database path
 
-    # Enhanced relevance detection: Try semantic search first, fall back to keyword matching
-    semantic_results = []
-    try:
-        from src.services import embedding_service
-        from src.services.semantic_search import SemanticSearch
+    # ✅ FIX: Use context manager to ensure connection is closed
+    with _get_db_for_project(project) as conn:
+        # Enhanced relevance detection: Try semantic search first, fall back to keyword matching
+        semantic_results = []
+        try:
+            from src.services import embedding_service
+            from src.services.semantic_search import SemanticSearch
 
-        if embedding_service and embedding_service.enabled:
-            semantic_search = SemanticSearch(conn, embedding_service)
+            if embedding_service and embedding_service.enabled:
+                semantic_search = SemanticSearch(conn, embedding_service)
 
-            # Check if any contexts have embeddings
-            cursor = conn.execute("SELECT COUNT(*) as count FROM context_locks WHERE embedding IS NOT NULL")
-            embedded_count = cursor.fetchone()['count']
+                # Check if any contexts have embeddings
+                cursor = conn.execute("SELECT COUNT(*) as count FROM context_locks WHERE embedding IS NOT NULL")
+                embedded_count = cursor.fetchone()['count']
 
-            if embedded_count > 0:
-                # Use semantic search for better relevance
-                results = semantic_search.search_similar(
-                    query=text,
-                    limit=5,
-                    threshold=0.5  # Lower threshold for check_contexts
-                )
+                if embedded_count > 0:
+                    # Use semantic search for better relevance
+                    results = semantic_search.search_similar(
+                        query=text,
+                        limit=5,
+                        threshold=0.5  # Lower threshold for check_contexts
+                    )
 
-                if results:
-                    semantic_results.append("🔍 **Semantic Search Results:**\n")
-                    for result in results:
-                        priority_emoji = {
-                            'always_check': '⚠️',
-                            'important': '📌',
-                            'reference': '📄'
-                        }.get(result.get('priority', 'reference'), '📄')
+                    if results:
+                        semantic_results.append("🔍 **Semantic Search Results:**\n")
+                        for result in results:
+                            priority_emoji = {
+                                'always_check': '⚠️',
+                                'important': '📌',
+                                'reference': '📄'
+                            }.get(result.get('priority', 'reference'), '📄')
 
-                        semantic_results.append(
-                            f"{priority_emoji} **{result['label']}** (similarity: {result['similarity']:.2f})\n"
-                            f"   {result['preview'][:150]}..."
-                        )
+                            semantic_results.append(
+                                f"{priority_emoji} **{result['label']}** (similarity: {result['similarity']:.2f})\n"
+                                f"   {result['preview'][:150]}..."
+                            )
 
-                    semantic_results.append("\n💡 Use `recall_context(topic)` for full details")
-    except Exception as e:
-        # Graceful fallback - semantic search failed, use keyword matching
-        print(f"⚠️  Semantic search unavailable: {e}", file=sys.stderr)
+                        semantic_results.append("\n💡 Use `recall_context(topic)` for full details")
+        except Exception as e:
+            # Graceful fallback - semantic search failed, use keyword matching
+            print(f"⚠️  Semantic search unavailable: {e}", file=sys.stderr)
 
-    # Get keyword-based relevant contexts (original logic - graceful fallback for SQLite)
-    relevant = None
-    violations = None
-    try:
-        relevant = get_relevant_contexts_for_text(text, session_id, current_db_path)
-        violations = check_command_context(text, session_id, current_db_path)
-    except Exception as fallback_error:
-        # Keyword matching unavailable (PostgreSQL mode)
-        print(f"⚠️  Keyword fallback unavailable: {fallback_error}", file=sys.stderr)
+        # Get keyword-based relevant contexts (original logic - graceful fallback for SQLite)
+        relevant = None
+        violations = None
+        try:
+            relevant = get_relevant_contexts_for_text(text, session_id, current_db_path)
+            violations = check_command_context(text, session_id, current_db_path)
+        except Exception as fallback_error:
+            # Keyword matching unavailable (PostgreSQL mode)
+            print(f"⚠️  Keyword fallback unavailable: {fallback_error}", file=sys.stderr)
 
-    output = []
+        output = []
 
-    # Add semantic results if available
-    if semantic_results:
-        output.extend(semantic_results)
-        if relevant or violations:
-            output.append("\n" + "─" * 50 + "\n")
-
-    # Add keyword-based results
-    if relevant:
+        # Add semantic results if available
         if semantic_results:
-            output.append("📝 **Keyword Matching Results:**\n")
-        output.append(relevant)
+            output.extend(semantic_results)
+            if relevant or violations:
+                output.append("\n" + "─" * 50 + "\n")
 
-    if violations:
-        if output:
-            output.append("")  # Add spacing
-        output.append(violations)
+        # Add keyword-based results
+        if relevant:
+            if semantic_results:
+                output.append("📝 **Keyword Matching Results:**\n")
+            output.append(relevant)
 
-    if not output:
-        return "No relevant locked contexts found."
+        if violations:
+            if output:
+                output.append("")  # Add spacing
+            output.append(violations)
 
-    return "\n".join(output)
+        if not output:
+            return "No relevant locked contexts found."
+
+        return "\n".join(output)
 
 @mcp.tool()
 async def explore_context_tree(flat: bool = True, confirm_full: bool = False, project: Optional[str] = None) -> str:
