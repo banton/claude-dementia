@@ -7309,21 +7309,22 @@ async def semantic_search_contexts(
             "fallback": "Use search_contexts() for keyword-based search"
         }, indent=2)
 
-    conn = _get_db_for_project(project)
-    semantic_search = SemanticSearch(conn, embedding_service)
+    # ✅ FIX: Use context manager to ensure connection is closed
+    with _get_db_for_project(project) as conn:
+        semantic_search = SemanticSearch(conn, embedding_service)
 
-    # Determine candidate limit for reranking
-    # If reranking enabled, get more candidates to rerank
-    candidate_limit = limit * 5 if use_reranking else limit
+        # Determine candidate limit for reranking
+        # If reranking enabled, get more candidates to rerank
+        candidate_limit = limit * 5 if use_reranking else limit
 
-    # Perform semantic search
-    results = semantic_search.search_similar(
-        query=query,
-        limit=candidate_limit,
-        threshold=threshold,
-        priority_filter=priority,
-        tags_filter=tags
-    )
+        # Perform semantic search
+        results = semantic_search.search_similar(
+            query=query,
+            limit=candidate_limit,
+            threshold=threshold,
+            priority_filter=priority,
+            tags_filter=tags
+        )
 
     # Apply reranking if enabled and using Voyage AI
     reranked = False
