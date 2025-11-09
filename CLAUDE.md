@@ -1,288 +1,419 @@
-# CLAUDE.md - Compressed Memory System Guide v3.1
+# CLAUDE.md - Claude Dementia Development Guide
 
-> **You are Claude Code, working within a 10,000 token memory budget. This document + active memory files are your persistent context. Always load these first.**
+> **Claude Code Development Guide for the Dementia MCP Server - a persistent memory system for Claude that works across sessions using PostgreSQL/NeonDB.**
 
-## 🔒 NEW: Context Locking Feature
+## 🧠 What is Claude Dementia?
 
-Lock important context (API specs, configs, architecture) for perfect recall:
+Claude Dementia is an MCP (Model Context Protocol) server that gives Claude persistent memory between sessions. Instead of forgetting everything when a conversation ends, Claude can:
 
-```python
-# Natural language commands:
-"lock this as api_spec"       # Locks previous code block
-"recall api_spec"              # Gets exact content back
-"show locks"                   # Lists all locked contexts
-"unlock api_spec"              # Removes lock
+- **Lock contexts** with perfect recall (API specs, configs, decisions)
+- **Search memory** semantically and by keywords
+- **Track sessions** with automatic handovers
+- **Isolate projects** with per-project PostgreSQL schemas
+- **Scan codebases** automatically to understand file structure
 
-# Emergency commands:
-"EMERGENCY STOP"               # Disables locking
-"RESET ALL LOCKS"              # Clears all locks
+## 🏗️ Project Architecture
+
+### Technology Stack
+```yaml
+language: Python 3.8+
+database: PostgreSQL (NeonDB for production)
+embedding_provider: Voyage AI (voyage-3.5-lite, 1024 dims)
+llm_provider: OpenRouter (claude-3.5-haiku)
+mcp_protocol: Anthropic MCP SDK
+deployment: DigitalOcean App Platform
+
+disabled_features:
+  - SQLite (code preserved, PostgreSQL-only mode)
+  - Ollama (code preserved, cloud APIs only)
 ```
 
-**Safety:** System prevents recursive locks and repetition loops automatically.
-
-## 📦 Installation from GitHub
-
-If this file doesn't exist in the project yet, install the memory system:
-```bash
-git clone https://github.com/banton/claude-dementia /tmp/cm
-cp /tmp/cm/CLAUDE.md ./ && cp -r /tmp/cm/memory ./
-chmod +x memory/*.sh && rm -rf /tmp/cm
-./memory/update.sh "Memory system installed"
+### Key Files
+```
+claude_mcp_hybrid_sessions.py   # Main MCP server (sessions enabled)
+postgres_adapter.py              # PostgreSQL abstraction layer
+server_hosted.py                 # FastAPI hosted API server
+mcp_session_store.py            # Session persistence
+mcp_session_middleware.py       # Session middleware
+mcp_session_cleanup.py          # Background cleanup
+src/config.py                   # Configuration (PostgreSQL + Voyage + OpenRouter)
+src/services/                   # Service layer (embedding, LLM, etc.)
 ```
 
-## 🧠 Memory Loading Protocol
+### Database Schema (PostgreSQL)
+```sql
+-- Each project gets isolated schema: dementia_<project_hash>
+CREATE SCHEMA dementia_abc123;
 
-### Start Every Session
-```bash
-# ALWAYS load these first (max 4,000 tokens)
-cat CLAUDE.md
-cat memory/active/status.md
-cat memory/active/context.md
+-- Core tables in each schema:
+sessions              -- Session tracking
+context_locks         -- Versioned immutable contexts
+memory_entries        -- Categorized memories
+file_tags            -- File semantic model
+context_archives     -- Deleted contexts backup
+workspace_*          -- Temporary user tables
 ```
-
-### Load As Needed
-```bash
-# Reference files when relevant (max 5,000 tokens)
-cat memory/reference/[relevant-file].md
-cat memory/patterns/[specific-pattern].md
-```
-
-## 📊 Token Budget System
-
-| Memory Type | Budget | Purpose | Update Frequency |
-|-------------|---------|---------|------------------|
-| CLAUDE.md | 1,000 | Core guide (this file) | Rarely |
-| Active | 3,000 | Current work | Every session |
-| Reference | 5,000 | Stable patterns | Weekly |
-| Buffer | 1,000 | Overflow space | As needed |
-| **TOTAL** | **10,000** | **Hard limit** | - |
 
 ## 🔄 Development Workflow
 
 ### 1. Session Start
 ```bash
-# Check status
-cat memory/active/status.md
+# Check git status
 git status
+git log --oneline -5
 
-# Load context
-cat memory/active/context.md
+# Check current branch
+git branch --show-current
 
-# Check locked contexts
-python3 -c "
-from mcp_server import ClaudeIntelligence
-import asyncio
-server = ClaudeIntelligence()
-locks = asyncio.run(server.list_locked_contexts())
-for lock in locks:
-    print(f'{lock[\"label\"]} v{lock[\"version\"]} ({lock[\"size\"]} bytes)')
-"
-
-# Ask: "What are we working on?"
+# If working on a feature
+git checkout -b feature/descriptive-name
 ```
 
-### 2. During Development
+### 2. Understanding the Codebase
 ```bash
-# Quick updates (auto-compresses)
-./memory/update.sh "Implemented feature X"
+# Main server files
+cat claude_mcp_hybrid_sessions.py    # MCP tools implementation
+cat postgres_adapter.py               # Database layer
+cat server_hosted.py                 # Hosted API
 
-# Lock important context when discussing complex designs
-# Example: "Here's the API spec: [code]. Lock this as api_v2"
-# Later: "recall api_v2" to get it back perfectly
+# Configuration
+cat src/config.py                    # Environment config
+cat .env.example                     # Required env vars
 
-# Fix issues properly
-# Document in: memory/fixes/YYYY-MM-DD-issue.md
-
-# Track questions
-# Create: memory/questions/YYYY-MM-DD-topic.md
+# Documentation
+cat docs/SESSION_MANAGEMENT_ENHANCEMENTS.md
+cat README.md
 ```
 
-### 3. Session End
+### 3. Testing Workflow (TDD)
 ```bash
-# Update status
-./memory/update.sh "Session summary: achieved X, Y pending"
+# Run specific test
+python3 -m pytest tests/test_specific.py -v
 
-# Update context for next session
-echo "Next: implement Z" >> memory/active/context.md
+# Run all tests
+python3 -m pytest tests/ -v
 
-# Check compression
-./memory/compress.sh
+# Test with coverage
+python3 -m pytest --cov=. tests/
 ```
 
-## 🏗️ Project Structure
-
-### [CUSTOMIZE THIS SECTION]
-```yaml
-project_name: [YOUR PROJECT]
-type: [web app/cli tool/library]
-stack: [technologies used]
-start_command: [how to run]
-
-structure:
-  src/: Main source code
-  tests/: Test files
-  docs/: Documentation
-  
-key_files:
-  - path/to/main.py: Entry point
-  - path/to/config.yaml: Configuration
-```
-
-## 🎯 Operating Principles
-
-### 1. Compressed Intelligence
-- **Information density** over verbosity
-- **Tables/lists** over paragraphs (3:1 compression)
-- **References** over copying code
-- **One-line summaries** with bullet details
-
-### 2. Progressive Context
-- Start with minimal files
-- Load specific references as needed
-- Never exceed token budget
-- Archive old information automatically
-
-### 3. Fix Don't Skip
-- Stop on errors
-- Find root cause
-- Document fix in memory/fixes/
-- Add regression test
-
-### 4. Ask Don't Assume
-- Document questions in memory/questions/
-- Include context and options
-- Wait for clarification
-- Record answers
-
-## 📁 Memory Directory Guide
-
-```
-memory/
-├── active/               # Current work (3k tokens)
-│   ├── status.md        # Dashboard + updates
-│   └── context.md       # Task context
-├── reference/           # Stable info (5k tokens)
-│   ├── architecture.md  # System design
-│   ├── patterns.md      # Code patterns
-│   └── decisions.md     # Tech decisions
-├── patterns/            # Reusable solutions
-├── fixes/              # YYYY-MM-DD-issue.md
-├── implementations/     # Feature tracking
-├── questions/          # YYYY-MM-DD-topic.md
-└── archive/            # Compressed old files
-```
-
-## ✅ Pre-Work Checklist
-
-- [ ] Load CLAUDE.md + active memory
-- [ ] Check git status
-- [ ] Review recent updates
-- [ ] Identify current task
-- [ ] Load relevant patterns/references
-- [ ] Verify services running
-- [ ] Run tests for clean baseline
-
-## 🚀 Quick Commands
-
+### 4. Making Changes
 ```bash
-# Memory management
-./memory/update.sh "what changed"
-./memory/compress.sh
-./memory/weekly-maintenance.sh
+# Write tests first (RED)
+# Edit: tests/test_new_feature.py
+python3 -m pytest tests/test_new_feature.py  # Should fail
 
-# Git workflow
+# Implement feature (GREEN)
+# Edit: claude_mcp_hybrid_sessions.py or relevant file
+python3 -m pytest tests/test_new_feature.py  # Should pass
+
+# Refactor (REFACTOR)
+# Improve code while keeping tests green
+python3 -m pytest tests/  # All should pass
+```
+
+### 5. Committing
+```bash
+# Stage changes selectively
 git add -p
-git commit -m "type(scope): message"
-git push origin branch
 
-# Testing
-[test command]
-[lint command]
+# Commit with conventional format
+git commit -m "feat(sessions): add session fork capability"
+git commit -m "fix(postgres): correct schema isolation bug"
+git commit -m "test(handover): add handover loading tests"
 
-# Search memory
-grep -r "pattern" memory/
+# Push to remote
+git push origin feature/descriptive-name
 ```
 
-## 📝 Documentation Templates
+## 🎯 Common Development Tasks
 
-### Fix Documentation
+### Adding a New MCP Tool
+
+1. **Design the API** (docs first)
 ```markdown
-# YYYY-MM-DD-descriptive-name.md
-## Problem: [One line]
-## Cause: [Root cause]
-## Fix: [Solution]
-## Prevention: [Test added]
+## Tool: `new_tool_name(param1, param2)`
+
+**Purpose:** What it does
+
+**Parameters:**
+- param1: Description
+- param2: Description
+
+**Returns:** JSON with...
+
+**Example:**
+```python
+new_tool_name("value1", "value2")
+```
 ```
 
-### Question Tracking
-```markdown
-# YYYY-MM-DD-topic.md
-## Status: OPEN|ANSWERED
-## Q: [Specific question]
-## Context: [Why needed]
-## Options: [Considered choices]
-## Answer: [When received]
+2. **Write tests** (tests/test_new_tool.py)
+```python
+def test_new_tool_basic():
+    """Test basic functionality."""
+    # Arrange
+    db = setup_test_db()
+
+    # Act
+    result = new_tool_name("test")
+
+    # Assert
+    assert result["status"] == "success"
 ```
 
-### Pattern Documentation
-```markdown
-# pattern-name.md
-## Use When: [Scenario]
-## Solution: [Approach]
-## Example: path/to/implementation
-## Trade-offs: [Considerations]
+3. **Implement in claude_mcp_hybrid_sessions.py**
+```python
+@server.call_tool()
+async def new_tool_name(
+    arguments: dict
+) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+    """Tool implementation."""
+    try:
+        # Implementation
+        return [TextContent(type="text", text=json.dumps(result))]
+    except Exception as e:
+        return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
 ```
 
-## 🛡️ Quality Gates
+### Working with PostgreSQL
 
-Before EVERY commit:
-- [ ] Tests passing
-- [ ] No hardcoded secrets
-- [ ] Memory updated
-- [ ] Compression checked
-- [ ] Questions documented
-- [ ] Fixes recorded
+```python
+# Get adapter instance
+from postgres_adapter import PostgreSQLAdapter
+adapter = PostgreSQLAdapter()  # Uses DATABASE_URL env var
 
-## 🚨 Emergency Procedures
+# Execute query
+result = adapter.execute_query(
+    "SELECT * FROM context_locks WHERE label = %s",
+    params=["api_spec"]
+)
 
-### Over Token Budget
+# Execute with transaction
+adapter.execute_update(
+    "INSERT INTO context_locks (label, content) VALUES (%s, %s)",
+    params=["new_lock", "content"]
+)
+```
+
+### Testing Session Management
+
+```python
+# Test session creation
+from mcp_session_store import MCPSessionStore
+store = MCPSessionStore(database_url="postgresql://...")
+
+session_id = await store.create_session(user_id="test_user")
+assert session_id
+
+# Test session retrieval
+session = await store.get_session(session_id)
+assert session["status"] == "active"
+
+# Test cleanup
+await store.cleanup_expired_sessions()
+```
+
+## 📝 Code Style Guidelines
+
+### Python Conventions
+- Use `snake_case` for functions and variables
+- Use `PascalCase` for classes
+- Type hints for all function parameters
+- Docstrings for all public functions
+- Maximum line length: 100 characters
+
+### Error Handling
+```python
+# Always return JSON errors in MCP tools
+try:
+    result = perform_operation()
+    return [TextContent(type="text", text=json.dumps(result))]
+except Exception as e:
+    error_response = {
+        "error": str(e),
+        "type": type(e).__name__,
+        "status": "failed"
+    }
+    return [TextContent(type="text", text=json.dumps(error_response))]
+```
+
+### SQL Queries
+```python
+# Use parameterized queries (NEVER string interpolation)
+# GOOD
+cursor.execute("SELECT * FROM table WHERE id = %s", [user_id])
+
+# BAD (SQL injection risk!)
+cursor.execute(f"SELECT * FROM table WHERE id = '{user_id}'")
+```
+
+## 🚨 Important Constraints
+
+### Database
+- **PostgreSQL ONLY**: No SQLite code in new features
+- **Schema isolation**: Each project gets its own schema
+- **Connection pooling**: Use shared pool via postgres_adapter
+- **Transactions**: Use for multi-statement operations
+
+### API Keys
+- **Never commit secrets**: Use .env files
+- **Required keys**:
+  - `DATABASE_URL`: PostgreSQL connection string
+  - `VOYAGEAI_API_KEY`: For embeddings
+  - `OPENROUTER_API_KEY`: For AI summarization
+
+### MCP Tools
+- **Always return JSON**: Use `json.dumps()`
+- **Handle errors gracefully**: Return error objects, don't throw
+- **Document thoroughly**: Update README.md and docs/
+- **Test extensively**: Unit + integration tests
+
+## 🔍 Debugging Tips
+
+### Enable Debug Logging
+```python
+import logging
+logging.basicConfig(level=logging.DEBUG)
+```
+
+### Check Database Connection
 ```bash
-# Check usage
-./memory/compress.sh
-
-# Force compression
-./memory/weekly-maintenance.sh
-
-# Manual cleanup
-# Move old content to archive
+# Test connection
+python3 -c "
+from postgres_adapter import PostgreSQLAdapter
+adapter = PostgreSQLAdapter()
+print('Connected:', adapter.test_connection())
+"
 ```
 
-### Lost Context
-1. Read CLAUDE.md
-2. Check memory/active/status.md
-3. Review git log
-4. Check memory/reference/architecture.md
-5. Ask user for clarification
+### Inspect Session State
+```bash
+# Check active sessions
+python3 -c "
+import asyncio
+from mcp_session_store import MCPSessionStore
+store = MCPSessionStore()
+sessions = asyncio.run(store.get_active_sessions())
+print(f'Active sessions: {len(sessions)}')
+"
+```
 
-### Tests Failing
-1. STOP writing code
-2. Read full error
-3. Check memory/fixes/ for similar
-4. Fix root cause
-5. Document in memory/fixes/
+### View PostgreSQL Schemas
+```sql
+-- Connect to database
+psql $DATABASE_URL
 
-## 🎓 Remember
+-- List all schemas
+\dn
 
-- **You have no memory** between sessions
-- **10,000 tokens** is your limit
-- **Compression** maintains context
-- **Documentation** is survival
-- **Patterns** prevent repetition
-- **Questions** prevent assumptions
+-- List tables in a schema
+\dt dementia_abc123.*
+
+-- View table structure
+\d dementia_abc123.context_locks
+```
+
+## 📚 Key Documentation Files
+
+### Architecture & Design
+- `docs/SESSION_MANAGEMENT_ENHANCEMENTS.md` - Session system details
+- `HOSTED_SERVICE_ARCHITECTURE.md` - Cloud deployment architecture
+- `MULTI_PROJECT_ISOLATION.md` - Project isolation design
+- `DEPLOYMENT.md` - Deployment procedures
+
+### Features
+- `FILE_SEMANTIC_MODEL_DESIGN.md` - File scanning system
+- `SQL_TOOLS_DESIGN.md` - Database tools design
+- `WORKSPACE_TABLES.md` - Temporary tables feature
+
+### Testing & Operations
+- `TESTING_GUIDE.md` - How to test
+- `CLOUD_TESTING_SUMMARY.md` - Cloud testing results
+- `SAFE_WORKFLOW_CLAUDE_DESKTOP.md` - Local testing workflow
+
+## 🎓 Development Principles
+
+### 1. Test-Driven Development
+- Write tests BEFORE implementation
+- Tests should be deterministic (no random data)
+- Mock external dependencies (APIs, time, etc.)
+
+### 2. Immutable Tests
+```python
+# GOOD - Fixed test data
+def test_lock_context():
+    content = "API_KEY = 'test_key_123'"
+    result = lock_context(content, "api_config")
+    assert result["topic"] == "api_config"
+
+# BAD - Non-deterministic
+def test_lock_context():
+    content = f"timestamp = {time.time()}"  # Changes every run!
+    result = lock_context(content, "api_config")
+```
+
+### 3. API-First Design
+- Design API contracts before implementation
+- Document endpoints/tools with examples
+- Use type hints and validation
+
+### 4. Security First
+- No secrets in code
+- Parameterized SQL queries only
+- Validate all user input
+- Use read-only queries where possible
+
+## ✅ Pre-Commit Checklist
+
+Before committing code:
+- [ ] Tests passing (`pytest tests/`)
+- [ ] No hardcoded secrets or API keys
+- [ ] Type hints on all functions
+- [ ] Docstrings on public functions
+- [ ] README.md updated if public API changed
+- [ ] Git commit message follows convention
+- [ ] Code follows style guidelines
+- [ ] Error handling is comprehensive
+
+## 🚀 Quick Reference Commands
+
+```bash
+# Run MCP server locally
+./claude-dementia-server.sh
+
+# Run hosted API server
+python3 server_hosted.py
+
+# Run tests
+python3 -m pytest tests/ -v
+
+# Check code style
+python3 -m flake8 *.py
+
+# Format code
+python3 -m black *.py
+
+# Database migrations
+python3 migrate_v4_1_rlm.py
+
+# Test PostgreSQL connection
+python3 -c "from postgres_adapter import PostgreSQLAdapter; print(PostgreSQLAdapter().test_connection())"
+```
+
+## 🔗 Important Links
+
+- **GitHub Repo**: https://github.com/banton/claude-dementia
+- **MCP Protocol**: https://github.com/anthropics/mcp
+- **NeonDB Docs**: https://neon.tech/docs
+- **Voyage AI Docs**: https://docs.voyageai.com
+- **OpenRouter Docs**: https://openrouter.ai/docs
 
 ---
 
-**Load this file first in EVERY session. Your memory system depends on it.**
+**Remember**: This is a production system. Write tests first, handle errors gracefully, and never commit secrets.
 
-**Version**: 3.0.0  
-**Token Budget**: This file uses ~1,000 tokens
+**Current Version**: 4.2.0
+**Database**: PostgreSQL (Neon)
+**Protocol**: MCP (Model Context Protocol)
+**Last Updated**: November 2025
