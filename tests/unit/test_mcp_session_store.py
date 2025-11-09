@@ -46,7 +46,8 @@ def test_should_create_session_with_unique_id_when_initialized(mock_db_pool):
         'last_active': fixed_time,
         'expires_at': fixed_time + timedelta(hours=24),
         'capabilities': {},
-        'client_info': {}
+        'client_info': {},
+        'project_name': 'default'
     }
 
     # Act
@@ -80,7 +81,8 @@ def test_should_persist_session_to_database_when_created(mock_db_pool):
             'last_active': datetime.now(timezone.utc),
             'expires_at': datetime.now(timezone.utc) + timedelta(hours=24),
             'capabilities': {},
-            'client_info': {}
+            'client_info': {},
+            'project_name': 'default'
         },
         # Second call - get_session
         {
@@ -89,7 +91,9 @@ def test_should_persist_session_to_database_when_created(mock_db_pool):
             'last_active': datetime.now(timezone.utc),
             'expires_at': datetime.now(timezone.utc) + timedelta(hours=24),
             'capabilities': {},
-            'client_info': {}
+            'client_info': {},
+            'project_name': 'default',
+            'session_summary': {}
         }
     ]
 
@@ -120,7 +124,8 @@ def test_should_mark_session_expired_when_24_hours_passed(mock_db_pool):
             'last_active': fixed_time,
             'expires_at': fixed_time + timedelta(hours=24),
             'capabilities': {},
-            'client_info': {}
+            'client_info': {},
+            'project_name': 'default'
         },
         # is_expired check - return the session
         {
@@ -159,7 +164,8 @@ def test_should_update_last_active_when_session_accessed(mock_db_pool):
             'last_active': fixed_start,
             'expires_at': fixed_start + timedelta(hours=24),
             'capabilities': {},
-            'client_info': {}
+            'client_info': {},
+            'project_name': 'default'
         },
         # get_session after update
         {
@@ -168,7 +174,9 @@ def test_should_update_last_active_when_session_accessed(mock_db_pool):
             'last_active': fixed_access,
             'expires_at': fixed_access + timedelta(hours=24),
             'capabilities': {},
-            'client_info': {}
+            'client_info': {},
+            'project_name': 'default',
+            'session_summary': {}
         }
     ]
 
@@ -202,7 +210,8 @@ def test_should_delete_expired_sessions_when_cleanup_runs(mock_db_pool):
             'last_active': fixed_time - timedelta(days=2),
             'expires_at': fixed_time - timedelta(days=1),
             'capabilities': {},
-            'client_info': {}
+            'client_info': {},
+            'project_name': 'default'
         },
         # create new session
         {
@@ -211,7 +220,8 @@ def test_should_delete_expired_sessions_when_cleanup_runs(mock_db_pool):
             'last_active': fixed_time,
             'expires_at': fixed_time + timedelta(hours=24),
             'capabilities': {},
-            'client_info': {}
+            'client_info': {},
+            'project_name': 'default'
         },
         # get old session after cleanup (should be None)
         None,
@@ -222,7 +232,9 @@ def test_should_delete_expired_sessions_when_cleanup_runs(mock_db_pool):
             'last_active': fixed_time,
             'expires_at': fixed_time + timedelta(hours=24),
             'capabilities': {},
-            'client_info': {}
+            'client_info': {},
+            'project_name': 'default',
+            'session_summary': {}
         }
     ]
 
@@ -266,7 +278,8 @@ def test_should_handle_duplicate_session_id_by_regenerating(mock_db_pool):
         'last_active': datetime.now(timezone.utc),
         'expires_at': datetime.now(timezone.utc) + timedelta(hours=24),
         'capabilities': {},
-        'client_info': {}
+        'client_info': {},
+        'project_name': 'default'
     }
 
     # Act
