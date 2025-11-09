@@ -7181,34 +7181,34 @@ async def generate_embeddings(
             "setup": "1. Start Ollama\n2. Run: ollama pull nomic-embed-text"
         }, indent=2)
 
-    conn = _get_db_for_project(project)
+    # ✅ FIX: Use context manager to ensure connection is closed
+    with _get_db_for_project(project) as conn:
+        # Initialize token tracker
+        init_token_tracker(conn)
 
-    # Initialize token tracker
-    init_token_tracker(conn)
+        semantic_search = SemanticSearch(conn, embedding_service)
 
-    semantic_search = SemanticSearch(conn, embedding_service)
+        # Determine which contexts to process
+        # Use preview instead of content (nomic-embed-text has 1020 char limit)
+        if context_ids:
+            ids = [int(id.strip()) for id in context_ids.split(',')]
+            sql = f"SELECT id, preview FROM context_locks WHERE id IN ({','.join(['?']*len(ids))})"
+            cursor = conn.execute(sql, ids)
+        elif regenerate:
+            cursor = conn.execute("SELECT id, preview FROM context_locks")
+        else:
+            cursor = conn.execute("SELECT id, preview FROM context_locks WHERE embedding IS NULL")
 
-    # Determine which contexts to process
-    # Use preview instead of content (nomic-embed-text has 1020 char limit)
-    if context_ids:
-        ids = [int(id.strip()) for id in context_ids.split(',')]
-        sql = f"SELECT id, preview FROM context_locks WHERE id IN ({','.join(['?']*len(ids))})"
-        cursor = conn.execute(sql, ids)
-    elif regenerate:
-        cursor = conn.execute("SELECT id, preview FROM context_locks")
-    else:
-        cursor = conn.execute("SELECT id, preview FROM context_locks WHERE embedding IS NULL")
+        contexts = [{"id": row['id'], "content": row['preview']} for row in cursor.fetchall()]
 
-    contexts = [{"id": row['id'], "content": row['preview']} for row in cursor.fetchall()]
+        if not contexts:
+            return json.dumps({
+                "message": "No contexts to process",
+                "total_contexts": 0
+            }, indent=2)
 
-    if not contexts:
-        return json.dumps({
-            "message": "No contexts to process",
-            "total_contexts": 0
-        }, indent=2)
-
-    # Generate embeddings in batch
-    result = semantic_search.batch_add_embeddings(contexts)
+        # Generate embeddings in batch
+        result = semantic_search.batch_add_embeddings(contexts)
 
     # Build user-friendly summary
     mode = "specific contexts" if context_ids else ("all contexts (regenerate)" if regenerate else "contexts without embeddings")
