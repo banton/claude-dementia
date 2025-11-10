@@ -6004,11 +6004,11 @@ async def manage_workspace_table(
                     "sql": drop_sql
                 }, indent=2)
     
-        except Exception as e:
-            return json.dumps({
-                "error": str(e),
-                "operation": operation
-            }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "error": str(e),
+            "operation": operation
+        }, indent=2)
     
 
 @mcp.tool()
