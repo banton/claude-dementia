@@ -207,26 +207,26 @@ async def session_health_endpoint(request: Request):
         # Get database adapter and session store
         from claude_mcp_hybrid import _get_db_adapter
         adapter = _get_db_adapter()
-        session_store = PostgreSQLSessionStore(adapter.pool)
-        
-        # Quick database connectivity test
-        conn = adapter.pool.getconn()
+
+        # Quick database connectivity test using adapter.get_connection()
+        # Works for both pooled (Neon) and non-pooled connections
+        conn = adapter.get_connection()
         try:
             with conn.cursor() as cur:
                 # Count active and expired sessions
                 cur.execute("""
-                    SELECT 
+                    SELECT
                         COUNT(*) as total_sessions,
                         COUNT(CASE WHEN expires_at > NOW() THEN 1 END) as active_sessions,
                         COUNT(CASE WHEN expires_at <= NOW() THEN 1 END) as expired_sessions
                     FROM mcp_sessions
                 """)
                 row = cur.fetchone()
-                
+
                 total_sessions = row['total_sessions'] if row else 0
                 active_sessions = row['active_sessions'] if row else 0
                 expired_sessions = row['expired_sessions'] if row else 0
-                
+
             return JSONResponse({
                 "status": "healthy",
                 "database": "connected",
@@ -236,8 +236,8 @@ async def session_health_endpoint(request: Request):
                 "timestamp": datetime.now(timezone.utc).isoformat()
             })
         finally:
-            adapter.pool.putconn(conn)
-            
+            conn.close()
+
     except Exception as e:
         logger.error(f"Session health check failed: {e}")
         return JSONResponse({
