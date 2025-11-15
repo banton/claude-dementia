@@ -45,6 +45,13 @@ from src.metrics import (
     response_size_bytes
 )
 
+# Import OAuth mock (for Claude.ai compatibility)
+from oauth_mock import (
+    OAUTH_ROUTES,
+    validate_oauth_token,
+    get_www_authenticate_header
+)
+
 # Configuration
 ENVIRONMENT = os.getenv('ENVIRONMENT', 'production')
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
@@ -59,28 +66,49 @@ logger = get_logger(__name__)
 # ============================================================================
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):
-    """Authentication middleware for MCP endpoints."""
+    """
+    Authentication middleware for MCP endpoints.
+
+    Supports both:
+    1. Static Bearer token (for Claude Desktop via npx)
+    2. OAuth tokens (for Claude.ai custom connectors)
+    """
 
     async def dispatch(self, request, call_next):
         # Only check auth for /mcp/* and /execute, /tools, /metrics paths
+        # OAuth endpoints are unauthenticated (public authorization flow)
         protected_paths = ['/mcp', '/execute', '/tools', '/metrics']
 
         if any(request.url.path.startswith(path) for path in protected_paths):
             auth_header = request.headers.get("Authorization")
 
             if not auth_header or not auth_header.startswith("Bearer "):
+                # Return 401 with WWW-Authenticate header (required by MCP spec)
                 return JSONResponse(
                     status_code=401,
+                    headers={"WWW-Authenticate": get_www_authenticate_header()},
                     content={"detail": "Missing or invalid authorization header"}
                 )
 
             token = auth_header.replace("Bearer ", "")
             api_key = os.getenv('DEMENTIA_API_KEY')
 
-            # Constant-time comparison to prevent timing attacks
-            if not api_key or not secrets.compare_digest(token, api_key):
+            # Try OAuth token validation first
+            token_data = validate_oauth_token(token)
+            if token_data:
+                # Valid OAuth token - attach user info to request
+                request.state.user = token_data.get('user', 'demo-user')
+                request.state.auth_type = 'oauth'
+            # Fall back to static API key (for Claude Desktop)
+            elif api_key and secrets.compare_digest(token, api_key):
+                # Valid static token
+                request.state.user = 'static-user'
+                request.state.auth_type = 'static'
+            else:
+                # Invalid token - return 401 with WWW-Authenticate header
                 return JSONResponse(
                     status_code=401,
+                    headers={"WWW-Authenticate": get_www_authenticate_header()},
                     content={"detail": "Invalid API key"}
                 )
 
@@ -402,6 +430,10 @@ app.routes.insert(2, Route('/tools', list_tools_endpoint, methods=['GET']))
 app.routes.insert(3, Route('/execute', execute_tool_endpoint, methods=['POST']))
 app.routes.insert(4, Route('/metrics', metrics_endpoint, methods=['GET']))
 
+# Add OAuth routes for Claude.ai compatibility (unauthenticated - public OAuth flow)
+for idx, route in enumerate(OAUTH_ROUTES):
+    app.routes.insert(5 + idx, route)
+
 # Add middleware (order matters - last added runs first in Starlette)
 # Execution order: Timeout -> RequestLogging -> SessionPersistence -> Auth -> CorrelationID -> Handler
 app.add_middleware(CorrelationIdMiddleware)              # Innermost - adds correlation ID
@@ -415,7 +447,8 @@ app.add_middleware(TimeoutMiddleware)                    # Outermost - catch tim
 logger.info("app_initialized",
             version=VERSION,
             environment=ENVIRONMENT,
-            routes=['/health', '/session-health', '/tools', '/execute', '/metrics', '/mcp'])
+            routes=['/health', '/session-health', '/tools', '/execute', '/metrics', '/mcp',
+                    '/.well-known/oauth-*', '/oauth/authorize', '/oauth/token'])
 
 # ============================================================================
 # STARTUP
