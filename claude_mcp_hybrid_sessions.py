@@ -2507,155 +2507,157 @@ async def delete_project(name: str, confirm: bool = False) -> str:
 
 
 @mcp.tool()
-#async def select_project_for_session(project_name: str) -> str:
-#    """
-#    Select which project to work on for this MCP session.
-#
-#    IMPORTANT: This must be called when starting a new session before using other tools.
-#    When you connect, the system will prompt you to select a project if needed.
-#
-#    Args:
-#        project_name: Project name to work on (e.g., 'innkeeper', 'linkedin', 'default')
-#
-#    Returns:
-#        Confirmation with loaded handover from previous session (if exists)
-#
-#    Example:
-#        select_project_for_session('innkeeper')
-#        → ✅ Project 'innkeeper' selected
-#          📦 Previous session: You were fixing authentication bug...
-#    """
-#    import json
-#    import re
-#    from mcp_session_store import PostgreSQLSessionStore
-#
-#    try:
-#        # Get current session ID (from context - will be set by middleware)
-#        session_id = getattr(config, '_current_session_id', None)
-#
-#        if not session_id:
-#            return json.dumps({
-#                "success": False,
-#                "error": "No active session found. This should not happen."
-#            }, indent=2)
-#
-#        # Sanitize project name
-#        safe_name = re.sub(r'[^a-z0-9]', '_', project_name.lower())
-#        safe_name = re.sub(r'_+', '_', safe_name).strip('_')[:32]
-#
-#        # Get database adapter
-#        adapter = _get_db_adapter()
-#        session_store = PostgreSQLSessionStore(adapter.pool)
-#
-#        # Get current session
-#        session = session_store.get_session(session_id)
-#        if not session:
-#            return json.dumps({
-#                "success": False,
-#                "error": "Session not found in database"
-#            }, indent=2)
-#
-#        # Check if project exists (for non-default projects)
-#        if project_name != 'default':
-#            import psycopg2
-#            conn = psycopg2.connect(config.database_url)
-#            cur = conn.cursor()
-#
-#            # Check if schema exists
-#            cur.execute("""
-#                SELECT schema_name
-#                FROM information_schema.schemata
-#                WHERE schema_name = %s
-#            """, (safe_name,))
-#
-#            schema_exists = cur.fetchone() is not None
-#            conn.close()
-#
-#            if not schema_exists:
-#                # Get available projects for suggestion
-#                session_store_temp = PostgreSQLSessionStore(adapter.pool)
-#                projects = session_store_temp.get_projects_with_stats()
-#                project_names = [p['project_name'] for p in projects]
-#
-#                return json.dumps({
-#                    "success": False,
-#                    "error": f"Project '{project_name}' doesn't exist",
-#                    "available_projects": project_names,
-#                    "suggestion": f"Create it first: create_project('{project_name}')"
-#                }, indent=2)
-#
-#        # Update session with selected project
-#        conn = adapter.pool.getconn()
-#        try:
-#            with conn.cursor() as cur:
-#                cur.execute("""
-#                    UPDATE mcp_sessions
-#                    SET project_name = %s
-#                    WHERE session_id = %s
-#                """, (project_name, session_id))
-#                conn.commit()
-#        finally:
-#            adapter.pool.putconn(conn)
-#
-#        # Switch active project globally
-#        _set_active_project(project_name)
-#
-#        # Load previous handover for this project
-#        try:
-#            handover_result = await get_last_handover(project=project_name)
-#
-#            # Parse handover result (it's JSON string)
-#            handover_data = json.loads(handover_result)
-#
-#            if handover_data.get('handover'):
-#                handover_summary = handover_data['handover']
-#                work_done = handover_summary.get('work_done', [])
-#                next_steps = handover_summary.get('next_steps', [])
-#
-#                result = f"✅ Project '{project_name}' selected\n\n"
-#                result += "📦 Previous Session Handover:\n"
-#                result += "─" * 50 + "\n"
-#
-#                if work_done:
-#                    result += "\nWork Done:\n"
-#                    for item in work_done[:5]:  # Show max 5 items
-#                        result += f"  • {item}\n"
-#
-#                if next_steps:
-#                    result += "\nNext Steps:\n"
-#                    for item in next_steps[:3]:
-#                        result += f"  • {item}\n"
-#
-#                result += "\n" + "─" * 50 + "\n"
-#                result += "\nYou can now continue your work."
-#
-#                return result
-#            else:
-#                # No previous handover
-#                return f"""✅ Project '{project_name}' selected
-#
-#This is a new session for this project (no previous handover found).
-#
-#You can now use other tools."""
-#
-#        except Exception as handover_error:
-#            # No handover found or error loading it
-#            return f"""✅ Project '{project_name}' selected
-#
-#No previous session handover found. This may be:
-#- Your first session in this project
-#- Previous session had no activity
-#- Handover not yet created
-#
-#You can now use other tools."""
-#
-#    except Exception as e:
-#        return json.dumps({
-#            "success": False,
-#            "error": f"Failed to select project: {str(e)}"
-#        }, indent=2)
-#
-#
+async def select_project_for_session(project_name: str) -> str:
+    """
+    Select which project to work on for this MCP session.
+
+    IMPORTANT: This must be called when starting a new session before using other tools.
+    When you connect, the system will prompt you to select a project if needed.
+
+    Args:
+        project_name: Project name to work on (e.g., 'innkeeper', 'linkedin', 'default')
+
+    Returns:
+        Confirmation with loaded handover from previous session (if exists)
+
+    Example:
+        select_project_for_session('innkeeper')
+        → ✅ Project 'innkeeper' selected
+          📦 Previous session: You were fixing authentication bug...
+    """
+    import json
+    import re
+    from mcp_session_store import PostgreSQLSessionStore
+
+    try:
+        # Get current session ID (from context - will be set by middleware)
+        session_id = getattr(config, '_current_session_id', None)
+
+        if not session_id:
+            return json.dumps({
+                "success": False,
+                "error": "No active session found. This should not happen."
+            }, indent=2)
+
+        # Sanitize project name
+        safe_name = re.sub(r'[^a-z0-9]', '_', project_name.lower())
+        safe_name = re.sub(r'_+', '_', safe_name).strip('_')[:32]
+
+        # Get database adapter
+        adapter = _get_db_adapter()
+        session_store = PostgreSQLSessionStore(adapter.pool)
+
+        # Get current session
+        session = session_store.get_session(session_id)
+        if not session:
+            return json.dumps({
+                "success": False,
+                "error": "Session not found in database"
+            }, indent=2)
+
+        # Check if project exists (for non-default projects)
+        if project_name != 'default':
+            # Use adapter's pool instead of creating new connection
+            conn = adapter.pool.getconn()
+            try:
+                cur = conn.cursor()
+
+                # Check if schema exists
+                cur.execute("""
+                    SELECT schema_name
+                    FROM information_schema.schemata
+                    WHERE schema_name = %s
+                """, (safe_name,))
+
+                schema_exists = cur.fetchone() is not None
+            finally:
+                adapter.pool.putconn(conn)
+
+            if not schema_exists:
+                # Get available projects for suggestion
+                session_store_temp = PostgreSQLSessionStore(adapter.pool)
+                projects = session_store_temp.get_projects_with_stats()
+                project_names = [p['project_name'] for p in projects]
+
+                return json.dumps({
+                    "success": False,
+                    "error": f"Project '{project_name}' doesn't exist",
+                    "available_projects": project_names,
+                    "suggestion": f"Create it first: create_project('{project_name}')"
+                }, indent=2)
+
+        # Update session with selected project
+        conn = adapter.pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE mcp_sessions
+                    SET project_name = %s
+                    WHERE session_id = %s
+                """, (safe_name, session_id))
+                conn.commit()
+        finally:
+            adapter.pool.putconn(conn)
+
+        # Switch active project globally
+        _set_active_project(safe_name)
+
+        # Load previous handover for this project
+        try:
+            handover_result = await get_last_handover(project=safe_name)
+
+            # Parse handover result (it's JSON string)
+            handover_data = json.loads(handover_result)
+
+            if handover_data.get('handover'):
+                handover_summary = handover_data['handover']
+                work_done = handover_summary.get('work_done', [])
+                next_steps = handover_summary.get('next_steps', [])
+
+                result = f"✅ Project '{safe_name}' selected\n\n"
+                result += "📦 Previous Session Handover:\n"
+                result += "─" * 50 + "\n"
+
+                if work_done:
+                    result += "\nWork Done:\n"
+                    for item in work_done[:5]:  # Show max 5 items
+                        result += f"  • {item}\n"
+
+                if next_steps:
+                    result += "\nNext Steps:\n"
+                    for item in next_steps[:3]:
+                        result += f"  • {item}\n"
+
+                result += "\n" + "─" * 50 + "\n"
+                result += "\nYou can now continue your work."
+
+                return result
+            else:
+                # No previous handover
+                return f"""✅ Project '{safe_name}' selected
+
+This is a new session for this project (no previous handover found).
+
+You can now use other tools."""
+
+        except Exception as handover_error:
+            # No handover found or error loading it
+            return f"""✅ Project '{safe_name}' selected
+
+No previous session handover found. This may be:
+- Your first session in this project
+- Previous session had no activity
+- Handover not yet created
+
+You can now use other tools."""
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Failed to select project: {str(e)}"
+        }, indent=2)
+
+
 # ============================================================================
 # SESSION MANAGEMENT (unchanged from before)
 # ============================================================================
