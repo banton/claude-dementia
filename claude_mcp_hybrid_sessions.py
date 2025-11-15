@@ -2301,6 +2301,9 @@ async def list_projects() -> str:
                 })
             except Exception as e:
                 # Schema might not have tables yet
+                # IMPORTANT: Rollback the failed transaction to allow subsequent queries
+                conn.rollback()
+
                 # Log the actual error for debugging
                 import sys
                 print(f"⚠️  list_projects: Failed to query schema '{schema}': {type(e).__name__}: {e}", file=sys.stderr)
