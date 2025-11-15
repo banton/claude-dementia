@@ -2581,7 +2581,7 @@ async def select_project_for_session(project_name: str) -> str:
 
             if not schema_exists:
                 # Get available projects for suggestion
-                session_store_temp = PostgreSQLSessionStore(adapter.pool)
+                session_store_temp = PostgreSQLSessionStore(adapter)
                 projects = session_store_temp.get_projects_with_stats()
                 project_names = [p['project_name'] for p in projects]
 
