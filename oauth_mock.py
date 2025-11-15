@@ -27,6 +27,17 @@ from starlette.requests import Request
 BASE_URL = os.getenv('BASE_URL', os.getenv('APP_URL', 'https://dementia-mcp-7f4vf.ondigitalocean.app'))
 STATIC_TOKEN = os.getenv('DEMENTIA_API_KEY', 'wWKYw3FTk_IhCCVwwmKopF7RTvGn8yDEFobOyEXZOHU')
 
+# OAuth Client Credentials (REQUIRED for security)
+OAUTH_CLIENT_ID = os.getenv('OAUTH_CLIENT_ID')
+OAUTH_CLIENT_SECRET = os.getenv('OAUTH_CLIENT_SECRET')
+
+if not OAUTH_CLIENT_ID or not OAUTH_CLIENT_SECRET:
+    raise ValueError(
+        "OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET must be set in environment. "
+        "Generate with: python3 -c 'import secrets; print(f\"OAUTH_CLIENT_ID=dementia-{secrets.token_urlsafe(16)}\"); "
+        "print(f\"OAUTH_CLIENT_SECRET={secrets.token_urlsafe(32)}\")'"
+    )
+
 # In-memory storage for demo (use PostgreSQL for production)
 # For single-user demo, this is fine - it resets on restart
 auth_codes: Dict[str, dict] = {}  # code -> {client_id, redirect_uri, code_challenge, user}
@@ -49,7 +60,7 @@ async def oauth_authorization_server_metadata(request: Request):
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code"],
         "code_challenge_methods_supported": ["S256"],
-        "token_endpoint_auth_methods_supported": ["none"],  # Public client
+        "token_endpoint_auth_methods_supported": ["client_secret_post"],  # Confidential client
         "scopes_supported": ["mcp"],
     })
 
@@ -96,6 +107,13 @@ async def oauth_authorize(request: Request):
             status_code=400
         )
 
+    # Validate client_id (constant-time comparison)
+    if not secrets.compare_digest(client_id, OAUTH_CLIENT_ID):
+        return JSONResponse(
+            {"error": "invalid_client", "error_description": "Invalid client_id"},
+            status_code=401
+        )
+
     if response_type != 'code':
         return JSONResponse(
             {"error": "unsupported_response_type"},
@@ -136,7 +154,7 @@ async def oauth_token(request: Request):
     """
     Token endpoint - exchanges authorization code for access token.
 
-    Validates PKCE and returns our static token as the access token.
+    Validates client credentials, PKCE, and returns our static token as the access token.
     """
     # Parse form data
     form = await request.form()
@@ -146,12 +164,34 @@ async def oauth_token(request: Request):
     redirect_uri = form.get('redirect_uri')
     code_verifier = form.get('code_verifier')
     client_id = form.get('client_id')
+    client_secret = form.get('client_secret')
 
     # Validate grant type
     if grant_type != 'authorization_code':
         return JSONResponse(
             {"error": "unsupported_grant_type"},
             status_code=400
+        )
+
+    # Validate client credentials (REQUIRED for security)
+    if not client_id or not client_secret:
+        return JSONResponse(
+            {"error": "invalid_request", "error_description": "Missing client credentials"},
+            status_code=400
+        )
+
+    # Validate client_id (constant-time comparison)
+    if not secrets.compare_digest(client_id, OAUTH_CLIENT_ID):
+        return JSONResponse(
+            {"error": "invalid_client", "error_description": "Invalid client_id"},
+            status_code=401
+        )
+
+    # Validate client_secret (constant-time comparison)
+    if not secrets.compare_digest(client_secret, OAUTH_CLIENT_SECRET):
+        return JSONResponse(
+            {"error": "invalid_client", "error_description": "Invalid client_secret"},
+            status_code=401
         )
 
     # Validate authorization code exists
