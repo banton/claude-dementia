@@ -148,9 +148,11 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                     logger.info(f"Allowing GET request for pending session: {session_id[:8]}")
                     return await call_next(request)
 
-                # Allow JSON-RPC tools/list method
-                if method == 'tools/list':
-                    logger.debug(f"Allowing tools/list for pending session: {session_id[:8]}")
+                # Allow all MCP discovery methods (needed for client initialization)
+                # These are required for the MCP client to discover capabilities
+                discovery_methods = ['tools/list', 'resources/list', 'prompts/list']
+                if method in discovery_methods:
+                    logger.info(f"Allowing discovery method '{method}' for pending session: {session_id[:8]}")
                     return await call_next(request)
 
                 # Allow MCP protocol notifications (needed for client initialization)
