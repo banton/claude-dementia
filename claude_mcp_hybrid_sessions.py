@@ -2563,8 +2563,8 @@ async def select_project_for_session(project_name: str) -> str:
 
         # Check if project exists (for non-default projects)
         if project_name != 'default':
-            # Use adapter's pool instead of creating new connection
-            conn = adapter.pool.getconn()
+            # Use adapter's get_connection() method
+            conn = adapter.get_connection()
             try:
                 cur = conn.cursor()
 
@@ -2577,7 +2577,7 @@ async def select_project_for_session(project_name: str) -> str:
 
                 schema_exists = cur.fetchone() is not None
             finally:
-                adapter.pool.putconn(conn)
+                conn.close()
 
             if not schema_exists:
                 # Get available projects for suggestion
