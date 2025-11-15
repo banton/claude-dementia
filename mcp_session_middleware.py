@@ -163,16 +163,20 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                 # Allow project selection tools (needed to choose a project!)
                 project_selection_tools = ['select_project_for_session', 'list_projects', 'get_project_info']
                 if method == 'tools/call' and tool_name in project_selection_tools:
-                    logger.info(f"Allowing project selection tool '{tool_name}' for pending session: {session_id[:8]}")
+                    logger.info(f"🔵 STEP 1: Allowing project selection tool '{tool_name}' for pending session: {session_id[:8]}")
 
                     # Set session context for tool to access
                     try:
                         from claude_mcp_hybrid_sessions import config
                         config._current_session_id = session_id
+                        logger.info(f"🔵 STEP 2: Session context set for {session_id[:8]}")
                     except Exception as e:
-                        logger.warning(f"Failed to set session context: {e}")
+                        logger.warning(f"🔴 STEP 2 FAILED: Failed to set session context: {e}")
 
-                    return await call_next(request)
+                    logger.info(f"🔵 STEP 3: Passing request to FastMCP for tool '{tool_name}'")
+                    response = await call_next(request)
+                    logger.info(f"🔵 STEP 6: Response received from FastMCP, status: {response.status_code}")
+                    return response
 
                 # Any other tool - require project selection first
                 logger.info(f"Project selection required for session: {session_id[:8]}")

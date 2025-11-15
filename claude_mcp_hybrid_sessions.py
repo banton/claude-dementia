@@ -2529,11 +2529,15 @@ async def select_project_for_session(project_name: str) -> str:
     import re
     from mcp_session_store import PostgreSQLSessionStore
 
+    logger.info(f"🔵 STEP 4: select_project_for_session ENTERED with project_name='{project_name}'")
+
     try:
         # Get current session ID (from context - will be set by middleware)
         session_id = getattr(config, '_current_session_id', None)
+        logger.info(f"🔵 STEP 4a: Got session_id from config: {session_id[:8] if session_id else 'NONE'}")
 
         if not session_id:
+            logger.error(f"🔴 STEP 4a FAILED: No session_id in config")
             return json.dumps({
                 "success": False,
                 "error": "No active session found. This should not happen."
@@ -2542,10 +2546,12 @@ async def select_project_for_session(project_name: str) -> str:
         # Sanitize project name
         safe_name = re.sub(r'[^a-z0-9]', '_', project_name.lower())
         safe_name = re.sub(r'_+', '_', safe_name).strip('_')[:32]
+        logger.info(f"🔵 STEP 4b: Sanitized project name: '{project_name}' → '{safe_name}'")
 
         # Get database adapter
         adapter = _get_db_adapter()
         session_store = PostgreSQLSessionStore(adapter.pool)
+        logger.info(f"🔵 STEP 4c: Got database adapter and session store")
 
         # Get current session
         session = session_store.get_session(session_id)
@@ -2642,7 +2648,8 @@ You can now use other tools."""
 
         except Exception as handover_error:
             # No handover found or error loading it
-            return f"""✅ Project '{safe_name}' selected
+            logger.info(f"🔵 STEP 5: Handover load failed (not critical): {handover_error}")
+            result = f"""✅ Project '{safe_name}' selected
 
 No previous session handover found. This may be:
 - Your first session in this project
@@ -2650,8 +2657,11 @@ No previous session handover found. This may be:
 - Handover not yet created
 
 You can now use other tools."""
+            logger.info(f"🔵 STEP 5a: Returning success response (no handover)")
+            return result
 
     except Exception as e:
+        logger.error(f"🔴 STEP 4 EXCEPTION: {str(e)}", exc_info=True)
         return json.dumps({
             "success": False,
             "error": f"Failed to select project: {str(e)}"
