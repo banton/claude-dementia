@@ -233,7 +233,7 @@ async def session_health_endpoint(request: Request):
     """Session health check endpoint (authenticated)."""
     try:
         # Get database adapter and session store
-        from claude_mcp_hybrid import _get_db_adapter
+        from claude_mcp_hybrid_sessions import _get_db_adapter
         adapter = _get_db_adapter()
 
         # Quick database connectivity test using adapter.get_connection()
@@ -411,7 +411,7 @@ app = mcp.streamable_http_app()
 # Eagerly initialize database at module load to prevent first-request timeout
 # Neon database may be suspended and take 10-15s to wake up
 # This ensures the connection pool is ready before serving requests
-from claude_mcp_hybrid import _get_db_adapter
+from claude_mcp_hybrid_sessions import _get_db_adapter
 adapter = None  # Initialize to None in case initialization fails
 try:
     logger.info("database_initialization_start")
