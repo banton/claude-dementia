@@ -136,9 +136,15 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
 
             # Check if project selection is pending
             if pg_session.get('project_name') == '__PENDING__':
-                # Check if this is the select_project_for_session tool call
+                # Check if this is a tools/list request or select_project_for_session call
                 tool_name = body.get('params', {}).get('name', '')
 
+                # Always allow tools/list so clients can discover select_project_for_session tool
+                if method == 'tools/list':
+                    logger.debug(f"Allowing tools/list for pending session: {session_id[:8]}")
+                    return await call_next(request)
+
+                # Allow select_project_for_session tool call
                 if method == 'tools/call' and tool_name == 'select_project_for_session':
                     # Allow select_project_for_session through
                     logger.debug(f"Allowing select_project_for_session for session: {session_id[:8]}")
