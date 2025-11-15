@@ -2606,7 +2606,7 @@ async def select_project_for_session(project_name: str) -> str:
             conn.close()
 
         # Switch active project globally
-        _set_active_project(safe_name)
+        _active_projects[session_id] = safe_name
 
         # Load previous handover for this project
         try:
