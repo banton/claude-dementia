@@ -167,7 +167,7 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
 
                     # Set session context for tool to access
                     try:
-                        from claude_mcp_hybrid import config
+                        from claude_mcp_hybrid_sessions import config
                         config._current_session_id = session_id
                     except Exception as e:
                         logger.warning(f"Failed to set session context: {e}")
@@ -277,7 +277,7 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
 
             # Set session context for tools to access
             try:
-                from claude_mcp_hybrid import config
+                from claude_mcp_hybrid_sessions import config
                 config._current_session_id = session_id
                 logger.debug(f"Session context set for tools: {session_id[:8]}")
             except Exception as e:
