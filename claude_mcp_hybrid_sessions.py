@@ -2593,7 +2593,7 @@ async def select_project_for_session(project_name: str) -> str:
                 }, indent=2)
 
         # Update session with selected project
-        conn = adapter.pool.getconn()
+        conn = adapter.get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -2603,7 +2603,7 @@ async def select_project_for_session(project_name: str) -> str:
                 """, (safe_name, session_id))
                 conn.commit()
         finally:
-            adapter.pool.putconn(conn)
+            conn.close()
 
         # Switch active project globally
         _set_active_project(safe_name)
