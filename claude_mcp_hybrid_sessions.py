@@ -2599,19 +2599,28 @@ async def select_project_for_session(project_name: str) -> str:
                 }, indent=2)
 
         # Update session with selected project
+        logger.info(f"🔵 STEP 4d: About to UPDATE mcp_sessions for session {session_id[:8]}, project: '{safe_name}'")
         conn = adapter.get_connection()
         try:
             with conn.cursor() as cur:
+                logger.info(f"🔵 STEP 4e: Executing UPDATE statement...")
                 cur.execute("""
                     UPDATE mcp_sessions
                     SET project_name = %s
                     WHERE session_id = %s
                 """, (safe_name, session_id))
+                logger.info(f"🔵 STEP 4f: UPDATE executed, rowcount={cur.rowcount}, committing...")
                 conn.commit()
+                logger.info(f"🔵 STEP 4g: Commit completed successfully")
+        except Exception as update_error:
+            logger.error(f"🔴 STEP 4 UPDATE EXCEPTION: {type(update_error).__name__}: {update_error}")
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
         # Switch active project globally
+        logger.info(f"🔵 STEP 4h: Setting _active_projects[{session_id[:8]}] = '{safe_name}'")
         _active_projects[session_id] = safe_name
 
         # Load previous handover for this project
@@ -2643,9 +2652,11 @@ async def select_project_for_session(project_name: str) -> str:
                 result += "\n" + "─" * 50 + "\n"
                 result += "\nYou can now continue your work."
 
+                logger.info(f"🔵 STEP 5: Returning success with handover summary")
                 return result
             else:
                 # No previous handover
+                logger.info(f"🔵 STEP 5: No handover found, returning success")
                 return f"""✅ Project '{safe_name}' selected
 
 This is a new session for this project (no previous handover found).
