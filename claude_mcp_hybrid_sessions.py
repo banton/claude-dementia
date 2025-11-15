@@ -2299,14 +2299,17 @@ async def list_projects() -> str:
                     "contexts": contexts,
                     "memories": memories
                 })
-            except:
+            except Exception as e:
                 # Schema might not have tables yet
+                # Log the actual error for debugging
+                import sys
+                print(f"⚠️  list_projects: Failed to query schema '{schema}': {type(e).__name__}: {e}", file=sys.stderr)
                 projects.append({
                     "name": schema,
                     "sessions": 0,
                     "contexts": 0,
                     "memories": 0,
-                    "note": "Schema exists but not initialized"
+                    "note": f"Schema exists but not initialized ({type(e).__name__})"
                 })
 
         conn.close()
