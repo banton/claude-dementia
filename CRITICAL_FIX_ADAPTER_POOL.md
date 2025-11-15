@@ -1,16 +1,16 @@
 # CRITICAL FIX: Database Adapter Initialization Bug
 
-## Date: Nov 15, 2025, 18:15 UTC
-## Deployment: 41ef092d (BUILDING)
-## Commit: f21b393
+## Date: Nov 15, 2025, 18:25 UTC
+## Deployment: 995d6f7a (BUILDING)
+## Commits: f21b393, 821b143, d21013f
 
 ## Summary
 
-Fixed the root cause of the "5% working" production instability. The breadcrumb logging successfully identified a **single-character bug** that caused 80% of `select_project_for_session` calls to fail.
+Fixed the root cause of the "5% working" production instability. The breadcrumb logging successfully identified **THREE critical bugs** in database adapter usage that caused 80% of `select_project_for_session` calls to fail.
 
-## The Bug
+## The Bugs
 
-**File:** `claude_mcp_hybrid_sessions.py:2553`
+### Bug 1: Wrong parameter to PostgreSQLSessionStore (Line 2553)
 
 **Before (WRONG):**
 ```python
@@ -20,6 +20,38 @@ session_store = PostgreSQLSessionStore(adapter.pool)
 **After (CORRECT):**
 ```python
 session_store = PostgreSQLSessionStore(adapter)
+```
+
+### Bug 2: Second instance of same bug (Line 2584)
+
+**Before (WRONG):**
+```python
+session_store_temp = PostgreSQLSessionStore(adapter.pool)
+```
+
+**After (CORRECT):**
+```python
+session_store_temp = PostgreSQLSessionStore(adapter)
+```
+
+### Bug 3: Direct pool access when pool is None (Lines 2567, 2580)
+
+**Before (WRONG):**
+```python
+conn = adapter.pool.getconn()
+try:
+    # ... do work ...
+finally:
+    adapter.pool.putconn(conn)
+```
+
+**After (CORRECT):**
+```python
+conn = adapter.get_connection()
+try:
+    # ... do work ...
+finally:
+    conn.close()
 ```
 
 ## Root Cause
@@ -93,8 +125,10 @@ This proved:
 
 ## Commits
 
-1. `fd960ea` - Added breadcrumb logging
-2. `f21b393` - Fixed adapter initialization bug
+1. `fd960ea` - Added breadcrumb logging (STEP markers)
+2. `f21b393` - Fixed Bug 1: PostgreSQLSessionStore(adapter.pool) → PostgreSQLSessionStore(adapter) line 2553
+3. `821b143` - Fixed Bug 2: PostgreSQLSessionStore(adapter.pool) → PostgreSQLSessionStore(adapter) line 2584
+4. `d21013f` - Fixed Bug 3: adapter.pool.getconn() → adapter.get_connection() lines 2567, 2580
 
 ## Lessons Learned
 
