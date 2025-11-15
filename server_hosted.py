@@ -408,7 +408,7 @@ app.add_middleware(CorrelationIdMiddleware)              # Innermost - adds corr
 app.add_middleware(BearerAuthMiddleware)                 # Auth check
 if adapter is not None:
     app.add_middleware(MCPSessionPersistenceMiddleware,  # Persist sessions in PostgreSQL
-                       db_pool=adapter.pool)             # Pass database pool
+                       db_pool=adapter)                  # Pass database adapter (not pool)
 app.add_middleware(MCPRequestLoggingMiddleware)          # Log /mcp requests/responses
 app.add_middleware(TimeoutMiddleware)                    # Outermost - catch timeouts
 
