@@ -706,6 +706,14 @@ def get_current_session_id() -> str:
     if hasattr(sys.modules[__name__], 'SESSION_ID') and SESSION_ID:
         return SESSION_ID
 
+    # ✅ PRODUCTION: Check if middleware set the session ID (MCP protocol sessions)
+    # This allows production cloud deployments to use MCP sessions from middleware
+    session_id_from_middleware = getattr(config, '_current_session_id', None)
+    if session_id_from_middleware:
+        return session_id_from_middleware
+
+    # ✅ LOCAL TESTING: Fall back to filesystem-based project detection
+    # This allows local npx testing to auto-create project-based sessions
     # ✅ FIX: Use context manager to ensure connection is closed
     with get_db() as conn:
         # CRITICAL: Use dynamic project detection for proper isolation in long-running MCP servers
