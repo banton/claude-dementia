@@ -2550,7 +2550,7 @@ async def select_project_for_session(project_name: str) -> str:
 
         # Get database adapter
         adapter = _get_db_adapter()
-        session_store = PostgreSQLSessionStore(adapter.pool)
+        session_store = PostgreSQLSessionStore(adapter)
         logger.info(f"🔵 STEP 4c: Got database adapter and session store")
 
         # Get current session
