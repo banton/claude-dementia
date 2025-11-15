@@ -140,9 +140,15 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                 tool_name = body.get('params', {}).get('name', '')
 
                 # Log the method being called for debugging
-                logger.info(f"Pending session {session_id[:8]} - method: '{method}', tool_name: '{tool_name}'")
+                logger.info(f"Pending session {session_id[:8]} - method: '{method}', tool_name: '{tool_name}', http_method: {request.method}")
 
-                # Always allow tools/list so clients can discover select_project_for_session tool
+                # For StreamableHTTP, tools/list is likely a GET request, not JSON-RPC
+                # Allow GET requests through so Claude.ai can discover tools
+                if request.method == 'GET':
+                    logger.info(f"Allowing GET request for pending session: {session_id[:8]}")
+                    return await call_next(request)
+
+                # Allow JSON-RPC tools/list method
                 if method == 'tools/list':
                     logger.debug(f"Allowing tools/list for pending session: {session_id[:8]}")
                     return await call_next(request)
