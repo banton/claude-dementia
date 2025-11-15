@@ -28,8 +28,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from contextlib import asynccontextmanager
 
-# Import existing MCP server
-from claude_mcp_hybrid import mcp
+# Import existing MCP server (LATEST version with session management)
+from claude_mcp_hybrid_sessions import mcp
 
 # Import session persistence
 from mcp_session_middleware import MCPSessionPersistenceMiddleware
