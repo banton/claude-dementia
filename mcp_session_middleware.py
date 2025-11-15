@@ -139,6 +139,9 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                 # Check if this is a tools/list request or select_project_for_session call
                 tool_name = body.get('params', {}).get('name', '')
 
+                # Log the method being called for debugging
+                logger.info(f"Pending session {session_id[:8]} - method: '{method}', tool_name: '{tool_name}'")
+
                 # Always allow tools/list so clients can discover select_project_for_session tool
                 if method == 'tools/list':
                     logger.debug(f"Allowing tools/list for pending session: {session_id[:8]}")
