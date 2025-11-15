@@ -160,10 +160,10 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                     logger.info(f"Allowing notification '{method}' for pending session: {session_id[:8]}")
                     return await call_next(request)
 
-                # Allow select_project_for_session tool call
-                if method == 'tools/call' and tool_name == 'select_project_for_session':
-                    # Allow select_project_for_session through
-                    logger.debug(f"Allowing select_project_for_session for session: {session_id[:8]}")
+                # Allow project selection tools (needed to choose a project!)
+                project_selection_tools = ['select_project_for_session', 'list_projects', 'get_project_info']
+                if method == 'tools/call' and tool_name in project_selection_tools:
+                    logger.info(f"Allowing project selection tool '{tool_name}' for pending session: {session_id[:8]}")
 
                     # Set session context for tool to access
                     try:
