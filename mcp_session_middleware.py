@@ -153,6 +153,11 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                     logger.debug(f"Allowing tools/list for pending session: {session_id[:8]}")
                     return await call_next(request)
 
+                # Allow MCP protocol notifications (needed for client initialization)
+                if method.startswith('notifications/'):
+                    logger.info(f"Allowing notification '{method}' for pending session: {session_id[:8]}")
+                    return await call_next(request)
+
                 # Allow select_project_for_session tool call
                 if method == 'tools/call' and tool_name == 'select_project_for_session':
                     # Allow select_project_for_session through
