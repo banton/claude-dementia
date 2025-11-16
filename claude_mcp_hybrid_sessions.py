@@ -6381,12 +6381,12 @@ async def explore_context_tree(flat: bool = True, confirm_full: bool = False, pr
         # Get all contexts with previews (not full content - RLM optimization!)
         # Flat mode: alphabetical order, Tree mode: most recent first
         order_clause = "ORDER BY label" if flat else "ORDER BY locked_at DESC"
+        # NOTE: No session_id filter needed - schema isolation provides project-level isolation
         cursor = conn.execute(f"""
             SELECT label, version, preview, key_concepts, metadata, locked_at
             FROM context_locks
-            WHERE session_id = ?
             {order_clause}
-        """, (session_id,))
+        """)
 
         contexts = cursor.fetchall()
 
@@ -6527,6 +6527,7 @@ async def context_dashboard(project: Optional[str] = None) -> str:
         session_id = _get_session_id_for_project(conn, project)
 
         # Get comprehensive statistics
+        # NOTE: No session_id filter needed - schema isolation provides project-level isolation
         stats_query = """
             SELECT
                 (metadata::json)->>'priority' as priority,
@@ -6534,11 +6535,10 @@ async def context_dashboard(project: Optional[str] = None) -> str:
                 SUM(LENGTH(content)) as total_size,
                 AVG(LENGTH(content)) as avg_size
             FROM context_locks
-            WHERE session_id = ?
             GROUP BY priority
         """
 
-        cursor = conn.execute(stats_query, (session_id,))
+        cursor = conn.execute(stats_query)
         priority_stats = {}
         total_contexts = 0
         total_size = 0
@@ -6554,22 +6554,21 @@ async def context_dashboard(project: Optional[str] = None) -> str:
             total_size += row['total_size']
 
         # Get access patterns
+        # NOTE: No session_id filter needed - schema isolation provides project-level isolation
         most_accessed = conn.execute("""
             SELECT label, access_count, last_accessed
             FROM context_locks
-            WHERE session_id = ?
             ORDER BY access_count DESC
             LIMIT 5
-        """, (session_id,)).fetchall()
+        """).fetchall()
 
         least_accessed = conn.execute("""
             SELECT label, access_count, last_accessed
             FROM context_locks
-            WHERE session_id = ?
-              AND access_count > 0
+            WHERE access_count > 0
             ORDER BY access_count ASC
             LIMIT 5
-        """, (session_id,)).fetchall()
+        """).fetchall()
 
         # Find stale contexts (30+ days)
         import time
@@ -6577,11 +6576,10 @@ async def context_dashboard(project: Optional[str] = None) -> str:
         stale_contexts = conn.execute("""
             SELECT label, last_accessed, access_count
             FROM context_locks
-            WHERE session_id = ?
-              AND (last_accessed < ? OR last_accessed IS NULL)
+            WHERE (last_accessed < ? OR last_accessed IS NULL)
             ORDER BY last_accessed ASC
             LIMIT 5
-        """, (session_id, thirty_days_ago)).fetchall()
+        """, (thirty_days_ago,)).fetchall()
 
         # Get version statistics
         version_stats = conn.execute("""
@@ -6590,12 +6588,11 @@ async def context_dashboard(project: Optional[str] = None) -> str:
                 COUNT(*) as version_count,
                 MAX(version) as latest_version
             FROM context_locks
-            WHERE session_id = ?
             GROUP BY label
             HAVING COUNT(*) > 1
             ORDER BY COUNT(*) DESC
             LIMIT 5
-        """, (session_id,)).fetchall()
+        """).fetchall()
 
     # Build summary
     summary_text = f"""
