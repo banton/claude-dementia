@@ -3289,6 +3289,10 @@ async def get_last_handover(project: Optional[str] = None) -> str:
     **Token efficiency:** Returns full handover (~2-5KB). Use only when needed.
     wake_up() only shows availability - use this tool to get full details.
 
+    **Two-path logic:**
+    - **Current handover**: If active session (< 120 min idle), returns session_summary
+    - **Packaged handover**: If no active session or idle > 120 min, returns compacted data
+
     Args:
         project: Project name (default: auto-detect or active project)
 
@@ -3305,7 +3309,57 @@ async def get_last_handover(project: Optional[str] = None) -> str:
     if project_check:
         return project_check
 
+    # Get current session ID
+    session_id = get_current_session_id()
+
     with _get_db_for_project(project) as conn:
+        # PATH 1: Check for active session's current handover
+        # Query mcp_sessions for session_summary and last_active
+        cursor = conn.execute("""
+            SELECT session_summary, last_active, created_at
+            FROM mcp_sessions
+            WHERE session_id = ?
+        """, (session_id,))
+
+        active_session = cursor.fetchone()
+
+        if active_session:
+            # Check if session is active (< 120 minutes idle)
+            now = time.time()
+            last_active_ts = active_session['last_active']
+
+            # Handle datetime to timestamp conversion
+            if isinstance(last_active_ts, (datetime,)):
+                last_active_ts = last_active_ts.timestamp()
+
+            inactive_seconds = now - last_active_ts
+
+            # If session active within 120 minutes, return current handover
+            if inactive_seconds < 7200:  # 120 minutes = 7200 seconds
+                session_summary = active_session['session_summary']
+
+                # Parse session_summary if it's a string (shouldn't be with JSONB, but handle it)
+                if isinstance(session_summary, str):
+                    session_summary = json.loads(session_summary)
+
+                # Calculate hours since session creation
+                created_at_ts = active_session['created_at']
+                if isinstance(created_at_ts, (datetime,)):
+                    created_at_ts = created_at_ts.timestamp()
+
+                hours_ago = (now - created_at_ts) / 3600
+
+                return json.dumps({
+                    "available": True,
+                    "timestamp": created_at_ts,
+                    "hours_ago": round(hours_ago, 1),
+                    "content": session_summary,
+                    "status": "current",  # Indicate this is current session
+                    "session_id": session_id[:8]  # First 8 chars for logging
+                }, indent=2)
+
+        # PATH 2: No active session or session idle > 120 min
+        # Fall back to packaged handover from memory_entries
         cursor = conn.execute("""
             SELECT content, metadata, timestamp FROM memory_entries
             WHERE category = 'handover'
@@ -3325,7 +3379,8 @@ async def get_last_handover(project: Optional[str] = None) -> str:
                 "available": True,
                 "timestamp": handover['timestamp'],
                 "hours_ago": round(hours_ago, 1),
-                "content": handover_data
+                "content": handover_data,
+                "status": "packaged"  # Indicate this is packaged handover
             }, indent=2)
         except Exception as e:
             return json.dumps({
