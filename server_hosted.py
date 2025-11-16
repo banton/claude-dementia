@@ -63,43 +63,11 @@ configure_logging(environment=ENVIRONMENT, log_level=LOG_LEVEL)
 logger = get_logger(__name__)
 
 # ============================================================================
-# SSE CRASH SUPPRESSION MIDDLEWARE
+# SSE CRASH SUPPRESSION - DEPRECATED
 # ============================================================================
-
-class SSECrashSuppressionMiddleware(BaseHTTPMiddleware):
-    """
-    Suppress SSE crashes from concurrent DELETE + POST requests.
-
-    Claude.ai sends DELETE /mcp to close sessions, then immediately sends
-    new POST requests. This causes ClosedResourceError/BrokenResourceError
-    when FastMCP tries to write to the already-closed SSE stream.
-
-    This middleware catches these exceptions and returns 503 instead of crashing.
-    """
-
-    async def dispatch(self, request, call_next):
-        try:
-            response = await call_next(request)
-            return response
-        except (anyio.ClosedResourceError, anyio.BrokenResourceError) as e:
-            # Claude.ai sent DELETE while request was processing
-            # Return 503 with retry hint instead of crashing
-            logger.warning("sse_concurrent_delete",
-                          method=request.method,
-                          path=request.url.path,
-                          error=str(e),
-                          error_type=type(e).__name__,
-                          correlation_id=getattr(request.state, 'correlation_id', 'unknown'))
-
-            # Return 503 Service Unavailable with Retry-After header
-            return JSONResponse(
-                status_code=503,
-                headers={"Retry-After": "1"},  # Retry after 1 second
-                content={
-                    "detail": "Session closed during request, please retry",
-                    "error": "SSE_STREAM_CLOSED"
-                }
-            )
+# NOTE: Middleware approach doesn't work - exceptions happen inside async
+# generators and don't propagate to middleware layer. Using graceful DELETE
+# handler instead (graceful_mcp_delete with 2s wait period).
 
 # ============================================================================
 # AUTHENTICATION MIDDLEWARE
@@ -260,6 +228,32 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
 # ============================================================================
 # CUSTOM ROUTES
 # ============================================================================
+
+async def graceful_mcp_delete(request: Request):
+    """
+    Gracefully close MCP session with pending request draining.
+
+    Claude.ai sends DELETE /mcp to close sessions, then immediately sends new
+    POST requests. This causes ClosedResourceError if we close SSE streams immediately.
+
+    Solution: Wait 2 seconds before closing to allow pending requests to complete.
+    """
+    session_id = request.headers.get('mcp-session-id', 'unknown')
+    correlation_id = getattr(request.state, 'correlation_id', 'unknown')
+
+    logger.info("graceful_session_close_start",
+                session_id=session_id,
+                correlation_id=correlation_id)
+
+    # Wait 2 seconds for pending requests to complete
+    # Claude.ai typically waits 1-2s between DELETE and new POST
+    await asyncio.sleep(2)
+
+    logger.info("graceful_session_close_complete",
+                session_id=session_id,
+                correlation_id=correlation_id)
+
+    return JSONResponse(status_code=204)  # No Content
 
 async def health_check(request: Request):
     """Health check for DigitalOcean (unauthenticated)."""
@@ -470,12 +464,17 @@ app.routes.insert(2, Route('/tools', list_tools_endpoint, methods=['GET']))
 app.routes.insert(3, Route('/execute', execute_tool_endpoint, methods=['POST']))
 app.routes.insert(4, Route('/metrics', metrics_endpoint, methods=['GET']))
 
+# Replace FastMCP's default DELETE /mcp handler with graceful version
+# Find and remove existing DELETE route, then add our custom one
+app.routes = [r for r in app.routes if not (r.path == '/mcp' and 'DELETE' in r.methods)]
+app.routes.insert(5, Route('/mcp', graceful_mcp_delete, methods=['DELETE']))
+
 # Add OAuth routes for Claude.ai compatibility (unauthenticated - public OAuth flow)
 for idx, route in enumerate(OAUTH_ROUTES):
     app.routes.insert(5 + idx, route)
 
 # Add middleware (order matters - last added runs first in Starlette)
-# Execution order: SSE -> Timeout -> RequestLogging -> SessionPersistence -> Auth -> CorrelationID -> Handler
+# Execution order: Timeout -> RequestLogging -> SessionPersistence -> Auth -> CorrelationID -> Handler
 app.add_middleware(CorrelationIdMiddleware)              # Innermost - adds correlation ID
 app.add_middleware(BearerAuthMiddleware)                 # Auth check
 if adapter is not None:
@@ -483,7 +482,7 @@ if adapter is not None:
                        db_pool=adapter)                  # Pass database adapter (not pool)
 app.add_middleware(MCPRequestLoggingMiddleware)          # Log /mcp requests/responses
 app.add_middleware(TimeoutMiddleware)                    # Catch timeouts
-app.add_middleware(SSECrashSuppressionMiddleware)        # Outermost - suppress SSE crashes
+# NOTE: SSE crash suppression now handled by graceful DELETE handler, not middleware
 
 logger.info("app_initialized",
             version=VERSION,
