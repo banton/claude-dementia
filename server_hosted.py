@@ -18,6 +18,7 @@ import time
 import asyncio
 import traceback
 import secrets
+import anyio  # For ClosedResourceError, BrokenResourceError
 from datetime import datetime, timezone
 from typing import Dict, Any
 
@@ -60,6 +61,45 @@ VERSION = "4.3.0"
 # Configure structured logging
 configure_logging(environment=ENVIRONMENT, log_level=LOG_LEVEL)
 logger = get_logger(__name__)
+
+# ============================================================================
+# SSE CRASH SUPPRESSION MIDDLEWARE
+# ============================================================================
+
+class SSECrashSuppressionMiddleware(BaseHTTPMiddleware):
+    """
+    Suppress SSE crashes from concurrent DELETE + POST requests.
+
+    Claude.ai sends DELETE /mcp to close sessions, then immediately sends
+    new POST requests. This causes ClosedResourceError/BrokenResourceError
+    when FastMCP tries to write to the already-closed SSE stream.
+
+    This middleware catches these exceptions and returns 503 instead of crashing.
+    """
+
+    async def dispatch(self, request, call_next):
+        try:
+            response = await call_next(request)
+            return response
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError) as e:
+            # Claude.ai sent DELETE while request was processing
+            # Return 503 with retry hint instead of crashing
+            logger.warning("sse_concurrent_delete",
+                          method=request.method,
+                          path=request.url.path,
+                          error=str(e),
+                          error_type=type(e).__name__,
+                          correlation_id=getattr(request.state, 'correlation_id', 'unknown'))
+
+            # Return 503 Service Unavailable with Retry-After header
+            return JSONResponse(
+                status_code=503,
+                headers={"Retry-After": "1"},  # Retry after 1 second
+                content={
+                    "detail": "Session closed during request, please retry",
+                    "error": "SSE_STREAM_CLOSED"
+                }
+            )
 
 # ============================================================================
 # AUTHENTICATION MIDDLEWARE
@@ -435,14 +475,15 @@ for idx, route in enumerate(OAUTH_ROUTES):
     app.routes.insert(5 + idx, route)
 
 # Add middleware (order matters - last added runs first in Starlette)
-# Execution order: Timeout -> RequestLogging -> SessionPersistence -> Auth -> CorrelationID -> Handler
+# Execution order: SSE -> Timeout -> RequestLogging -> SessionPersistence -> Auth -> CorrelationID -> Handler
 app.add_middleware(CorrelationIdMiddleware)              # Innermost - adds correlation ID
 app.add_middleware(BearerAuthMiddleware)                 # Auth check
 if adapter is not None:
     app.add_middleware(MCPSessionPersistenceMiddleware,  # Persist sessions in PostgreSQL
                        db_pool=adapter)                  # Pass database adapter (not pool)
 app.add_middleware(MCPRequestLoggingMiddleware)          # Log /mcp requests/responses
-app.add_middleware(TimeoutMiddleware)                    # Outermost - catch timeouts
+app.add_middleware(TimeoutMiddleware)                    # Catch timeouts
+app.add_middleware(SSECrashSuppressionMiddleware)        # Outermost - suppress SSE crashes
 
 logger.info("app_initialized",
             version=VERSION,
