@@ -7,7 +7,14 @@
       "mcp__filesystem__write_file",
       "Bash(__NEW_LINE__ echo \"🚀 Deploying Bug #8 REAL FIX: Stable Session IDs\")",
       "Bash(__NEW_LINE__ echo \"🚀 Deploying Tool Execution Bug Fix (commit 01f2a03)...\")",
-      "Bash(__NEW_LINE__ echo \"🚀 Deploying Handover Fix (commit 8f67f41)...\")"
+      "Bash(__NEW_LINE__ echo \"🚀 Deploying Handover Fix (commit 8f67f41)...\")",
+      "Bash(__NEW_LINE__ echo \"🚀 Deploying MCP Tool Documentation Fix (commit 016fcdc)\")",
+      "Bash(__NEW_LINE__ echo \"🚀 Deploying Breadcrumb Trail Integration (commit 0241122)...\")",
+      "Bash(/tmp/watch_all_tests.sh)",
+      "Bash(git cherry-pick:*)",
+      "Bash(git show:*)",
+      "Bash(__NEW_LINE__ echo \"🚀 Deploying Documentation Fixes + Breadcrumb Integration (commit 0241122)...\")",
+      "Bash(__NEW_LINE__ echo \"🚀 Deploying Bug #2 Fix (PROJECT ISOLATION FAILURE)\")"
     ],
     "deny": [],
     "ask": [],

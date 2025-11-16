@@ -4620,21 +4620,21 @@ async def search_contexts(
 
         # Fall back to keyword search
         # Build SQL query
+        # NOTE: No session_id filter needed - schema isolation provides project-level isolation
         sql = """
             SELECT
                 label, version, content, preview, key_concepts,
                 locked_at, metadata, last_accessed, access_count
             FROM context_locks
-            WHERE session_id = ?
-              AND (
-                  content LIKE ?
-                  OR preview LIKE ?
-                  OR key_concepts LIKE ?
-                  OR label LIKE ?
-              )
+            WHERE (
+                content LIKE ?
+                OR preview LIKE ?
+                OR key_concepts LIKE ?
+                OR label LIKE ?
+            )
         """
 
-        params = [session_id, f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%']
+        params = [f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%']
 
         # Add priority filter
         if priority:
