@@ -485,8 +485,9 @@ class AutoClosingPostgreSQLConnection:
             raise  # Let context manager __exit__() handle rollback
 
     def cursor(self):
-        """Get cursor from connection"""
-        return self.conn.cursor()
+        """Get cursor from connection with RealDictCursor for dict-like row access"""
+        from psycopg2.extras import RealDictCursor
+        return self.conn.cursor(cursor_factory=RealDictCursor)
 
     def __enter__(self):
         """Context manager entry - return self for 'with' statement"""
@@ -3604,7 +3605,15 @@ async def lock_context(
     - Can be recalled exactly with recall_context(topic)
     - Violations of rules are detected and warned about
 
-    Returns: Confirmation with version number and priority indicator
+    Args:
+        content: The context content to lock (API spec, rules, decisions, etc.)
+        topic: Context label/name for retrieval
+        tags: Comma-separated tags for search (optional)
+        priority: Priority level - always_check/important/reference (optional, auto-detected)
+        project: Project name (default: auto-detect or active project)
+
+    Returns:
+        JSON with confirmation, version number, and priority indicator
     """
     # Check if project selection is required
     project_check = _check_project_selection_required(project)
@@ -3768,8 +3777,11 @@ async def lock_context(
             project_label = f" in project '{target_project}'" if target_project != "default" else ""
             return f"✅ Locked '{topic}' as v{version}{priority_indicator}{project_label}{embedding_status} ({len(content)} chars, hash: {content_hash[:8]})"
 
-        except sqlite3.IntegrityError:
-            return f"❌ Version {version} of '{topic}' already exists"
+        except Exception as e:
+            # Handle duplicate version error (works for both SQLite and PostgreSQL)
+            if 'duplicate key' in str(e).lower() or 'unique constraint' in str(e).lower():
+                return f"❌ Version {version} of '{topic}' already exists"
+            raise
         except Exception as e:
             return f"❌ Failed to lock context: {str(e)}"
 
@@ -4514,6 +4526,7 @@ async def search_contexts(
     - tags: Filter by tags (comma-separated)
     - limit: Max results to return (default: 10)
     - use_semantic: Try semantic search first (default: True)
+    - project: Project name (default: auto-detect or active project)
 
     **Returns:** JSON with matching contexts sorted by relevance/similarity
 
@@ -5076,6 +5089,7 @@ async def query_database(
         params: Optional list of parameters for ? placeholders in query
         format: Output format - "table", "json", "csv", or "markdown"
         db_path: Optional path to SQLite database file (default: dementia memory database)
+        project: Project name (default: auto-detect or active project)
 
     Returns:
         Formatted query results with row count and execution time
@@ -6479,6 +6493,12 @@ async def context_dashboard(project: Optional[str] = None) -> str:
     - Version statistics
 
     Perfect for getting a bird's-eye view of your context library.
+
+    Args:
+        project: Project name (default: auto-detect or active project)
+
+    Returns:
+        JSON with comprehensive context statistics and insights
     """
     # ✅ FIX: Use context manager to ensure connection is closed
     with _get_db_for_project(project) as conn:
