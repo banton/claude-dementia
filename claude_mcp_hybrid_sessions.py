@@ -32,6 +32,19 @@ from mcp.server import FastMCP
 
 # Enhanced scanner removed for v4.0.0-rc1 stable release
 
+# Import breadcrumb trail system
+from tool_breadcrumbs import (
+    breadcrumb,
+    log_breadcrumb,
+    log_validation,
+    log_db_query,
+    log_db_update,
+    log_project_check,
+    log_session_check,
+    log_tool_stage,
+    BreadcrumbMarkers
+)
+
 # Import active context engine
 from active_context_engine import (
     ActiveContextEngine,
@@ -2258,6 +2271,7 @@ async def create_project(name: str) -> str:
         })
 
 
+@breadcrumb
 @mcp.tool()
 async def list_projects() -> str:
     """
@@ -2521,6 +2535,7 @@ async def delete_project(name: str, confirm: bool = False) -> str:
         })
 
 
+@breadcrumb
 @mcp.tool()
 async def select_project_for_session(project_name: str) -> str:
     """
@@ -3278,6 +3293,7 @@ async def sleep(project: Optional[str] = None) -> str:
 #
 #     return "\n".join(output)
 
+@breadcrumb
 @mcp.tool()
 async def get_last_handover(project: Optional[str] = None) -> str:
     """
@@ -3533,6 +3549,7 @@ async def get_query_page(query_id: str, offset: int = 0, limit: int = 20, projec
 # CONTEXT LOCKING (unchanged)
 # ============================================================================
 #
+@breadcrumb
 @mcp.tool()
 async def lock_context(
     content: str,
@@ -3785,6 +3802,7 @@ async def lock_context(
         except Exception as e:
             return f"❌ Failed to lock context: {str(e)}"
 
+@breadcrumb
 @mcp.tool()
 async def recall_context(
     topic: str,
@@ -4506,6 +4524,7 @@ async def batch_recall_contexts(topics: list[str], preview_only: bool = True, pr
 
 
 
+@breadcrumb
 @mcp.tool()
 async def search_contexts(
     query: str,
@@ -5022,6 +5041,7 @@ async def sync_project_memory(
 # DATABASE QUERY TOOLS
 # ============================================================
 
+@breadcrumb
 @mcp.tool()
 async def query_database(
     query: str,
@@ -6278,6 +6298,7 @@ async def check_contexts(text: str, project: Optional[str] = None) -> str:
 
         return "\n".join(output)
 
+@breadcrumb
 @mcp.tool()
 async def explore_context_tree(flat: bool = True, confirm_full: bool = False, project: Optional[str] = None) -> str:
     """
@@ -6477,6 +6498,7 @@ async def explore_context_tree(flat: bool = True, confirm_full: bool = False, pr
 # FILE SEMANTIC MODEL - MCP Tools
 # ============================================================================
 
+@breadcrumb
 @mcp.tool()
 async def context_dashboard(project: Optional[str] = None) -> str:
     """
@@ -8269,6 +8291,7 @@ Cost: FREE (local)
 #    return _get_project_for_context(project)
 #
 
+@breadcrumb
 @mcp.tool()
 async def health_check_and_repair(
     project: Optional[str] = None,

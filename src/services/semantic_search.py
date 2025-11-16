@@ -143,9 +143,9 @@ class SemanticSearch:
 
         results = []
         for row in cursor.fetchall():
-            # Convert binary back to array (unpickle)
-            import pickle
-            context_embedding = pickle.loads(row['embedding'])
+            # Convert binary back to array (PostgreSQL uses tobytes, not pickle)
+            import numpy as np
+            context_embedding = np.frombuffer(row['embedding'], dtype=np.float32)
 
             # Calculate similarity
             similarity = self.embedding_service.cosine_similarity(
