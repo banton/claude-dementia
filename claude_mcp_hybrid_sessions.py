@@ -8238,7 +8238,7 @@ async def health_check_and_repair(
         LLM: health_check_and_repair(auto_fix=True)
     """
     try:
-        project_name = _resolve_project(project)
+        project_name = _get_project_for_context(project)
         db = get_db()
 
         # Parse checks parameter
@@ -8589,7 +8589,7 @@ async def inspect_schema(
         LLM: inspect_schema(table="context_locks")
     """
     try:
-        project_name = _resolve_project(project)
+        project_name = _get_project_for_context(project)
         db = get_db()
 
         conn = db.pool.getconn()
@@ -9224,7 +9224,7 @@ async def export_project(
 
     try:
         # Resolve project
-        project_name = _resolve_project(project)
+        project_name = _get_project_for_context(project)
         db = get_db()
 
         # Validate format
