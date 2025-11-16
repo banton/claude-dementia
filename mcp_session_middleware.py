@@ -56,6 +56,51 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.session_store = PostgreSQLSessionStore(db_pool)
 
+        # API-key-level project caching (Bug #8 fix)
+        # Stores project selection per API key so it persists across MCP reconnections
+        self._active_project_cache = {}  # {api_key: project_name}
+        self._cache_timestamps = {}      # {api_key: last_activity_timestamp}
+        self._cache_ttl = 3600           # 1 hour idle timeout (seconds)
+
+    def _get_cached_project(self, api_key: str) -> Optional[str]:
+        """
+        Get cached project for API key if not expired.
+
+        Args:
+            api_key: Bearer token / API key
+
+        Returns:
+            Cached project name or None if not found/expired
+        """
+        import time
+
+        if api_key in self._active_project_cache:
+            last_activity = self._cache_timestamps.get(api_key, 0)
+            if time.time() - last_activity < self._cache_ttl:
+                # Update timestamp
+                self._cache_timestamps[api_key] = time.time()
+                return self._active_project_cache[api_key]
+            else:
+                # Expired - remove from cache
+                logger.info(f"🕒 Project cache expired for API key {api_key[:8]}... (idle > {self._cache_ttl}s)")
+                del self._active_project_cache[api_key]
+                del self._cache_timestamps[api_key]
+        return None
+
+    def _set_cached_project(self, api_key: str, project_name: str):
+        """
+        Cache project selection for API key.
+
+        Args:
+            api_key: Bearer token / API key
+            project_name: Selected project name
+        """
+        import time
+
+        self._active_project_cache[api_key] = project_name
+        self._cache_timestamps[api_key] = time.time()
+        logger.info(f"💾 Cached project '{project_name}' for API key {api_key[:8]}...")
+
     async def dispatch(self, request: Request, call_next):
         """
         Intercept /mcp requests to manage sessions.
@@ -97,13 +142,23 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                 logger.debug(f"FastMCP header Mcp-Session-Id length: {len(new_session_id) if new_session_id else 0}, value: {new_session_id}")
 
                 if new_session_id:
+                    # Bug #8 fix: Check if we have a cached project for this API key
+                    api_key = request.headers.get('Authorization', '').replace('Bearer ', '')
+                    cached_project = self._get_cached_project(api_key) if api_key else None
+
+                    # Use cached project if available, otherwise __PENDING__
+                    initial_project = cached_project if cached_project else '__PENDING__'
+
+                    if cached_project:
+                        logger.info(f"🔄 Auto-applying cached project '{cached_project}' for API key {api_key[:8]}...")
+
                     try:
                         result = self.session_store.create_session(
                             session_id=new_session_id,
-                            project_name='__PENDING__',  # Sentinel - user must select project
+                            project_name=initial_project,
                             client_info={'user_agent': request.headers.get('user-agent', 'unknown')}
                         )
-                        logger.info(f"MCP session created: {new_session_id[:8]} (len={len(new_session_id)}), stored_id: {result['session_id'][:8]} (len={len(result['session_id'])})")
+                        logger.info(f"MCP session created: {new_session_id[:8]} (len={len(new_session_id)}), project: {initial_project}, stored_id: {result['session_id'][:8]} (len={len(result['session_id'])})")
                     except Exception as e:
                         logger.error(f"MCP session create failed: {new_session_id[:8]}, error: {e}", exc_info=True)
 
@@ -176,6 +231,20 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                     logger.info(f"🔵 STEP 3: Passing request to FastMCP for tool '{tool_name}'")
                     response = await call_next(request)
                     logger.info(f"🔵 STEP 6: Response received from FastMCP, status: {response.status_code}")
+
+                    # Bug #8 fix: If select_project_for_session succeeded, cache the project selection
+                    if tool_name == 'select_project_for_session' and response.status_code == 200:
+                        try:
+                            # Extract project name from tool arguments
+                            project_name = body.get('params', {}).get('arguments', {}).get('name')
+                            api_key = request.headers.get('Authorization', '').replace('Bearer ', '')
+
+                            if project_name and api_key:
+                                self._set_cached_project(api_key, project_name)
+                                logger.info(f"✅ Bug #8 fix: Cached project '{project_name}' for future MCP sessions")
+                        except Exception as e:
+                            logger.warning(f"Failed to cache project selection: {e}")
+
                     return response
 
                 # Any other tool - require project selection first
