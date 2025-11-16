@@ -234,16 +234,22 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
 
                     # Bug #8 fix: If select_project_for_session succeeded, cache the project selection
                     if tool_name == 'select_project_for_session' and response.status_code == 200:
+                        logger.info(f"🔍 CACHE DEBUG: Entered cache block (tool={tool_name}, status={response.status_code})")
                         try:
                             # Extract project name from tool arguments
                             project_name = body.get('params', {}).get('arguments', {}).get('name')
                             api_key = request.headers.get('Authorization', '').replace('Bearer ', '')
 
+                            logger.info(f"🔍 CACHE DEBUG: Extracted project_name='{project_name}', api_key_prefix='{api_key[:8] if api_key else None}...'")
+
                             if project_name and api_key:
+                                logger.info(f"🔍 CACHE DEBUG: Calling _set_cached_project...")
                                 self._set_cached_project(api_key, project_name)
                                 logger.info(f"✅ Bug #8 fix: Cached project '{project_name}' for future MCP sessions")
+                            else:
+                                logger.warning(f"🔍 CACHE DEBUG: Skipping cache (project_name={bool(project_name)}, api_key={bool(api_key)})")
                         except Exception as e:
-                            logger.warning(f"Failed to cache project selection: {e}")
+                            logger.warning(f"Failed to cache project selection: {e}", exc_info=True)
 
                     return response
 
