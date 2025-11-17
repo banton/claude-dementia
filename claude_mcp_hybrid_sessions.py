@@ -10278,6 +10278,288 @@ async def apply_migrations(
         }, indent=2)
 
 
+# ==============================================================================
+# EXPORT PROJECT HELPER FUNCTIONS
+# ==============================================================================
+
+def _collect_export_data(conn, db, include_embeddings: bool) -> dict:
+    """
+    Collect all data from project tables for export.
+
+    Args:
+        conn: Database connection
+        db: Database adapter instance
+        include_embeddings: Whether to include embedding vectors
+
+    Returns:
+        Dictionary with collected data and statistics
+    """
+    with conn.cursor() as cur:
+        # Export contexts
+        logger.info("Exporting contexts...")
+        cur.execute(f"""
+            SELECT id, label, content, version, priority, tags,
+                   key_concepts, metadata, session_id, locked_at,
+                   last_accessed, access_count, size_bytes
+            FROM {db.schema}.context_locks
+            ORDER BY label, version
+        """)
+        contexts = []
+        total_context_size = 0
+        for row in cur.fetchall():
+            context_obj = {
+                "id": row[0],
+                "label": row[1],
+                "content": row[2],
+                "version": row[3],
+                "priority": row[4],
+                "tags": row[5],
+                "key_concepts": row[6],
+                "metadata": row[7],
+                "session_id": row[8],
+                "locked_at": row[9].isoformat() if row[9] else None,
+                "last_accessed": row[10].isoformat() if row[10] else None,
+                "access_count": row[11],
+                "size_bytes": row[12]
+            }
+            contexts.append(context_obj)
+            total_context_size += row[12] if row[12] else 0
+
+        unique_contexts = len(set(c["label"] for c in contexts))
+
+        # Export sessions
+        logger.info("Exporting sessions...")
+        cur.execute(f"""
+            SELECT session_id, project, started_at, last_activity,
+                   last_handover, handover_timestamp, is_active
+            FROM {db.schema}.sessions
+            ORDER BY started_at DESC
+        """)
+        sessions = []
+        active_sessions = 0
+        for row in cur.fetchall():
+            session_obj = {
+                "session_id": row[0],
+                "project": row[1],
+                "started_at": row[2].isoformat() if row[2] else None,
+                "last_activity": row[3].isoformat() if row[3] else None,
+                "last_handover": row[4],
+                "handover_timestamp": row[5].isoformat() if row[5] else None,
+                "is_active": row[6]
+            }
+            sessions.append(session_obj)
+            if row[6]:
+                active_sessions += 1
+
+        session_size = sum(len(json.dumps(s)) for s in sessions)
+
+        # Export memories
+        logger.info("Exporting memories...")
+        cur.execute(f"""
+            SELECT id, session_id, category, content, metadata, timestamp
+            FROM {db.schema}.memory_entries
+            ORDER BY timestamp DESC
+        """)
+        memories = []
+        categories = set()
+        for row in cur.fetchall():
+            memory_obj = {
+                "id": row[0],
+                "session_id": row[1],
+                "category": row[2],
+                "content": row[3],
+                "metadata": row[4],
+                "timestamp": row[5].isoformat() if row[5] else None
+            }
+            memories.append(memory_obj)
+            if row[2]:
+                categories.add(row[2])
+
+        memory_size = sum(len(json.dumps(m)) for m in memories)
+
+        # Export embeddings (optional)
+        embeddings_info = {"included": False}
+        embeddings = []
+        if include_embeddings:
+            logger.info("Exporting embeddings...")
+            cur.execute(f"""
+                SELECT context_id, embedding, embedding_model, created_at
+                FROM {db.schema}.context_embeddings
+            """)
+            for row in cur.fetchall():
+                embedding_obj = {
+                    "context_id": row[0],
+                    "embedding": row[1],
+                    "embedding_model": row[2],
+                    "created_at": row[3].isoformat() if row[3] else None
+                }
+                embeddings.append(embedding_obj)
+
+            embeddings_info = {
+                "included": True,
+                "count": len(embeddings),
+                "size_mb": round(sum(len(str(e["embedding"])) for e in embeddings) / (1024 * 1024), 2)
+            }
+        else:
+            # Check how much space we're saving
+            cur.execute(f"""
+                SELECT COUNT(*),
+                       COALESCE(SUM(LENGTH(embedding::text)), 0)
+                FROM {db.schema}.context_embeddings
+            """)
+            emb_row = cur.fetchone()
+            if emb_row and emb_row[0] > 0:
+                saved_mb = round(emb_row[1] / (1024 * 1024), 2)
+                embeddings_info = {
+                    "included": False,
+                    "reason": f"Excluded by default (would add {saved_mb}MB)",
+                    "count_excluded": emb_row[0]
+                }
+
+    return {
+        "contexts": contexts,
+        "sessions": sessions,
+        "memories": memories,
+        "embeddings": embeddings,
+        "stats": {
+            "unique_contexts": unique_contexts,
+            "total_context_size": total_context_size,
+            "active_sessions": active_sessions,
+            "session_size": session_size,
+            "memory_size": memory_size,
+            "categories": categories,
+            "embeddings_info": embeddings_info
+        }
+    }
+
+
+def _build_export_metadata(project_name: str, db, format: str, compress: bool) -> dict:
+    """
+    Build export metadata dictionary.
+
+    Args:
+        project_name: Project name being exported
+        db: Database adapter instance
+        format: Export format
+        compress: Whether output will be compressed
+
+    Returns:
+        Metadata dictionary for export
+    """
+    return {
+        "project": project_name,
+        "schema": db.schema,
+        "export_timestamp": datetime.utcnow().isoformat(),
+        "export_format": format,
+        "compressed": compress,
+        "dementia_version": "4.5.0",
+        "schema_version": "4.1"
+    }
+
+
+def _save_export_file(export_data: dict, output_path_obj: Path, compress: bool) -> dict:
+    """
+    Save export data to file with optional compression and calculate checksums.
+
+    Args:
+        export_data: Complete export data dictionary
+        output_path_obj: Path object for output file
+        compress: Whether to use gzip compression
+
+    Returns:
+        Dictionary with file_size, uncompressed_size, and checksum
+    """
+    # Serialize to JSON
+    logger.info("Serializing data to JSON...")
+    json_data = json.dumps(export_data, indent=2, default=str)
+    uncompressed_size = len(json_data.encode('utf-8'))
+
+    # Write to file (with optional compression)
+    logger.info(f"Writing to {output_path_obj}...")
+    if compress:
+        with gzip.open(output_path_obj, 'wt', encoding='utf-8') as f:
+            f.write(json_data)
+    else:
+        with open(output_path_obj, 'w', encoding='utf-8') as f:
+            f.write(json_data)
+
+    # Get actual file size
+    file_size = output_path_obj.stat().st_size
+
+    # Calculate checksum
+    logger.info("Calculating checksum...")
+    hash_obj = hashlib.sha256()
+    with open(output_path_obj, 'rb') as f:
+        for chunk in iter(lambda: f.read(8192), b''):
+            hash_obj.update(chunk)
+    checksum = f"sha256:{hash_obj.hexdigest()[:16]}..."
+
+    return {
+        "file_size": file_size,
+        "uncompressed_size": uncompressed_size,
+        "checksum": checksum
+    }
+
+
+def _build_export_report(
+    project_name: str,
+    format: str,
+    compress: bool,
+    output_path_obj: Path,
+    stats: dict,
+    file_info: dict,
+    duration_ms: int,
+    schema_version: str
+) -> dict:
+    """
+    Build comprehensive export report.
+
+    Args:
+        project_name: Project name
+        format: Export format used
+        compress: Whether compression was used
+        output_path_obj: Output file path
+        stats: Statistics from data collection
+        file_info: File size and checksum info
+        duration_ms: Total export duration in milliseconds
+        schema_version: Schema version exported
+
+    Returns:
+        Complete export report dictionary
+    """
+    return {
+        "project": project_name,
+        "format": format,
+        "compressed": compress,
+        "output_path": str(output_path_obj),
+        "exported": {
+            "contexts": {
+                "count": stats["unique_contexts"],
+                "versions": len(stats.get("contexts_list", [])),
+                "size_mb": round(stats["total_context_size"] / (1024 * 1024), 2)
+            },
+            "sessions": {
+                "count": len(stats.get("sessions_list", [])),
+                "active": stats["active_sessions"],
+                "size_kb": round(stats["session_size"] / 1024, 2)
+            },
+            "memories": {
+                "count": len(stats.get("memories_list", [])),
+                "categories": sorted(list(stats["categories"])),
+                "size_mb": round(stats["memory_size"] / (1024 * 1024), 2)
+            },
+            "embeddings": stats["embeddings_info"],
+            "schema_version": schema_version
+        },
+        "file_size_mb": round(file_info["file_size"] / (1024 * 1024), 2),
+        "compression_ratio": f"{round(file_info['uncompressed_size'] / file_info['file_size'], 1)}x" if compress else "1.0x",
+        "duration_ms": duration_ms,
+        "checksum": file_info["checksum"],
+        "import_compatible": True,
+        "restore_command": f"import_project(input_path='{output_path_obj}')"
+    }
+
+
 @mcp.tool()
 async def export_project(
     output_path: str,
@@ -10322,7 +10604,9 @@ async def export_project(
     start_time = time.time()
 
     try:
-        # Resolve project
+        # ====================================================================
+        # STEP 1: RESOLVE PROJECT AND VALIDATE PARAMETERS
+        # ====================================================================
         project_name = _get_project_for_context(project)
         db = get_db()
 
@@ -10347,219 +10631,60 @@ async def export_project(
 
         logger.info(f"Starting export of project '{project_name}' to {output_path_obj}")
 
+        # ====================================================================
+        # STEP 2: COLLECT DATA FROM DATABASE
+        # ====================================================================
         conn = db.pool.getconn()
         try:
-            with conn.cursor() as cur:
-                # Collect export data
-                export_data = {
-                    "metadata": {
-                        "project": project_name,
-                        "schema": db.schema,
-                        "export_timestamp": datetime.utcnow().isoformat(),
-                        "export_format": format,
-                        "compressed": compress,
-                        "dementia_version": "4.5.0",
-                        "schema_version": "4.1"
-                    },
-                    "data": {}
-                }
-
-                # Export contexts
-                logger.info("Exporting contexts...")
-                cur.execute(f"""
-                    SELECT id, label, content, version, priority, tags,
-                           key_concepts, metadata, session_id, locked_at,
-                           last_accessed, access_count, size_bytes
-                    FROM {db.schema}.context_locks
-                    ORDER BY label, version
-                """)
-                contexts = []
-                total_context_size = 0
-                for row in cur.fetchall():
-                    context_obj = {
-                        "id": row[0],
-                        "label": row[1],
-                        "content": row[2],
-                        "version": row[3],
-                        "priority": row[4],
-                        "tags": row[5],
-                        "key_concepts": row[6],
-                        "metadata": row[7],
-                        "session_id": row[8],
-                        "locked_at": row[9].isoformat() if row[9] else None,
-                        "last_accessed": row[10].isoformat() if row[10] else None,
-                        "access_count": row[11],
-                        "size_bytes": row[12]
-                    }
-                    contexts.append(context_obj)
-                    total_context_size += row[12] if row[12] else 0
-
-                # Get unique context count (by label)
-                unique_contexts = len(set(c["label"] for c in contexts))
-
-                export_data["data"]["contexts"] = contexts
-
-                # Export sessions
-                logger.info("Exporting sessions...")
-                cur.execute(f"""
-                    SELECT session_id, project, started_at, last_activity,
-                           last_handover, handover_timestamp, is_active
-                    FROM {db.schema}.sessions
-                    ORDER BY started_at DESC
-                """)
-                sessions = []
-                active_sessions = 0
-                for row in cur.fetchall():
-                    session_obj = {
-                        "session_id": row[0],
-                        "project": row[1],
-                        "started_at": row[2].isoformat() if row[2] else None,
-                        "last_activity": row[3].isoformat() if row[3] else None,
-                        "last_handover": row[4],
-                        "handover_timestamp": row[5].isoformat() if row[5] else None,
-                        "is_active": row[6]
-                    }
-                    sessions.append(session_obj)
-                    if row[6]:
-                        active_sessions += 1
-
-                # Calculate session data size
-                session_size = sum(len(json.dumps(s)) for s in sessions)
-
-                export_data["data"]["sessions"] = sessions
-
-                # Export memories
-                logger.info("Exporting memories...")
-                cur.execute(f"""
-                    SELECT id, session_id, category, content, metadata, timestamp
-                    FROM {db.schema}.memory_entries
-                    ORDER BY timestamp DESC
-                """)
-                memories = []
-                categories = set()
-                for row in cur.fetchall():
-                    memory_obj = {
-                        "id": row[0],
-                        "session_id": row[1],
-                        "category": row[2],
-                        "content": row[3],
-                        "metadata": row[4],
-                        "timestamp": row[5].isoformat() if row[5] else None
-                    }
-                    memories.append(memory_obj)
-                    if row[2]:
-                        categories.add(row[2])
-
-                # Calculate memory data size
-                memory_size = sum(len(json.dumps(m)) for m in memories)
-
-                export_data["data"]["memories"] = memories
-
-                # Export embeddings (optional)
-                embeddings_info = {"included": False}
-                if include_embeddings:
-                    logger.info("Exporting embeddings...")
-                    cur.execute(f"""
-                        SELECT context_id, embedding, embedding_model, created_at
-                        FROM {db.schema}.context_embeddings
-                    """)
-                    embeddings = []
-                    for row in cur.fetchall():
-                        embedding_obj = {
-                            "context_id": row[0],
-                            "embedding": row[1],  # Binary data
-                            "embedding_model": row[2],
-                            "created_at": row[3].isoformat() if row[3] else None
-                        }
-                        embeddings.append(embedding_obj)
-
-                    export_data["data"]["embeddings"] = embeddings
-                    embeddings_info = {
-                        "included": True,
-                        "count": len(embeddings),
-                        "size_mb": round(sum(len(str(e["embedding"])) for e in embeddings) / (1024 * 1024), 2)
-                    }
-                else:
-                    # Check how much space we're saving
-                    cur.execute(f"""
-                        SELECT COUNT(*),
-                               COALESCE(SUM(LENGTH(embedding::text)), 0)
-                        FROM {db.schema}.context_embeddings
-                    """)
-                    emb_row = cur.fetchone()
-                    if emb_row and emb_row[0] > 0:
-                        saved_mb = round(emb_row[1] / (1024 * 1024), 2)
-                        embeddings_info = {
-                            "included": False,
-                            "reason": f"Excluded by default (would add {saved_mb}MB)",
-                            "count_excluded": emb_row[0]
-                        }
-
+            collected_data = _collect_export_data(conn, db, include_embeddings)
         finally:
             db.pool.putconn(conn)
 
-        # Serialize to JSON
-        logger.info("Serializing data to JSON...")
-        json_data = json.dumps(export_data, indent=2, default=str)
-        uncompressed_size = len(json_data.encode('utf-8'))
-
-        # Write to file (with optional compression)
-        logger.info(f"Writing to {output_path_obj}...")
-        if compress:
-            with gzip.open(output_path_obj, 'wt', encoding='utf-8') as f:
-                f.write(json_data)
-        else:
-            with open(output_path_obj, 'w', encoding='utf-8') as f:
-                f.write(json_data)
-
-        # Get actual file size
-        file_size = output_path_obj.stat().st_size
-
-        # Calculate checksum
-        logger.info("Calculating checksum...")
-        hash_obj = hashlib.sha256()
-        with open(output_path_obj, 'rb') as f:
-            for chunk in iter(lambda: f.read(8192), b''):
-                hash_obj.update(chunk)
-        checksum = f"sha256:{hash_obj.hexdigest()[:16]}..."
-
-        # Calculate duration
-        duration_ms = int((time.time() - start_time) * 1000)
-
-        # Build response
-        response = {
-            "project": project_name,
-            "format": format,
-            "compressed": compress,
-            "output_path": str(output_path_obj),
-            "exported": {
-                "contexts": {
-                    "count": unique_contexts,
-                    "versions": len(contexts),
-                    "size_mb": round(total_context_size / (1024 * 1024), 2)
-                },
-                "sessions": {
-                    "count": len(sessions),
-                    "active": active_sessions,
-                    "size_kb": round(session_size / 1024, 2)
-                },
-                "memories": {
-                    "count": len(memories),
-                    "categories": sorted(list(categories)),
-                    "size_mb": round(memory_size / (1024 * 1024), 2)
-                },
-                "embeddings": embeddings_info,
-                "schema_version": export_data["metadata"]["schema_version"]
-            },
-            "file_size_mb": round(file_size / (1024 * 1024), 2),
-            "compression_ratio": f"{round(uncompressed_size / file_size, 1)}x" if compress else "1.0x",
-            "duration_ms": duration_ms,
-            "checksum": checksum,
-            "import_compatible": True,
-            "restore_command": f"import_project(input_path='{output_path_obj}')"
+        # ====================================================================
+        # STEP 3: BUILD EXPORT STRUCTURE WITH METADATA
+        # ====================================================================
+        metadata = _build_export_metadata(project_name, db, format, compress)
+        export_data = {
+            "metadata": metadata,
+            "data": {
+                "contexts": collected_data["contexts"],
+                "sessions": collected_data["sessions"],
+                "memories": collected_data["memories"]
+            }
         }
 
-        logger.info(f"Export completed successfully: {file_size / (1024 * 1024):.2f}MB in {duration_ms}ms")
+        # Add embeddings if included
+        if include_embeddings:
+            export_data["data"]["embeddings"] = collected_data["embeddings"]
+
+        # ====================================================================
+        # STEP 4: SAVE TO FILE WITH COMPRESSION
+        # ====================================================================
+        file_info = _save_export_file(export_data, output_path_obj, compress)
+
+        # ====================================================================
+        # STEP 5: BUILD AND RETURN REPORT
+        # ====================================================================
+        duration_ms = int((time.time() - start_time) * 1000)
+
+        # Prepare stats with additional list references for report
+        stats = collected_data["stats"].copy()
+        stats["contexts_list"] = collected_data["contexts"]
+        stats["sessions_list"] = collected_data["sessions"]
+        stats["memories_list"] = collected_data["memories"]
+
+        response = _build_export_report(
+            project_name=project_name,
+            format=format,
+            compress=compress,
+            output_path_obj=output_path_obj,
+            stats=stats,
+            file_info=file_info,
+            duration_ms=duration_ms,
+            schema_version=metadata["schema_version"]
+        )
+
+        logger.info(f"Export completed successfully: {file_info['file_size'] / (1024 * 1024):.2f}MB in {duration_ms}ms")
         return json.dumps(response, indent=2)
 
     except Exception as e:
@@ -10570,6 +10695,315 @@ async def export_project(
             "traceback": traceback.format_exc()
         }, indent=2)
 
+
+# ============================================================================
+# IMPORT PROJECT HELPER FUNCTIONS
+# ============================================================================
+
+def _validate_backup_file(input_path: str) -> tuple:
+    """
+    Validate backup file exists and is valid JSON.
+
+    Args:
+        input_path: Path to backup file
+
+    Returns:
+        Tuple of (input_path_obj, compressed, backup_data)
+
+    Raises:
+        ValueError: If file doesn't exist or is invalid
+    """
+    input_path_obj = Path(input_path).expanduser().resolve()
+    if not input_path_obj.exists():
+        raise ValueError(f"Input file does not exist: {input_path_obj}")
+
+    # Detect if file is compressed
+    compressed = str(input_path_obj).endswith('.gz')
+
+    # Read and parse backup file
+    try:
+        if compressed:
+            with gzip.open(input_path_obj, 'rt', encoding='utf-8') as f:
+                backup_data = json.load(f)
+        else:
+            with open(input_path_obj, 'r', encoding='utf-8') as f:
+                backup_data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON format in backup file: {e}")
+    except gzip.BadGzipFile:
+        raise ValueError("Invalid gzip file - may be corrupted")
+
+    return input_path_obj, compressed, backup_data
+
+
+def _parse_backup_metadata(backup_data: dict, project: Optional[str] = None) -> tuple:
+    """
+    Parse and validate backup structure and metadata.
+
+    Args:
+        backup_data: Parsed backup JSON data
+        project: Optional target project name override
+
+    Returns:
+        Tuple of (metadata, target_project, backup_version)
+
+    Raises:
+        ValueError: If backup structure is invalid
+    """
+    if "metadata" not in backup_data:
+        raise ValueError("Invalid backup format: missing metadata")
+
+    metadata = backup_data["metadata"]
+    target_project = project or metadata.get("project", "default")
+    backup_version = metadata.get("dementia_version", "unknown")
+
+    return metadata, target_project, backup_version
+
+
+def _count_backup_items(backup_data: dict) -> tuple:
+    """
+    Count items in backup data.
+
+    Args:
+        backup_data: Parsed backup JSON data
+
+    Returns:
+        Tuple of (contexts_count, sessions_count, memories_count, embeddings_missing)
+    """
+    contexts_count = len(backup_data.get("contexts", []))
+    sessions_count = len(backup_data.get("sessions", []))
+    memories_count = len(backup_data.get("memories", []))
+
+    # Check embeddings
+    contexts_with_embeddings = sum(
+        1 for ctx in backup_data.get("contexts", [])
+        if ctx.get("embedding_vector") is not None
+    )
+    embeddings_missing = contexts_count - contexts_with_embeddings
+
+    return contexts_count, sessions_count, memories_count, embeddings_missing
+
+
+def _check_import_conflicts(db, target_project: str) -> bool:
+    """
+    Check if target project already exists.
+
+    Args:
+        db: Database adapter instance
+        target_project: Target project name
+
+    Returns:
+        True if project exists, False otherwise
+    """
+    conn = db.pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT EXISTS(
+                    SELECT 1 FROM {db.schema}.context_locks
+                    WHERE project_name = %s
+                    LIMIT 1
+                )
+            """, (target_project,))
+            return cur.fetchone()[0]
+    finally:
+        db.pool.putconn(conn)
+
+
+def _import_backup_tables(
+    conn,
+    db,
+    backup_data: dict,
+    target_project: str,
+    overwrite: bool,
+    project_exists: bool
+) -> dict:
+    """
+    Import all tables from backup data.
+
+    Args:
+        conn: Database connection
+        db: Database adapter instance
+        backup_data: Parsed backup JSON data
+        target_project: Target project name
+        overwrite: Whether to overwrite existing data
+        project_exists: Whether project already exists
+
+    Returns:
+        Dictionary with import counts for each table
+    """
+    import_counts = {
+        "contexts": 0,
+        "sessions": 0,
+        "memories": 0
+    }
+
+    with conn.cursor() as cur:
+        # If overwriting, delete existing data
+        if overwrite and project_exists:
+            logger.info(f"Deleting existing project data for '{target_project}'")
+            cur.execute(f"DELETE FROM {db.schema}.memories WHERE project_name = %s", (target_project,))
+            cur.execute(f"DELETE FROM {db.schema}.context_locks WHERE project_name = %s", (target_project,))
+            cur.execute(f"DELETE FROM {db.schema}.sessions WHERE project_name = %s", (target_project,))
+            conn.commit()
+
+        # Import contexts
+        for ctx_data in backup_data.get("contexts", []):
+            try:
+                cur.execute(f"""
+                    INSERT INTO {db.schema}.context_locks
+                    (project_name, label, version, content, preview, key_concepts,
+                     priority, tags, metadata, created_at, locked_at, last_accessed,
+                     access_count, size_bytes, embedding_vector)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (project_name, label, version)
+                    DO UPDATE SET
+                        content = EXCLUDED.content,
+                        preview = EXCLUDED.preview,
+                        key_concepts = EXCLUDED.key_concepts,
+                        priority = EXCLUDED.priority,
+                        tags = EXCLUDED.tags,
+                        metadata = EXCLUDED.metadata,
+                        locked_at = EXCLUDED.locked_at,
+                        embedding_vector = EXCLUDED.embedding_vector
+                """, (
+                    target_project,
+                    ctx_data.get("label"),
+                    ctx_data.get("version", "1.0"),
+                    ctx_data.get("content"),
+                    ctx_data.get("preview"),
+                    ctx_data.get("key_concepts"),
+                    ctx_data.get("priority", "reference"),
+                    ctx_data.get("tags"),
+                    json.dumps(ctx_data.get("metadata", {})),
+                    ctx_data.get("created_at"),
+                    ctx_data.get("locked_at"),
+                    ctx_data.get("last_accessed"),
+                    ctx_data.get("access_count", 0),
+                    ctx_data.get("size_bytes", len(ctx_data.get("content", ""))),
+                    ctx_data.get("embedding_vector")
+                ))
+                import_counts["contexts"] += 1
+            except Exception as e:
+                logger.error(f"Failed to import context {ctx_data.get('label')}: {e}")
+                # Continue with other contexts
+
+        # Import sessions
+        for session_data in backup_data.get("sessions", []):
+            try:
+                cur.execute(f"""
+                    INSERT INTO {db.schema}.sessions
+                    (session_id, project_name, created_at, last_active, expires_at,
+                     metadata, is_active)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (session_id)
+                    DO UPDATE SET
+                        last_active = EXCLUDED.last_active,
+                        metadata = EXCLUDED.metadata,
+                        is_active = EXCLUDED.is_active
+                """, (
+                    session_data.get("session_id"),
+                    target_project,
+                    session_data.get("created_at"),
+                    session_data.get("last_active"),
+                    session_data.get("expires_at"),
+                    json.dumps(session_data.get("metadata", {})),
+                    session_data.get("is_active", False)
+                ))
+                import_counts["sessions"] += 1
+            except Exception as e:
+                logger.error(f"Failed to import session {session_data.get('session_id')}: {e}")
+                # Continue with other sessions
+
+        # Import memories
+        for memory_data in backup_data.get("memories", []):
+            try:
+                cur.execute(f"""
+                    INSERT INTO {db.schema}.memories
+                    (project_name, category, subcategory, content, metadata,
+                     created_at, session_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    target_project,
+                    memory_data.get("category"),
+                    memory_data.get("subcategory"),
+                    memory_data.get("content"),
+                    json.dumps(memory_data.get("metadata", {})),
+                    memory_data.get("created_at"),
+                    memory_data.get("session_id")
+                ))
+                import_counts["memories"] += 1
+            except Exception as e:
+                logger.error(f"Failed to import memory: {e}")
+                # Continue with other memories
+
+        conn.commit()
+
+    return import_counts
+
+
+def _build_import_report(
+    input_path_obj,
+    target_project: str,
+    import_counts: dict,
+    contexts_count: int,
+    sessions_count: int,
+    memories_count: int,
+    embeddings_missing: int,
+    duration_ms: int
+) -> dict:
+    """
+    Build import completion report.
+
+    Args:
+        input_path_obj: Path to input file
+        target_project: Target project name
+        import_counts: Dictionary with actual import counts
+        contexts_count: Expected context count
+        sessions_count: Expected session count
+        memories_count: Expected memory count
+        embeddings_missing: Number of missing embeddings
+        duration_ms: Import duration in milliseconds
+
+    Returns:
+        Dictionary with import report
+    """
+    # Validate imported data
+    validation_result = {
+        "schema_valid": True,
+        "data_intact": import_counts["contexts"] == contexts_count,
+        "referential_integrity": True,  # Would need deeper check
+        "embeddings_complete": embeddings_missing == 0
+    }
+
+    # Determine final health
+    if validation_result["data_intact"] and validation_result["embeddings_complete"]:
+        final_health = "healthy"
+    elif validation_result["data_intact"]:
+        final_health = "good_with_warnings"
+    else:
+        final_health = "needs_attention"
+
+    response = {
+        "input_path": str(input_path_obj),
+        "validate_only": False,
+        "target_project": target_project,
+        "imported": import_counts,
+        "embeddings_regenerated": 0,  # Not implemented yet
+        "validation": validation_result,
+        "duration_ms": duration_ms,
+        "final_health": final_health
+    }
+
+    if embeddings_missing > 0:
+        response["warning"] = f"{embeddings_missing} contexts missing embeddings. Run generate_embeddings() to regenerate."
+
+    return response
+
+
+# ============================================================================
+# IMPORT PROJECT TOOL
+# ============================================================================
 
 @mcp.tool()
 async def import_project(
@@ -10616,86 +11050,36 @@ async def import_project(
     start_time = time.time()
 
     try:
-        # Validate input path
-        input_path_obj = Path(input_path).expanduser().resolve()
-        if not input_path_obj.exists():
-            return json.dumps({
-                "error": f"Input file does not exist: {input_path_obj}",
-                "suggestion": "Check file path and try again"
-            }, indent=2)
-
-        # Detect if file is compressed
-        compressed = str(input_path_obj).endswith('.gz')
-
-        # Read and parse backup file
+        # Step 1: Validate backup file and parse JSON
         try:
-            if compressed:
-                with gzip.open(input_path_obj, 'rt', encoding='utf-8') as f:
-                    backup_data = json.load(f)
-            else:
-                with open(input_path_obj, 'r', encoding='utf-8') as f:
-                    backup_data = json.load(f)
-        except json.JSONDecodeError as e:
+            input_path_obj, compressed, backup_data = _validate_backup_file(input_path)
+        except ValueError as e:
             return json.dumps({
-                "error": "Invalid JSON format in backup file",
-                "details": str(e),
-                "suggestion": "File may be corrupted or not a valid backup"
-            }, indent=2)
-        except gzip.BadGzipFile:
-            return json.dumps({
-                "error": "Invalid gzip file",
-                "suggestion": "File may be corrupted or not compressed with gzip"
+                "error": str(e),
+                "suggestion": "Check file path and format"
             }, indent=2)
 
-        # Validate backup structure
-        if "metadata" not in backup_data:
+        # Step 2: Parse backup metadata
+        try:
+            metadata, target_project, backup_version = _parse_backup_metadata(backup_data, project)
+        except ValueError as e:
             return json.dumps({
-                "error": "Invalid backup format: missing metadata",
+                "error": str(e),
                 "suggestion": "File does not appear to be a valid dementia backup"
             }, indent=2)
 
-        metadata = backup_data["metadata"]
+        # Step 3: Count items in backup
+        contexts_count, sessions_count, memories_count, embeddings_missing = _count_backup_items(backup_data)
 
-        # Determine target project
-        target_project = project or metadata.get("project", "default")
+        # Step 4: Check for conflicts
+        db = get_db()
+        project_exists = _check_import_conflicts(db, target_project)
 
-        # Check schema compatibility
-        backup_version = metadata.get("dementia_version", "unknown")
+        # Check schema compatibility (for future use)
         current_version = "4.5.0"
         schema_compatible = True  # For now, assume compatibility
 
-        # Check if project exists
-        db = get_db()
-        conn = db.pool.getconn()
-        project_exists = False
-
-        try:
-            with conn.cursor() as cur:
-                # Check if project exists (check for any data in this schema)
-                cur.execute(f"""
-                    SELECT EXISTS(
-                        SELECT 1 FROM {db.schema}.context_locks
-                        WHERE project_name = %s
-                        LIMIT 1
-                    )
-                """, (target_project,))
-                project_exists = cur.fetchone()[0]
-        finally:
-            db.pool.putconn(conn)
-
-        # Count items in backup
-        contexts_count = len(backup_data.get("contexts", []))
-        sessions_count = len(backup_data.get("sessions", []))
-        memories_count = len(backup_data.get("memories", []))
-
-        # Check embeddings
-        contexts_with_embeddings = sum(
-            1 for ctx in backup_data.get("contexts", [])
-            if ctx.get("embedding_vector") is not None
-        )
-        embeddings_missing = contexts_count - contexts_with_embeddings
-
-        # Build response for validation_only mode
+        # Handle validate_only mode
         if validate_only:
             response = {
                 "input_path": str(input_path_obj),
@@ -10743,150 +11127,28 @@ async def import_project(
 
         logger.info(f"Starting import of project '{target_project}' from {input_path_obj}")
 
+        # Step 5: Import all tables
         conn = db.pool.getconn()
-        import_counts = {
-            "contexts": 0,
-            "sessions": 0,
-            "memories": 0
-        }
-
         try:
-            with conn.cursor() as cur:
-                # If overwriting, delete existing data
-                if overwrite and project_exists:
-                    logger.info(f"Deleting existing project data for '{target_project}'")
-                    cur.execute(f"DELETE FROM {db.schema}.memories WHERE project_name = %s", (target_project,))
-                    cur.execute(f"DELETE FROM {db.schema}.context_locks WHERE project_name = %s", (target_project,))
-                    cur.execute(f"DELETE FROM {db.schema}.sessions WHERE project_name = %s", (target_project,))
-                    conn.commit()
-
-                # Import contexts
-                for ctx_data in backup_data.get("contexts", []):
-                    try:
-                        cur.execute(f"""
-                            INSERT INTO {db.schema}.context_locks
-                            (project_name, label, version, content, preview, key_concepts,
-                             priority, tags, metadata, created_at, locked_at, last_accessed,
-                             access_count, size_bytes, embedding_vector)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (project_name, label, version)
-                            DO UPDATE SET
-                                content = EXCLUDED.content,
-                                preview = EXCLUDED.preview,
-                                key_concepts = EXCLUDED.key_concepts,
-                                priority = EXCLUDED.priority,
-                                tags = EXCLUDED.tags,
-                                metadata = EXCLUDED.metadata,
-                                locked_at = EXCLUDED.locked_at,
-                                embedding_vector = EXCLUDED.embedding_vector
-                        """, (
-                            target_project,
-                            ctx_data.get("label"),
-                            ctx_data.get("version", "1.0"),
-                            ctx_data.get("content"),
-                            ctx_data.get("preview"),
-                            ctx_data.get("key_concepts"),
-                            ctx_data.get("priority", "reference"),
-                            ctx_data.get("tags"),
-                            json.dumps(ctx_data.get("metadata", {})),
-                            ctx_data.get("created_at"),
-                            ctx_data.get("locked_at"),
-                            ctx_data.get("last_accessed"),
-                            ctx_data.get("access_count", 0),
-                            ctx_data.get("size_bytes", len(ctx_data.get("content", ""))),
-                            ctx_data.get("embedding_vector")
-                        ))
-                        import_counts["contexts"] += 1
-                    except Exception as e:
-                        logger.error(f"Failed to import context {ctx_data.get('label')}: {e}")
-                        # Continue with other contexts
-
-                # Import sessions
-                for session_data in backup_data.get("sessions", []):
-                    try:
-                        cur.execute(f"""
-                            INSERT INTO {db.schema}.sessions
-                            (session_id, project_name, created_at, last_active, expires_at,
-                             metadata, is_active)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (session_id)
-                            DO UPDATE SET
-                                last_active = EXCLUDED.last_active,
-                                metadata = EXCLUDED.metadata,
-                                is_active = EXCLUDED.is_active
-                        """, (
-                            session_data.get("session_id"),
-                            target_project,
-                            session_data.get("created_at"),
-                            session_data.get("last_active"),
-                            session_data.get("expires_at"),
-                            json.dumps(session_data.get("metadata", {})),
-                            session_data.get("is_active", False)
-                        ))
-                        import_counts["sessions"] += 1
-                    except Exception as e:
-                        logger.error(f"Failed to import session {session_data.get('session_id')}: {e}")
-                        # Continue with other sessions
-
-                # Import memories
-                for memory_data in backup_data.get("memories", []):
-                    try:
-                        cur.execute(f"""
-                            INSERT INTO {db.schema}.memories
-                            (project_name, category, subcategory, content, metadata,
-                             created_at, session_id)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """, (
-                            target_project,
-                            memory_data.get("category"),
-                            memory_data.get("subcategory"),
-                            memory_data.get("content"),
-                            json.dumps(memory_data.get("metadata", {})),
-                            memory_data.get("created_at"),
-                            memory_data.get("session_id")
-                        ))
-                        import_counts["memories"] += 1
-                    except Exception as e:
-                        logger.error(f"Failed to import memory: {e}")
-                        # Continue with other memories
-
-                conn.commit()
-
+            import_counts = _import_backup_tables(
+                conn, db, backup_data, target_project, overwrite, project_exists
+            )
         finally:
             db.pool.putconn(conn)
 
-        # Calculate duration
+        # Step 6: Calculate duration and build report
         duration_ms = int((time.time() - start_time) * 1000)
 
-        # Validate imported data
-        validation_result = {
-            "schema_valid": True,
-            "data_intact": import_counts["contexts"] == contexts_count,
-            "referential_integrity": True,  # Would need deeper check
-            "embeddings_complete": embeddings_missing == 0
-        }
-
-        # Determine final health
-        if validation_result["data_intact"] and validation_result["embeddings_complete"]:
-            final_health = "healthy"
-        elif validation_result["data_intact"]:
-            final_health = "good_with_warnings"
-        else:
-            final_health = "needs_attention"
-
-        response = {
-            "input_path": str(input_path_obj),
-            "validate_only": False,
-            "target_project": target_project,
-            "imported": import_counts,
-            "embeddings_regenerated": 0,  # Not implemented yet
-            "validation": validation_result,
-            "duration_ms": duration_ms,
-            "final_health": final_health
-        }
-
-        if embeddings_missing > 0:
-            response["warning"] = f"{embeddings_missing} contexts missing embeddings. Run generate_embeddings() to regenerate."
+        response = _build_import_report(
+            input_path_obj,
+            target_project,
+            import_counts,
+            contexts_count,
+            sessions_count,
+            memories_count,
+            embeddings_missing,
+            duration_ms
+        )
 
         logger.info(f"Import completed: {import_counts['contexts']} contexts, {import_counts['sessions']} sessions, {import_counts['memories']} memories in {duration_ms}ms")
         return json.dumps(response, indent=2)
