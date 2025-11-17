@@ -77,6 +77,14 @@ logger = logging.getLogger(__name__)
 # Import configuration
 from src.config import config
 
+# Import DRY utilities for code deduplication
+from claude_mcp_utils import (
+    sanitize_project_name,
+    validate_session_store,
+    safe_json_response,
+    format_error_response
+)
+
 # ============================================================================
 # POSTGRESQL/NEON DATABASE SETUP (ONLY MODE)
 # ============================================================================
@@ -1991,6 +1999,156 @@ def cleanup_expired_queries(conn):
 # PROJECT MANAGEMENT (CRUD operations for multi-project support)
 # ============================================================================
 
+def _fetch_project_stats(conn, schema: str) -> Optional[dict]:
+    """
+    Check if project schema exists and fetch statistics.
+
+    Queries PostgreSQL information_schema to verify schema existence,
+    then counts records in sessions and context_locks tables if present.
+
+    This function is called by switch_project() to determine if a project
+    schema already exists in the database and gather statistics for user
+    feedback. The schema name must be pre-sanitized before calling.
+
+    Args:
+        conn: Active psycopg2 connection (caller manages lifecycle)
+        schema: Sanitized schema name to check (alphanumeric + underscore only)
+
+    Returns:
+        dict with {"sessions": int, "contexts": int} if schema exists
+        None if schema does not exist
+
+    Example:
+        >>> import psycopg2
+        >>> conn = psycopg2.connect(config.database_url)
+        >>> stats = _fetch_project_stats(conn, "innkeeper")
+        >>> if stats:
+        ...     print(f"Found {stats['sessions']} sessions")
+        >>> conn.close()
+
+    Note:
+        - Connection must be opened by caller
+        - Connection must be closed by caller
+        - Schema name MUST be sanitized (no SQL injection protection here)
+        - Uses RealDictCursor for dict-based result access
+    """
+    from psycopg2.extras import RealDictCursor
+
+    # Create cursor for database queries
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        # Check if schema exists in PostgreSQL catalog
+        # Uses parameterized query for safety
+        cur.execute("""
+            SELECT schema_name
+            FROM information_schema.schemata
+            WHERE schema_name = %s
+        """, (schema,))
+
+        exists = cur.fetchone() is not None
+
+        if not exists:
+            # Schema doesn't exist - will be created on first use
+            return None
+
+        # Schema exists - gather statistics for user feedback
+
+        # Count sessions in this project
+        # Note: Schema name in f-string is safe because it was pre-sanitized
+        cur.execute(f'SELECT COUNT(*) as count FROM "{schema}".sessions')
+        sessions = cur.fetchone()['count']
+
+        # Count locked contexts in this project
+        cur.execute(f'SELECT COUNT(*) as count FROM "{schema}".context_locks')
+        contexts = cur.fetchone()['count']
+
+        return {
+            "sessions": sessions,
+            "contexts": contexts
+        }
+
+    finally:
+        # Always clean up cursor (connection managed by caller)
+        cur.close()
+
+
+def _build_switch_response(name: str, schema: str, stats: Optional[dict]) -> dict:
+    """
+    Build success response dictionary for switch_project operation.
+
+    Constructs a standardized response indicating successful project switch.
+    Response format differs based on whether the project schema already exists
+    (has stats) or will be created on first use (no stats).
+
+    This is a pure function with no side effects - it only constructs data.
+    The caller (switch_project) is responsible for converting to JSON.
+
+    Args:
+        name: Original project name provided by user (unsanitized)
+        schema: Sanitized schema name that will be used in PostgreSQL
+        stats: Project statistics from _fetch_project_stats(), or None if new
+
+    Returns:
+        dict with fields:
+            - success: Always True (error responses handled elsewhere)
+            - message: User-friendly status message with emoji
+            - project: Original project name (for display)
+            - schema: Sanitized schema name (for technical reference)
+            - exists: Boolean indicating if schema exists
+            - stats: {"sessions": int, "contexts": int} if exists
+            - note: Informational message about next steps
+
+    Example:
+        >>> # Existing project with data
+        >>> response = _build_switch_response(
+        ...     "My Project",
+        ...     "my_project",
+        ...     {"sessions": 5, "contexts": 10}
+        ... )
+        >>> print(response["message"])
+        ✅ Switched to project 'My Project'
+
+        >>> # New project (will be created)
+        >>> response = _build_switch_response(
+        ...     "New Project",
+        ...     "new_project",
+        ...     None
+        ... )
+        >>> print(response["exists"])
+        False
+
+    Note:
+        - Returns dict, NOT JSON string (caller handles serialization)
+        - Always returns success=True (errors handled in switch_project)
+        - Preserves original name for user-facing messages
+        - Includes sanitized schema for technical debugging
+    """
+    if stats is not None:
+        # Existing project - return with statistics
+        # User can see how many sessions and contexts already exist
+        return {
+            "success": True,
+            "message": f"✅ Switched to project '{name}'",
+            "project": name,
+            "schema": schema,
+            "exists": True,
+            "stats": stats,  # {"sessions": int, "contexts": int}
+            "note": "All memory operations will now use this project"
+        }
+    else:
+        # New project - will be created automatically on first use
+        # Schema creation is lazy (happens when first tool is called)
+        return {
+            "success": True,
+            "message": f"✅ Switched to project '{name}' (will be created on first use)",
+            "project": name,
+            "schema": schema,
+            "exists": False,
+            "note": "Project schema will be created automatically when you use memory tools"
+        }
+
+
 @mcp.tool()
 async def switch_project(name: str) -> str:
     """
@@ -2014,96 +2172,60 @@ async def switch_project(name: str) -> str:
         Claude: switch_project(name="linkedin")
         Claude: "Switched! (Project will be created if it doesn't exist)"
     """
-    import json
-    import re
+    import psycopg2
 
     try:
-        # Sanitize project name
-        safe_name = re.sub(r'[^a-z0-9]', '_', name.lower())
-        safe_name = re.sub(r'_+', '_', safe_name).strip('_')[:32]
+        # Step 1: Validate and sanitize project name using DRY utility
+        # Raises ValueError if name is empty or contains only special characters
+        try:
+            safe_name = sanitize_project_name(name)
+        except ValueError as e:
+            return safe_json_response({
+                "error": str(e),
+                "error_type": "ValueError"
+            }, success=False)
 
-        # UNIVERSAL PROJECT SELECTION: Use _local_session_id as single source of truth
-        if not _session_store or not _local_session_id:
-            return json.dumps({
-                "success": False,
-                "error": "No active session - session store not initialized"
-            })
+        # Step 2: Validate session store using DRY utility
+        # CRITICAL: Use _local_session_id as single source of truth (Bug #1 fix)
+        is_valid, error = validate_session_store()
+        if not is_valid:
+            return safe_json_response({"error": error}, success=False)
 
-        # Update the global session store's project_name field (SINGLE SOURCE OF TRUTH)
+        # Step 3: Update session store (database)
+        # CRITICAL: This MUST happen before cache update to maintain consistency
         try:
             updated = _session_store.update_session_project(_local_session_id, safe_name)
             if updated:
                 print(f"✅ Switched to project: {safe_name} (session: {_local_session_id[:8]})", file=sys.stderr)
             else:
                 print(f"⚠️  Session not found: {_local_session_id[:8]}", file=sys.stderr)
-                return json.dumps({
-                    "success": False,
+                return safe_json_response({
                     "error": f"Session {_local_session_id[:8]} not found in database"
-                })
+                }, success=False)
         except Exception as e:
             print(f"❌ Failed to update session project: {e}", file=sys.stderr)
-            return json.dumps({
-                "success": False,
+            return safe_json_response({
                 "error": f"Failed to update session: {str(e)}"
-            })
+            }, success=False)
 
-        # Also update in-memory cache for backwards compatibility
+        # Step 4: Update in-memory cache (after database)
+        # CRITICAL: Uses same session ID as database update (Bug #1 fix)
         _active_projects[_local_session_id] = safe_name
 
-        # Check if project exists
-        import psycopg2
-        from psycopg2.extras import RealDictCursor
-
+        # Step 5: Check if project schema exists and get stats
+        # Uses connection with try/finally to guarantee cleanup (prevents leaks)
         conn = psycopg2.connect(config.database_url)
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-
-        cur.execute("""
-            SELECT schema_name
-            FROM information_schema.schemata
-            WHERE schema_name = %s
-        """, (safe_name,))
-
-        exists = cur.fetchone() is not None
-
-        if exists:
-            # Get project stats
-            cur.execute(f'SELECT COUNT(*) as count FROM "{safe_name}".sessions')
-            sessions = cur.fetchone()['count']
-
-            cur.execute(f'SELECT COUNT(*) as count FROM "{safe_name}".context_locks')
-            contexts = cur.fetchone()['count']
-
+        try:
+            stats = _fetch_project_stats(conn, safe_name)
+        finally:
             conn.close()
 
-            return json.dumps({
-                "success": True,
-                "message": f"✅ Switched to project '{name}'",
-                "project": name,
-                "schema": safe_name,
-                "exists": True,
-                "stats": {
-                    "sessions": sessions,
-                    "contexts": contexts
-                },
-                "note": "All memory operations will now use this project"
-            })
-        else:
-            conn.close()
-
-            return json.dumps({
-                "success": True,
-                "message": f"✅ Switched to project '{name}' (will be created on first use)",
-                "project": name,
-                "schema": safe_name,
-                "exists": False,
-                "note": "Project schema will be created automatically when you use memory tools"
-            })
+        # Step 6: Build and return response using DRY utilities
+        response = _build_switch_response(name, safe_name, stats)
+        return safe_json_response(response)
 
     except Exception as e:
-        return json.dumps({
-            "success": False,
-            "error": str(e)
-        })
+        return format_error_response(e)
 
 
 @mcp.tool()
