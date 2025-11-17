@@ -253,7 +253,8 @@ async def graceful_mcp_delete(request: Request):
                 session_id=session_id,
                 correlation_id=correlation_id)
 
-    return JSONResponse(status_code=204)  # No Content
+    # Return 204 No Content (must provide empty content for Starlette)
+    return Response(status_code=204)
 
 async def health_check(request: Request):
     """Health check for DigitalOcean (unauthenticated)."""
