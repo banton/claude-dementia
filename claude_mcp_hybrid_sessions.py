@@ -4830,7 +4830,208 @@ async def batch_recall_contexts(topics: list[str], preview_only: bool = True, pr
     }, indent=2)
 
 
+# ==================== SEARCH_CONTEXTS HELPER FUNCTIONS ====================
 
+def _try_semantic_search(conn, query: str, priority: Optional[str], tags: Optional[str], limit: int) -> Optional[dict]:
+    """
+    Attempt semantic search using embeddings.
+
+    Returns: Results dict if successful, None to fall back to keyword search
+    """
+    try:
+        from src.services import embedding_service
+        from src.services.semantic_search import SemanticSearch
+
+        if not embedding_service or not embedding_service.enabled:
+            return None
+
+        semantic_search = SemanticSearch(conn, embedding_service)
+
+        # Check if any contexts have embeddings
+        cursor = conn.execute("SELECT COUNT(*) as count FROM context_locks WHERE embedding IS NOT NULL")
+        embedded_count = cursor.fetchone()['count']
+
+        if embedded_count == 0:
+            return None
+
+        # Use semantic search with filters
+        results = semantic_search.search_similar(
+            query=query,
+            limit=limit,
+            threshold=0.6,  # Slightly lower threshold for search
+            priority_filter=priority,
+            tags_filter=tags
+        )
+
+        if results:
+            return {
+                "search_mode": "semantic",
+                "query": query,
+                "total_results": len(results),
+                "results": results,
+                "note": "Results ranked by semantic similarity (0-1)"
+            }
+
+        return None
+
+    except Exception as e:
+        # Fall back to keyword search
+        print(f"⚠️  Semantic search unavailable: {e}", file=sys.stderr)
+        return None
+
+
+def _build_keyword_search_query(query: str, priority: Optional[str], tags: Optional[str], limit: int) -> tuple:
+    """
+    Build SQL query and parameters for keyword search.
+
+    Returns: (sql, params) tuple
+    """
+    # NOTE: No session_id filter needed - schema isolation provides project-level isolation
+    sql = """
+        SELECT
+            label, version, content, preview, key_concepts,
+            locked_at, metadata, last_accessed, access_count
+        FROM context_locks
+        WHERE (
+            content LIKE ?
+            OR preview LIKE ?
+            OR key_concepts LIKE ?
+            OR label LIKE ?
+        )
+    """
+
+    params = [f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%']
+
+    # Add priority filter
+    if priority:
+        sql += " AND (metadata::json)->>'priority' = ?"
+        params.append(priority)
+
+    # Add tags filter
+    if tags:
+        tag_conditions = []
+        for tag in tags.split(','):
+            tag = tag.strip()
+            tag_conditions.append("(metadata::json)->>'tags' LIKE ?")
+            params.append(f'%{tag}%')
+        sql += f" AND ({' OR '.join(tag_conditions)})"
+
+    sql += " LIMIT ?"
+    params.append(limit)
+
+    return (sql, params)
+
+
+def _score_search_results(rows, query: str) -> list:
+    """
+    Calculate relevance scores for keyword search results.
+
+    Scoring:
+    - Exact label match: 1.0 points
+    - Key concepts match: 0.7 points
+    - Content match: 0.5 points
+    - Preview match: 0.3 points
+
+    Returns: List of scored result dicts, sorted by score (highest first)
+    """
+    scored_results = []
+    query_lower = query.lower()
+
+    for row in rows:
+        score = 0.0
+
+        # Exact label match = highest score
+        if query_lower in row['label'].lower():
+            score += 1.0
+
+        # Key concepts match
+        if row['key_concepts'] and query_lower in row['key_concepts'].lower():
+            score += 0.7
+
+        # Content match
+        if row['content'] and query_lower in row['content'].lower():
+            score += 0.5
+
+        # Preview match
+        if row['preview'] and query_lower in row['preview'].lower():
+            score += 0.3
+
+        # Parse metadata
+        metadata = json.loads(row['metadata']) if row['metadata'] else {}
+
+        scored_results.append({
+            "label": row['label'],
+            "version": row['version'],
+            "score": round(score, 2),
+            "preview": row['preview'] or row['content'][:200] + "..." if row['content'] else "",
+            "priority": metadata.get('priority', 'reference'),
+            "tags": metadata.get('tags', []),
+            "last_accessed": row['last_accessed'],
+            "access_count": row['access_count'] or 0
+        })
+
+    # Sort by score (highest first)
+    scored_results.sort(key=lambda x: x['score'], reverse=True)
+
+    return scored_results
+
+
+def _format_search_response(results: list, mode: str, query: str, priority: Optional[str], tags: Optional[str], limit: int) -> str:
+    """
+    Format search results as JSON response.
+
+    Args:
+        results: List of result dicts
+        mode: "semantic" or "keyword"
+        query: Original search query
+        priority: Priority filter (or None)
+        tags: Tags filter (or None)
+        limit: Result limit
+
+    Returns: JSON string
+    """
+    if mode == "semantic":
+        return json.dumps({
+            "search_mode": "semantic",
+            "query": query,
+            "total_results": len(results),
+            "results": results,
+            "note": "Results ranked by semantic similarity (0-1)"
+        }, indent=2)
+    else:
+        return json.dumps({
+            "search_mode": "keyword",
+            "query": query,
+            "filters": {
+                "priority": priority,
+                "tags": tags,
+                "limit": limit
+            },
+            "total_found": len(results),
+            "results": results,
+            "note": "Results ranked by keyword relevance (0-3.5 max)"
+        }, indent=2)
+
+
+def _handle_no_results(query: str, priority: Optional[str], tags: Optional[str]) -> str:
+    """
+    Format empty search results response.
+
+    Returns: JSON string for no results found
+    """
+    return json.dumps({
+        "query": query,
+        "filters": {
+            "priority": priority,
+            "tags": tags
+        },
+        "total_found": 0,
+        "message": "No contexts found matching query",
+        "results": []
+    }, indent=2)
+
+
+# ==================== END HELPER FUNCTIONS ====================
 
 @breadcrumb
 @mcp.tool()
@@ -4891,142 +5092,27 @@ async def search_contexts(
         session_id = _get_session_id_for_project(conn, project)
 
         # Try semantic search first if enabled
-        semantic_results = []
         if use_semantic:
-            try:
-                from src.services import embedding_service
-                from src.services.semantic_search import SemanticSearch
-
-                if embedding_service and embedding_service.enabled:
-                    semantic_search = SemanticSearch(conn, embedding_service)
-
-                    # Check if any contexts have embeddings
-                    cursor = conn.execute("SELECT COUNT(*) as count FROM context_locks WHERE embedding IS NOT NULL")
-                    embedded_count = cursor.fetchone()['count']
-
-                    if embedded_count > 0:
-                        # Use semantic search with filters
-                        results = semantic_search.search_similar(
-                            query=query,
-                            limit=limit,
-                            threshold=0.6,  # Slightly lower threshold for search
-                            priority_filter=priority,
-                            tags_filter=tags
-                        )
-
-                        if results:
-                            return json.dumps({
-                                "search_mode": "semantic",
-                                "query": query,
-                                "total_results": len(results),
-                                "results": results,
-                                "note": "Results ranked by semantic similarity (0-1)"
-                            }, indent=2)
-            except Exception as e:
-                # Fall back to keyword search
-                print(f"⚠️  Semantic search unavailable: {e}", file=sys.stderr)
+            semantic_result = _try_semantic_search(conn, query, priority, tags, limit)
+            if semantic_result:
+                return json.dumps(semantic_result, indent=2)
 
         # Fall back to keyword search
-        # Build SQL query
-        # NOTE: No session_id filter needed - schema isolation provides project-level isolation
-        sql = """
-            SELECT
-                label, version, content, preview, key_concepts,
-                locked_at, metadata, last_accessed, access_count
-            FROM context_locks
-            WHERE (
-                content LIKE ?
-                OR preview LIKE ?
-                OR key_concepts LIKE ?
-                OR label LIKE ?
-            )
-        """
-
-        params = [f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%']
-
-        # Add priority filter
-        if priority:
-            sql += " AND (metadata::json)->>'priority' = ?"
-            params.append(priority)
-
-        # Add tags filter
-        if tags:
-            tag_conditions = []
-            for tag in tags.split(','):
-                tag = tag.strip()
-                tag_conditions.append("(metadata::json)->>'tags' LIKE ?")
-                params.append(f'%{tag}%')
-            sql += f" AND ({' OR '.join(tag_conditions)})"
-
-        sql += " LIMIT ?"
-        params.append(limit)
-
         try:
+            # Build SQL query and parameters
+            sql, params = _build_keyword_search_query(query, priority, tags, limit)
+
+            # Execute query
             cursor = conn.execute(sql, params)
-            results = cursor.fetchall()
+            rows = cursor.fetchall()
 
-            if not results:
-                return json.dumps({
-                    "query": query,
-                    "filters": {
-                        "priority": priority,
-                        "tags": tags
-                    },
-                    "total_found": 0,
-                    "message": "No contexts found matching query",
-                    "results": []
-                }, indent=2)
+            # Handle no results
+            if not rows:
+                return _handle_no_results(query, priority, tags)
 
-            # Calculate relevance scores
-            scored_results = []
-            for row in results:
-                score = 0.0
-
-                # Exact label match = highest score
-                if query.lower() in row['label'].lower():
-                    score += 1.0
-
-                # Key concepts match
-                if row['key_concepts'] and query.lower() in row['key_concepts'].lower():
-                    score += 0.7
-
-                # Content match
-                if row['content'] and query.lower() in row['content'].lower():
-                    score += 0.5
-
-                # Preview match
-                if row['preview'] and query.lower() in row['preview'].lower():
-                    score += 0.3
-
-                # Parse metadata
-                metadata = json.loads(row['metadata']) if row['metadata'] else {}
-
-                scored_results.append({
-                    "label": row['label'],
-                    "version": row['version'],
-                    "score": round(score, 2),
-                    "preview": row['preview'] or row['content'][:200] + "..." if row['content'] else "",
-                    "priority": metadata.get('priority', 'reference'),
-                    "tags": metadata.get('tags', []),
-                    "last_accessed": row['last_accessed'],
-                    "access_count": row['access_count'] or 0
-                })
-
-            # Sort by score (highest first)
-            scored_results.sort(key=lambda x: x['score'], reverse=True)
-
-            return json.dumps({
-                "search_mode": "keyword",
-                "query": query,
-                "filters": {
-                    "priority": priority,
-                    "tags": tags,
-                    "limit": limit
-                },
-                "total_found": len(scored_results),
-                "results": scored_results,
-                "note": "Results ranked by keyword relevance (0-3.5 max)"
-            }, indent=2)
+            # Score and format results
+            scored_results = _score_search_results(rows, query)
+            return _format_search_response(scored_results, "keyword", query, priority, tags, limit)
 
         except Exception as e:
             return f"❌ Search error: {str(e)}"
@@ -6847,6 +6933,154 @@ async def explore_context_tree(flat: bool = True, confirm_full: bool = False, pr
 # FILE SEMANTIC MODEL - MCP Tools
 # ============================================================================
 
+# Helper functions for context_dashboard
+def _fetch_priority_statistics(conn, session_id):
+    """Fetch context statistics grouped by priority."""
+    stats_query = """
+        SELECT
+            (metadata::json)->>'priority' as priority,
+            COUNT(*) as count,
+            SUM(LENGTH(content)) as total_size,
+            AVG(LENGTH(content)) as avg_size
+        FROM context_locks
+        GROUP BY priority
+    """
+
+    cursor = conn.execute(stats_query)
+    priority_stats = {}
+    total_contexts = 0
+    total_size = 0
+
+    for row in cursor.fetchall():
+        priority = row['priority'] or 'reference'
+        priority_stats[priority] = {
+            'count': row['count'],
+            'total_size': row['total_size'],
+            'avg_size': int(row['avg_size'])
+        }
+        total_contexts += row['count']
+        total_size += row['total_size']
+
+    return priority_stats, total_contexts, total_size
+
+
+def _fetch_access_patterns(conn, session_id):
+    """Fetch most and least accessed contexts."""
+    most_accessed = conn.execute("""
+        SELECT label, access_count, last_accessed
+        FROM context_locks
+        ORDER BY access_count DESC
+        LIMIT 5
+    """).fetchall()
+
+    least_accessed = conn.execute("""
+        SELECT label, access_count, last_accessed
+        FROM context_locks
+        WHERE access_count > 0
+        ORDER BY access_count ASC
+        LIMIT 5
+    """).fetchall()
+
+    return most_accessed, least_accessed
+
+
+def _fetch_stale_contexts(conn, session_id):
+    """Find contexts not accessed in 30+ days."""
+    import time
+    thirty_days_ago = time.time() - (30 * 24 * 3600)
+    stale_contexts = conn.execute("""
+        SELECT label, last_accessed, access_count
+        FROM context_locks
+        WHERE (last_accessed < ? OR last_accessed IS NULL)
+        ORDER BY last_accessed ASC
+        LIMIT 5
+    """, (thirty_days_ago,)).fetchall()
+
+    return stale_contexts
+
+
+def _fetch_version_statistics(conn, session_id):
+    """Get statistics for multi-version contexts."""
+    version_stats = conn.execute("""
+        SELECT
+            label,
+            COUNT(*) as version_count,
+            MAX(version) as latest_version
+        FROM context_locks
+        GROUP BY label
+        HAVING COUNT(*) > 1
+        ORDER BY COUNT(*) DESC
+        LIMIT 5
+    """).fetchall()
+
+    return version_stats
+
+
+def _build_summary_text(total_contexts, total_size, priority_stats, stale_count, version_count):
+    """Generate dashboard summary text."""
+    summary_text = f"""
+📊 Context Library Dashboard
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Total Contexts: {total_contexts}
+Total Storage: {total_size:,} bytes ({total_size/1024/1024:.2f} MB)
+
+By Priority:
+  always_check: {priority_stats.get('always_check', {}).get('count', 0)} contexts
+  important: {priority_stats.get('important', {}).get('count', 0)} contexts
+  reference: {priority_stats.get('reference', {}).get('count', 0)} contexts
+
+Stale Contexts: {stale_count} (30+ days)
+Versioned Contexts: {version_count}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+""".strip()
+
+    return summary_text
+
+
+def _format_response_lists(rows, list_type):
+    """Format rows into response list format."""
+    import time
+
+    if list_type == "most_accessed" or list_type == "least_accessed":
+        return [
+            {"label": row['label'], "access_count": row['access_count']}
+            for row in rows
+        ]
+    elif list_type == "stale_contexts":
+        return [
+            {"label": row['label'], "days_since_access": int((time.time() - (row['last_accessed'] or 0)) / 86400)}
+            for row in rows
+        ]
+    elif list_type == "versioned_contexts":
+        return [
+            {"label": row['label'], "versions": row['version_count'], "latest": row['latest_version']}
+            for row in rows
+        ]
+    return []
+
+
+def _build_dashboard_response(summary_text, total_contexts, total_size, priority_stats,
+                               most_accessed, least_accessed, stale_contexts, version_stats):
+    """Assemble final dashboard response."""
+    response = {
+        "summary": summary_text,
+        "statistics": {
+            "total_contexts": total_contexts,
+            "total_size_bytes": total_size,
+            "by_priority": priority_stats
+        },
+        "most_accessed": _format_response_lists(most_accessed, "most_accessed"),
+        "least_accessed": _format_response_lists(least_accessed, "least_accessed"),
+        "stale_contexts": _format_response_lists(stale_contexts, "stale_contexts"),
+        "versioned_contexts": _format_response_lists(version_stats, "versioned_contexts")
+    }
+
+    if total_contexts == 0:
+        response["message"] = "No contexts found. Use lock_context() to create your first context."
+
+    return response
+
+
 @breadcrumb
 @mcp.tool()
 async def context_dashboard(project: Optional[str] = None) -> str:
@@ -6875,118 +7109,23 @@ async def context_dashboard(project: Optional[str] = None) -> str:
     with _get_db_for_project(project) as conn:
         session_id = _get_session_id_for_project(conn, project)
 
-        # Get comprehensive statistics
-        # NOTE: No session_id filter needed - schema isolation provides project-level isolation
-        stats_query = """
-            SELECT
-                (metadata::json)->>'priority' as priority,
-                COUNT(*) as count,
-                SUM(LENGTH(content)) as total_size,
-                AVG(LENGTH(content)) as avg_size
-            FROM context_locks
-            GROUP BY priority
-        """
+        # Fetch all statistics using helper functions
+        priority_stats, total_contexts, total_size = _fetch_priority_statistics(conn, session_id)
+        most_accessed, least_accessed = _fetch_access_patterns(conn, session_id)
+        stale_contexts = _fetch_stale_contexts(conn, session_id)
+        version_stats = _fetch_version_statistics(conn, session_id)
 
-        cursor = conn.execute(stats_query)
-        priority_stats = {}
-        total_contexts = 0
-        total_size = 0
+    # Build summary text
+    summary_text = _build_summary_text(
+        total_contexts, total_size, priority_stats,
+        len(stale_contexts), len(version_stats)
+    )
 
-        for row in cursor.fetchall():
-            priority = row['priority'] or 'reference'
-            priority_stats[priority] = {
-                'count': row['count'],
-                'total_size': row['total_size'],
-                'avg_size': int(row['avg_size'])
-            }
-            total_contexts += row['count']
-            total_size += row['total_size']
-
-        # Get access patterns
-        # NOTE: No session_id filter needed - schema isolation provides project-level isolation
-        most_accessed = conn.execute("""
-            SELECT label, access_count, last_accessed
-            FROM context_locks
-            ORDER BY access_count DESC
-            LIMIT 5
-        """).fetchall()
-
-        least_accessed = conn.execute("""
-            SELECT label, access_count, last_accessed
-            FROM context_locks
-            WHERE access_count > 0
-            ORDER BY access_count ASC
-            LIMIT 5
-        """).fetchall()
-
-        # Find stale contexts (30+ days)
-        import time
-        thirty_days_ago = time.time() - (30 * 24 * 3600)
-        stale_contexts = conn.execute("""
-            SELECT label, last_accessed, access_count
-            FROM context_locks
-            WHERE (last_accessed < ? OR last_accessed IS NULL)
-            ORDER BY last_accessed ASC
-            LIMIT 5
-        """, (thirty_days_ago,)).fetchall()
-
-        # Get version statistics
-        version_stats = conn.execute("""
-            SELECT
-                label,
-                COUNT(*) as version_count,
-                MAX(version) as latest_version
-            FROM context_locks
-            GROUP BY label
-            HAVING COUNT(*) > 1
-            ORDER BY COUNT(*) DESC
-            LIMIT 5
-        """).fetchall()
-
-    # Build summary
-    summary_text = f"""
-📊 Context Library Dashboard
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total Contexts: {total_contexts}
-Total Storage: {total_size:,} bytes ({total_size/1024/1024:.2f} MB)
-
-By Priority:
-  always_check: {priority_stats.get('always_check', {}).get('count', 0)} contexts
-  important: {priority_stats.get('important', {}).get('count', 0)} contexts
-  reference: {priority_stats.get('reference', {}).get('count', 0)} contexts
-
-Stale Contexts: {len(stale_contexts)} (30+ days)
-Versioned Contexts: {len(version_stats)}
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-""".strip()
-
-    response = {
-        "summary": summary_text,
-        "statistics": {
-            "total_contexts": total_contexts,
-            "total_size_bytes": total_size,
-            "by_priority": priority_stats
-        },
-        "most_accessed": [
-            {"label": row['label'], "access_count": row['access_count']}
-            for row in most_accessed
-        ],
-        "least_accessed": [
-            {"label": row['label'], "access_count": row['access_count']}
-            for row in least_accessed
-        ],
-        "stale_contexts": [
-            {"label": row['label'], "days_since_access": int((time.time() - (row['last_accessed'] or 0)) / 86400)}
-            for row in stale_contexts
-        ],
-        "versioned_contexts": [
-            {"label": row['label'], "versions": row['version_count'], "latest": row['latest_version']}
-            for row in version_stats
-        ]
-    }
-
-    if total_contexts == 0:
-        response["message"] = "No contexts found. Use lock_context() to create your first context."
+    # Build and return response
+    response = _build_dashboard_response(
+        summary_text, total_contexts, total_size, priority_stats,
+        most_accessed, least_accessed, stale_contexts, version_stats
+    )
 
     return json.dumps(response, indent=2)
 
