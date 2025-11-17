@@ -1,0 +1,166 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                 lock_context Test Plan - Quick Reference Card               ║
+║                                                                              ║
+║  Function: lock_context() in claude_mcp_hybrid_sessions.py (lines 3676-3926)║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ QUICK STATS                                                                ┃
+┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+┃ Total Test Cases:  28                                                      ┃
+┃ Test Groups:        7                                                      ┃
+┃ Expected Coverage: >90%                                                    ┃
+┃ Execution Time:    ~8-10 minutes                                           ┃
+┃ Framework:         pytest + PostgreSQL                                     ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│ GROUP 1: PRIORITY AUTO-DETECTION (5 tests)                                 │
+├────────────────────────────────────────────────────────────────────────────┤
+│ 1. test_priority_auto_detect_always_check_with_always     → "ALWAYS"      │
+│ 2. test_priority_auto_detect_always_check_with_never      → "NEVER"       │
+│ 3. test_priority_auto_detect_always_check_with_must       → "MUST"        │
+│ 4. test_priority_auto_detect_important_with_critical      → "IMPORTANT"   │
+│ 5. test_priority_auto_detect_reference_no_keywords        → Default       │
+└────────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│ GROUP 2: VERSION MANAGEMENT (5 tests)                                      │
+├────────────────────────────────────────────────────────────────────────────┤
+│ 6. test_version_first_lock_creates_1_0                    → 1.0            │
+│ 7. test_version_increment_1_0_to_1_1                      → 1.0 → 1.1     │
+│ 8. test_version_increment_1_1_to_1_2                      → 1.1 → 1.2     │
+│ 9. test_version_multiple_increments_sequential            → 1.0 → 1.1 → ..│
+│ 10. test_version_respects_session_isolation               → Per-session   │
+└────────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│ GROUP 3: KEYWORD EXTRACTION (7 tests)  [6 patterns]                        │
+├────────────────────────────────────────────────────────────────────────────┤
+│ 11. test_keyword_extract_output_pattern          → output/directory/folder │
+│ 12. test_keyword_extract_test_pattern            → test/testing/spec       │
+│ 13. test_keyword_extract_config_pattern          → config/settings         │
+│ 14. test_keyword_extract_api_pattern             → api/endpoint/rest       │
+│ 15. test_keyword_extract_database_pattern        → database/db/sql/table   │
+│ 16. test_keyword_extract_security_pattern        → auth/token/password     │
+│ 17. test_keyword_extract_multiple_keywords       → Combined patterns       │
+└────────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│ GROUP 4: ERROR HANDLING & VALIDATION (3 tests)                             │
+├────────────────────────────────────────────────────────────────────────────┤
+│ 18. test_duplicate_version_raises_error          → Prevent duplicates      │
+│ 19. test_invalid_priority_parameter              → Validate input          │
+│ 20. test_content_hash_uniqueness                 → SHA256 hashing          │
+└────────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│ GROUP 5: SESSION & PROJECT ISOLATION (3 tests)                             │
+├────────────────────────────────────────────────────────────────────────────┤
+│ 21. test_session_creation_if_not_exists          → Auto-create session    │
+│ 22. test_project_parameter_override              → project="innkeeper"    │
+│ 23. test_audit_trail_creation                    → memory_entries log     │
+└────────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│ GROUP 6: CONTENT PROCESSING (3 tests)                                      │
+├────────────────────────────────────────────────────────────────────────────┤
+│ 24. test_preview_generation_length_limit         → ≤500 chars             │
+│ 25. test_key_concepts_extraction                 → Extract concepts       │
+│ 26. test_metadata_json_structure                 → Valid JSON structure   │
+└────────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│ GROUP 7: EMBEDDING GENERATION (2 tests)                                    │
+├────────────────────────────────────────────────────────────────────────────┤
+│ 27. test_embedding_graceful_failure_no_service   → Handle unavailable svc │
+│ 28. test_embedding_uses_preview_text             → Use preview ≤1020 ch   │
+└────────────────────────────────────────────────────────────────────────────┘
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║ EXECUTION PHASES                                                           ║
+╠════════════════════════════════════════════════════════════════════════════╣
+║ PHASE 1: Unit Tests (2-3 min)   Tests 1-5, 11-17, 19-20, 27-28            ║
+║          • Mock DB, fast        • Parallel execution                       ║
+║                                                                            ║
+║ PHASE 2: Integration (4-5 min)  Tests 6-10, 18, 21-26                     ║
+║          • Real PostgreSQL      • Sequential execution                     ║
+║                                                                            ║
+║ TOTAL: ~8-10 minutes full run                                              ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║ COVERAGE BY SCENARIO                                                       ║
+╠═══════════════════════════════════════╦═════════════════╦═════════════════╣
+║ Scenario                              ║ Test Count      ║ Code Lines      ║
+╠═══════════════════════════════════════╬═════════════════╬═════════════════╣
+║ Priority Auto-Detection               ║ 5 tests         ║ 3780-3793       ║
+║ Version Management                    ║ 5 tests         ║ 3798-3816       ║
+║ Keyword Extraction (6 patterns)       ║ 7 tests         ║ 3818-3831       ║
+║ Error Handling & Validation           ║ 3 tests         ║ 3790-3793       ║
+║ Session & Project Isolation           ║ 3 tests         ║ 3757-3778       ║
+║ Content Processing                    ║ 3 tests         ║ 3841-3844       ║
+║ Embedding (Graceful Failure)          ║ 2 tests         ║ 3878-3908       ║
+║─────────────────────────────────────────────────────────────────────────────║
+║ TOTAL                                 ║ 28 tests        ║ 3676-3926       ║
+╚═══════════════════════════════════════╩═════════════════╩═════════════════╝
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║ KEY TEST DATA EXAMPLES                                                     ║
+╠════════════════════════════════════════════════════════════════════════════╣
+║                                                                            ║
+║  Content samples:                                                          ║
+║  • "ALWAYS validate input" → priority="always_check"                      ║
+║  • "NEVER expose secrets" → priority="always_check"                       ║
+║  • "Important decision"   → priority="important"                          ║
+║  • "Documentation"        → priority="reference"                          ║
+║                                                                            ║
+║  Keyword examples:                                                         ║
+║  • "output directory" → keywords=['output']                               ║
+║  • "REST API endpoint" → keywords=['api']                                 ║
+║  • "PostgreSQL database" → keywords=['database']                          ║
+║  • "JWT auth tokens" → keywords=['security']                              ║
+║  • "Combined: API database auth" → keywords=['api','database','security']║
+║                                                                            ║
+║  Version sequence:                                                         ║
+║  • First lock: 1.0                                                         ║
+║  • Second lock: 1.1                                                        ║
+║  • Third lock: 1.2                                                         ║
+║  • Continue: 1.3, 1.4, 1.5...                                             ║
+║                                                                            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║ QUICK COMMANDS                                                             ║
+╠════════════════════════════════════════════════════════════════════════════╣
+║                                                                            ║
+║  # View test plan documents:                                               ║
+║  cat TEST_PLAN_LOCK_CONTEXT_REFACTORING.md                                ║
+║  cat LOCK_CONTEXT_TEST_CASES.md                                            ║
+║  cat LOCK_CONTEXT_TEST_IMPLEMENTATION_GUIDE.md                             ║
+║  cat LOCK_CONTEXT_TEST_COVERAGE_MATRIX.md                                 ║
+║                                                                            ║
+║  # Run tests (after implementation):                                       ║
+║  pytest test_lock_context_*.py -v                                          ║
+║  pytest test_lock_context_priority.py -v                                   ║
+║  pytest --cov=claude_mcp_hybrid_sessions test_lock_context_*.py            ║
+║                                                                            ║
+║  # View function code:                                                     ║
+║  sed -n '3676,3926p' claude_mcp_hybrid_sessions.py                         ║
+║                                                                            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║ SUCCESS CRITERIA                                                           ║
+╠════════════════════════════════════════════════════════════════════════════╣
+║                                                                            ║
+║  ✅ All 28 tests pass                                                      ║
+║  ✅ Code coverage >90%                                                     ║
+║  ✅ No regressions in existing functionality                               ║
+║  ✅ Performance: each test <2 seconds                                      ║
+║  ✅ Clear error messages for failures                                      ║
+║                                                                            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+Created: 2025-11-17
+Status:  Test Plan Complete - Ready for Implementation
