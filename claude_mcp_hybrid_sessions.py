@@ -845,125 +845,115 @@ def update_session_activity():
         """, (time.time(), session_id))
         conn.commit()
 
-def validate_database_isolation(conn) -> dict:
+def _check_path_correctness(conn) -> dict:
     """
-    Internal function to validate database isolation for current project.
+    Check 1: Validate database path calculated from current directory.
 
     Args:
-        conn: Existing database connection (to avoid creating new connection)
-
-    Checks 8 parameters of database "rightness":
-    1. Path Correctness - Database path calculated from current directory
-    2. Hash Consistency - Database filename hash matches directory MD5
-    3. Session Alignment - Session fingerprint matches current project
-    4. Path Mapping - Entry in path_mapping.json is accurate
-    5. Context Isolation - No contexts from other projects
-    6. Schema Integrity - All required tables/columns exist
-    7. No Orphaned Data - All contexts have valid sessions
-    8. Session Metadata - Session record matches runtime parameters
+        conn: Database connection
 
     Returns:
-        dict: Validation report with status, checks, warnings, errors
+        dict: Check result with passed, level, and metadata
     """
-    current_cwd = os.getcwd()
-    validation_report = {
-        "valid": True,
-        "level": "valid",  # valid | warning | critical
-        "checks": {},
-        "warnings": [],
-        "errors": [],
-        "recommendations": []
-    }
-
-    # Check 1: Path Correctness (SQLite only)
-    if not is_postgresql_mode():
-        try:
-            expected_hash = hashlib.md5(current_cwd.encode()).hexdigest()[:8]
-            actual_db_path = get_current_db_path()
-            expected_db_path = os.path.expanduser(f"~/.claude-dementia/{expected_hash}.db")
-
-            # Normalize paths for comparison
-            actual_normalized = os.path.normpath(actual_db_path)
-            expected_normalized = os.path.normpath(expected_db_path)
-
-            path_correct = actual_normalized == expected_normalized
-
-            validation_report["checks"]["path_correctness"] = {
-                "passed": path_correct,
-                "expected": expected_db_path,
-                "actual": actual_db_path,
-                "level": "important"
-            }
-
-            if not path_correct:
-                validation_report["valid"] = False
-                validation_report["level"] = "warning"
-                validation_report["warnings"].append(
-                    f"Database path mismatch. Expected: {expected_db_path}, Actual: {actual_db_path}"
-                )
-        except Exception as e:
-            validation_report["checks"]["path_correctness"] = {
-                "passed": False,
-                "error": str(e),
-                "level": "important"
-            }
-            validation_report["valid"] = False
-            validation_report["level"] = "warning"
-    else:
-        # PostgreSQL: Schema-based isolation, path checks not applicable
-        validation_report["checks"]["path_correctness"] = {
+    if is_postgresql_mode():
+        return {
             "passed": True,
             "note": "Skipped (PostgreSQL mode uses schema-based isolation)",
             "level": "informational"
         }
 
-    # Check 2: Hash Consistency (SQLite only)
-    if not is_postgresql_mode():
-        try:
-            expected_hash = hashlib.md5(current_cwd.encode()).hexdigest()[:8]
-            actual_db_path = get_current_db_path()
-            db_filename = os.path.basename(actual_db_path)
-            db_hash = db_filename.replace('.db', '')
+    try:
+        current_cwd = os.getcwd()
+        expected_hash = hashlib.md5(current_cwd.encode()).hexdigest()[:8]
+        actual_db_path = get_current_db_path()
+        expected_db_path = os.path.expanduser(f"~/.claude-dementia/{expected_hash}.db")
 
-            hash_consistent = db_hash == expected_hash
+        # Normalize paths for comparison
+        actual_normalized = os.path.normpath(actual_db_path)
+        expected_normalized = os.path.normpath(expected_db_path)
 
-            validation_report["checks"]["hash_consistency"] = {
-                "passed": hash_consistent,
-                "expected_hash": expected_hash,
-                "actual_hash": db_hash,
-                "directory": current_cwd,
-                "level": "critical"
-            }
+        path_correct = actual_normalized == expected_normalized
 
-            if not hash_consistent:
-                validation_report["valid"] = False
-                validation_report["level"] = "critical"
-                validation_report["errors"].append(
-                    f"DATABASE ISOLATION VIOLATION: Hash mismatch! "
-                    f"Expected {expected_hash} for {current_cwd}, got {db_hash}"
-                )
-                validation_report["recommendations"].append(
-                    "This indicates you may be using a database from a different project. "
-                    "Check if you're in the correct directory."
-                )
-        except Exception as e:
-            validation_report["checks"]["hash_consistency"] = {
-                "passed": False,
-                "error": str(e),
-                "level": "critical"
-            }
-            validation_report["valid"] = False
-            validation_report["level"] = "critical"
-    else:
-        # PostgreSQL: Schema name provides isolation, not filename hash
-        validation_report["checks"]["hash_consistency"] = {
+        return {
+            "passed": path_correct,
+            "expected": expected_db_path,
+            "actual": actual_db_path,
+            "level": "important",
+            "warning": None if path_correct else
+                f"Database path mismatch. Expected: {expected_db_path}, Actual: {actual_db_path}"
+        }
+    except Exception as e:
+        return {
+            "passed": False,
+            "error": str(e),
+            "level": "important"
+        }
+
+
+def _check_hash_consistency(conn) -> dict:
+    """
+    Check 2: Verify database filename hash matches directory MD5.
+
+    Args:
+        conn: Database connection
+
+    Returns:
+        dict: Check result with passed, level, and metadata
+    """
+    if is_postgresql_mode():
+        return {
             "passed": True,
             "note": "Skipped (PostgreSQL mode uses schema names for isolation)",
             "schema": _get_db_adapter().schema,
             "level": "informational"
         }
 
-    # Check 3: Session Alignment
+    try:
+        current_cwd = os.getcwd()
+        expected_hash = hashlib.md5(current_cwd.encode()).hexdigest()[:8]
+        actual_db_path = get_current_db_path()
+        db_filename = os.path.basename(actual_db_path)
+        db_hash = db_filename.replace('.db', '')
+
+        hash_consistent = db_hash == expected_hash
+
+        result = {
+            "passed": hash_consistent,
+            "expected_hash": expected_hash,
+            "actual_hash": db_hash,
+            "directory": current_cwd,
+            "level": "critical"
+        }
+
+        if not hash_consistent:
+            result["error"] = (
+                f"DATABASE ISOLATION VIOLATION: Hash mismatch! "
+                f"Expected {expected_hash} for {current_cwd}, got {db_hash}"
+            )
+            result["recommendation"] = (
+                "This indicates you may be using a database from a different project. "
+                "Check if you're in the correct directory."
+            )
+
+        return result
+    except Exception as e:
+        return {
+            "passed": False,
+            "error": str(e),
+            "level": "critical"
+        }
+
+
+def _check_session_alignment(conn) -> dict:
+    """
+    Check 3: Verify session fingerprint matches current project.
+
+    Args:
+        conn: Database connection
+
+    Returns:
+        dict: Check result with passed, level, and metadata
+    """
     try:
         current_project_root = get_project_root()
         current_project_name = get_project_name()
@@ -982,7 +972,7 @@ def validate_database_isolation(conn) -> dict:
             actual_fingerprint = session['project_fingerprint']
             session_aligned = actual_fingerprint == expected_fingerprint
 
-            validation_report["checks"]["session_alignment"] = {
+            result = {
                 "passed": session_aligned,
                 "expected_fingerprint": expected_fingerprint,
                 "actual_fingerprint": actual_fingerprint,
@@ -991,92 +981,107 @@ def validate_database_isolation(conn) -> dict:
             }
 
             if not session_aligned:
-                validation_report["valid"] = False
-                validation_report["level"] = "critical"
-                validation_report["errors"].append(
+                result["error"] = (
                     f"SESSION ISOLATION VIOLATION: Session fingerprint mismatch! "
                     f"Expected {expected_fingerprint}, got {actual_fingerprint}"
                 )
-                validation_report["recommendations"].append(
+                result["recommendation"] = (
                     f"Session {session_id} belongs to a different project. "
                     f"This should never happen with proper isolation."
                 )
+
+            return result
         else:
-            validation_report["checks"]["session_alignment"] = {
+            return {
                 "passed": False,
                 "error": "Session not found in database",
                 "level": "critical"
             }
-            validation_report["valid"] = False
-            validation_report["level"] = "critical"
     except Exception as e:
-        validation_report["checks"]["session_alignment"] = {
+        return {
             "passed": False,
             "error": str(e),
             "level": "critical"
         }
-        validation_report["valid"] = False
-        validation_report["level"] = "critical"
 
-    # Check 4: Path Mapping Accuracy (SQLite only)
-    if not is_postgresql_mode():
-        try:
-            mapping_file = os.path.expanduser("~/.claude-dementia/path_mapping.json")
-            if os.path.exists(mapping_file):
-                with open(mapping_file, 'r') as f:
-                    mappings = json.load(f)
 
-                expected_hash = hashlib.md5(current_cwd.encode()).hexdigest()[:8]
-                if expected_hash in mappings:
-                    mapping_entry = mappings[expected_hash]
-                    mapping_accurate = mapping_entry['path'] == current_cwd
+def _check_path_mapping(conn) -> dict:
+    """
+    Check 4: Verify entry in path_mapping.json is accurate.
 
-                    validation_report["checks"]["path_mapping"] = {
-                        "passed": mapping_accurate,
-                        "expected_path": current_cwd,
-                        "mapped_path": mapping_entry['path'],
-                        "mapped_name": mapping_entry['name'],
-                        "level": "important"
-                    }
+    Args:
+        conn: Database connection
 
-                    if not mapping_accurate:
-                        validation_report["valid"] = False
-                        validation_report["level"] = "warning"
-                        validation_report["warnings"].append(
-                            f"Path mapping mismatch. Mapped to {mapping_entry['path']}, "
-                            f"current directory is {current_cwd}"
-                        )
-                else:
-                    validation_report["checks"]["path_mapping"] = {
-                        "passed": False,
-                        "error": f"No mapping entry found for hash {expected_hash}",
-                        "level": "informational"
-                    }
-                    validation_report["warnings"].append(
-                        "Path mapping entry missing (will be created automatically)"
-                    )
-            else:
-                validation_report["checks"]["path_mapping"] = {
-                    "passed": False,
-                    "error": "Path mapping file does not exist",
-                    "level": "informational"
-                }
-        except Exception as e:
-            validation_report["checks"]["path_mapping"] = {
-                "passed": False,
-                "error": str(e),
-                "level": "informational"
-            }
-    else:
-        # PostgreSQL: Schema name is the mapping, no separate mapping file needed
-        validation_report["checks"]["path_mapping"] = {
+    Returns:
+        dict: Check result with passed, level, and metadata
+    """
+    if is_postgresql_mode():
+        return {
             "passed": True,
             "note": "Skipped (PostgreSQL mode uses schema names directly)",
             "schema": _get_db_adapter().schema,
             "level": "informational"
         }
 
-    # Check 5: Context Isolation (Critical!)
+    try:
+        current_cwd = os.getcwd()
+        mapping_file = os.path.expanduser("~/.claude-dementia/path_mapping.json")
+
+        if os.path.exists(mapping_file):
+            with open(mapping_file, 'r') as f:
+                mappings = json.load(f)
+
+            expected_hash = hashlib.md5(current_cwd.encode()).hexdigest()[:8]
+            if expected_hash in mappings:
+                mapping_entry = mappings[expected_hash]
+                mapping_accurate = mapping_entry['path'] == current_cwd
+
+                result = {
+                    "passed": mapping_accurate,
+                    "expected_path": current_cwd,
+                    "mapped_path": mapping_entry['path'],
+                    "mapped_name": mapping_entry['name'],
+                    "level": "important"
+                }
+
+                if not mapping_accurate:
+                    result["warning"] = (
+                        f"Path mapping mismatch. Mapped to {mapping_entry['path']}, "
+                        f"current directory is {current_cwd}"
+                    )
+
+                return result
+            else:
+                return {
+                    "passed": False,
+                    "error": f"No mapping entry found for hash {expected_hash}",
+                    "level": "informational",
+                    "warning": "Path mapping entry missing (will be created automatically)"
+                }
+        else:
+            return {
+                "passed": False,
+                "error": "Path mapping file does not exist",
+                "level": "informational"
+            }
+    except Exception as e:
+        return {
+            "passed": False,
+            "error": str(e),
+            "level": "informational"
+        }
+
+
+def _check_context_isolation(conn) -> dict:
+    """
+    Check 5: Verify no contexts from other projects exist.
+
+    Args:
+        conn: Database connection
+
+    Returns:
+        dict: Check result with passed, level, and metadata
+    """
     try:
         cursor = conn.execute("SELECT DISTINCT session_id FROM context_locks")
         all_sessions = [row['session_id'] for row in cursor.fetchall()]
@@ -1084,7 +1089,7 @@ def validate_database_isolation(conn) -> dict:
 
         foreign_sessions = [s for s in all_sessions if s != current_session_id]
 
-        validation_report["checks"]["context_isolation"] = {
+        result = {
             "passed": len(foreign_sessions) == 0,
             "current_session": current_session_id,
             "foreign_sessions": foreign_sessions,
@@ -1093,16 +1098,14 @@ def validate_database_isolation(conn) -> dict:
         }
 
         if len(foreign_sessions) > 0:
-            validation_report["valid"] = False
-            validation_report["level"] = "critical"
-            validation_report["errors"].append(
+            result["error"] = (
                 f"CONTEXT CONTAMINATION DETECTED: Found {len(foreign_sessions)} foreign sessions in database!"
             )
-            validation_report["recommendations"].append(
+            result["recommendations"] = [
                 "Your database contains contexts from other projects. "
                 "This is a critical isolation violation. "
                 "Each project should have its own database file."
-            )
+            ]
 
             # Get details about foreign sessions
             for foreign_session in foreign_sessions[:5]:  # Limit to first 5
@@ -1111,19 +1114,29 @@ def validate_database_isolation(conn) -> dict:
                     (foreign_session,)
                 )
                 count = cursor.fetchone()['count']
-                validation_report["recommendations"].append(
+                result["recommendations"].append(
                     f"  - Session {foreign_session}: {count} contexts"
                 )
+
+        return result
     except Exception as e:
-        validation_report["checks"]["context_isolation"] = {
+        return {
             "passed": False,
             "error": str(e),
             "level": "critical"
         }
-        validation_report["valid"] = False
-        validation_report["level"] = "critical"
 
-    # Check 6: Schema Integrity
+
+def _check_schema_integrity(conn) -> dict:
+    """
+    Check 6: Verify all required tables and columns exist.
+
+    Args:
+        conn: Database connection
+
+    Returns:
+        dict: Check result with passed, level, and metadata
+    """
     try:
         # Skip SQLite-specific schema checks in PostgreSQL mode
         if not is_postgresql_mode():
@@ -1144,23 +1157,20 @@ def validate_database_isolation(conn) -> dict:
                 )
                 if cursor.fetchone() is None:
                     missing_tables.append(table)
-        else:
-            # PostgreSQL mode - schema is managed by postgres_adapter
-            missing_tables = []
 
-        # Check critical columns in sessions table (SQLite only)
-        if not is_postgresql_mode():
+            # Check critical columns in sessions table
             cursor = conn.execute("PRAGMA table_info(sessions)")
             session_columns = [col[1] for col in cursor.fetchall()]
             required_columns = ['project_fingerprint', 'project_path', 'project_name']
             missing_columns = [col for col in required_columns if col not in session_columns]
         else:
             # PostgreSQL - assume schema is correct (managed by postgres_adapter)
+            missing_tables = []
             missing_columns = []
 
         schema_valid = len(missing_tables) == 0 and len(missing_columns) == 0
 
-        validation_report["checks"]["schema_integrity"] = {
+        result = {
             "passed": schema_valid,
             "missing_tables": missing_tables,
             "missing_columns": missing_columns,
@@ -1168,18 +1178,30 @@ def validate_database_isolation(conn) -> dict:
         }
 
         if not schema_valid:
-            validation_report["warnings"].append(
+            result["warning"] = (
                 f"Schema incomplete: {len(missing_tables)} missing tables, "
                 f"{len(missing_columns)} missing columns (will auto-migrate)"
             )
+
+        return result
     except Exception as e:
-        validation_report["checks"]["schema_integrity"] = {
+        return {
             "passed": False,
             "error": str(e),
             "level": "informational"
         }
 
-    # Check 7: No Orphaned Data
+
+def _check_orphaned_data(conn) -> dict:
+    """
+    Check 7: Find orphaned records without valid sessions.
+
+    Args:
+        conn: Database connection
+
+    Returns:
+        dict: Check result with passed, level, and metadata
+    """
     try:
         cursor = conn.execute("""
             SELECT cl.id, cl.label, cl.session_id
@@ -1189,7 +1211,7 @@ def validate_database_isolation(conn) -> dict:
         """)
         orphaned = cursor.fetchall()
 
-        validation_report["checks"]["orphaned_data"] = {
+        result = {
             "passed": len(orphaned) == 0,
             "orphaned_count": len(orphaned),
             "orphaned_contexts": [
@@ -1200,20 +1222,28 @@ def validate_database_isolation(conn) -> dict:
         }
 
         if len(orphaned) > 0:
-            validation_report["warnings"].append(
-                f"Found {len(orphaned)} orphaned contexts (no valid session)"
-            )
-            validation_report["recommendations"].append(
-                "Run cleanup to remove orphaned contexts"
-            )
+            result["warning"] = f"Found {len(orphaned)} orphaned contexts (no valid session)"
+            result["recommendation"] = "Run cleanup to remove orphaned contexts"
+
+        return result
     except Exception as e:
-        validation_report["checks"]["orphaned_data"] = {
+        return {
             "passed": False,
             "error": str(e),
             "level": "informational"
         }
 
-    # Check 8: Session Metadata Consistency
+
+def _check_session_metadata(conn) -> dict:
+    """
+    Check 8: Verify session record matches runtime parameters.
+
+    Args:
+        conn: Database connection
+
+    Returns:
+        dict: Check result with passed, level, and metadata
+    """
     try:
         session_id = get_current_session_id()
         cursor = conn.execute(
@@ -1230,7 +1260,7 @@ def validate_database_isolation(conn) -> dict:
 
             time_since_active = time.time() - session['last_active']
 
-            validation_report["checks"]["session_metadata"] = {
+            result = {
                 "passed": metadata_consistent,
                 "expected_path": get_project_root(),
                 "actual_path": session['project_path'],
@@ -1241,24 +1271,99 @@ def validate_database_isolation(conn) -> dict:
             }
 
             if not metadata_consistent:
-                validation_report["valid"] = False
-                validation_report["level"] = "warning"
-                validation_report["warnings"].append(
+                result["warning"] = (
                     "Session metadata out of sync with current project "
                     "(will be updated automatically)"
                 )
+
+            return result
         else:
-            validation_report["checks"]["session_metadata"] = {
+            return {
                 "passed": False,
                 "error": "Session not found",
                 "level": "important"
             }
     except Exception as e:
-        validation_report["checks"]["session_metadata"] = {
+        return {
             "passed": False,
             "error": str(e),
             "level": "important"
         }
+
+
+def validate_database_isolation(conn) -> dict:
+    """
+    Internal function to validate database isolation for current project.
+
+    Args:
+        conn: Existing database connection (to avoid creating new connection)
+
+    Checks 8 parameters of database "rightness":
+    1. Path Correctness - Database path calculated from current directory
+    2. Hash Consistency - Database filename hash matches directory MD5
+    3. Session Alignment - Session fingerprint matches current project
+    4. Path Mapping - Entry in path_mapping.json is accurate
+    5. Context Isolation - No contexts from other projects
+    6. Schema Integrity - All required tables/columns exist
+    7. No Orphaned Data - All contexts have valid sessions
+    8. Session Metadata - Session record matches runtime parameters
+
+    Returns:
+        dict: Validation report with status, checks, warnings, errors
+    """
+    validation_report = {
+        "valid": True,
+        "level": "valid",  # valid | warning | critical
+        "checks": {},
+        "warnings": [],
+        "errors": [],
+        "recommendations": []
+    }
+
+    # Define validation checks in order
+    checks = [
+        ("path_correctness", _check_path_correctness),
+        ("hash_consistency", _check_hash_consistency),
+        ("session_alignment", _check_session_alignment),
+        ("path_mapping", _check_path_mapping),
+        ("context_isolation", _check_context_isolation),
+        ("schema_integrity", _check_schema_integrity),
+        ("orphaned_data", _check_orphaned_data),
+        ("session_metadata", _check_session_metadata),
+    ]
+
+    # Run each validation check
+    for check_name, check_func in checks:
+        check_result = check_func(conn)
+        validation_report["checks"][check_name] = check_result
+
+        # Process check result
+        if not check_result.get("passed", False):
+            validation_report["valid"] = False
+
+            # Update severity level
+            check_level = check_result.get("level", "informational")
+            if check_level == "critical":
+                validation_report["level"] = "critical"
+            elif check_level == "important" and validation_report["level"] != "critical":
+                validation_report["level"] = "warning"
+
+        # Aggregate warnings
+        if "warning" in check_result and check_result["warning"]:
+            validation_report["warnings"].append(check_result["warning"])
+
+        # Aggregate errors
+        if "error" in check_result and not check_result.get("passed", False):
+            error_msg = check_result["error"]
+            if error_msg not in validation_report["errors"]:
+                validation_report["errors"].append(error_msg)
+
+        # Aggregate recommendations
+        if "recommendation" in check_result:
+            validation_report["recommendations"].append(check_result["recommendation"])
+
+        if "recommendations" in check_result:
+            validation_report["recommendations"].extend(check_result["recommendations"])
 
     # Calculate summary stats
     checks_passed = sum(1 for check in validation_report["checks"].values() if check.get("passed", False))
@@ -1273,10 +1378,6 @@ def validate_database_isolation(conn) -> dict:
     }
 
     return validation_report
-
-# ============================================================================
-# FILE ANALYSIS UTILITIES
-# ============================================================================
 
 def analyze_file_content(file_path: Path) -> Set[str]:
     """Analyze file content for quality indicators"""
@@ -8989,8 +9090,303 @@ async def ai_summarize_context(topic: str, project: Optional[str] = None) -> str
 #    return _get_project_for_context(project)
 #
 
-@breadcrumb
-@mcp.tool()
+def _gather_database_statistics(db, project_name: str) -> dict:
+    """Gather comprehensive database statistics."""
+    stats = {}
+    conn = db.pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            # Context statistics
+            cur.execute(f"""
+                SELECT COUNT(*) as total,
+                       COUNT(CASE WHEN embedding_vector IS NOT NULL THEN 1 END) as with_embeddings,
+                       ROUND(AVG(LENGTH(content))::numeric, 2) as avg_size
+                FROM {db.schema}.context_locks
+                WHERE project_name = %s
+            """, (project_name,))
+            context_stats = cur.fetchone()
+            stats["contexts"] = {
+                "total": context_stats["total"],
+                "with_embeddings": context_stats["with_embeddings"],
+                "coverage": round(context_stats["with_embeddings"] / context_stats["total"] * 100, 1) if context_stats["total"] > 0 else 0,
+                "avg_size": float(context_stats["avg_size"]) if context_stats["avg_size"] else 0
+            }
+
+            # Session statistics
+            cur.execute(f"""
+                SELECT COUNT(*) as total,
+                       COUNT(CASE WHEN expires_at > NOW() THEN 1 END) as active
+                FROM {db.schema}.sessions
+                WHERE project_name = %s
+            """, (project_name,))
+            session_stats = cur.fetchone()
+            stats["sessions"] = {
+                "total": session_stats["total"],
+                "active": session_stats["active"]
+            }
+
+            # Database size
+            cur.execute(f"""
+                SELECT pg_size_pretty(pg_total_relation_size('{db.schema}.context_locks')) as size
+            """)
+            size_result = cur.fetchone()
+            stats["database_size"] = size_result["size"]
+
+    finally:
+        db.pool.putconn(conn)
+    return stats
+
+
+def _check_schema_health(db, project_name: str) -> list:
+    """Check schema integrity and detect missing tables."""
+    issues = []
+    conn = db.pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            # Check for missing expected tables
+            expected_tables = ["projects", "sessions", "context_locks", "memory_entries"]
+            cur.execute(f"""
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = %s
+                  AND table_type = 'BASE TABLE'
+            """, (db.schema,))
+            existing_tables = [row["table_name"] for row in cur.fetchall()]
+
+            missing_tables = set(expected_tables) - set(existing_tables)
+            if missing_tables:
+                issues.append({
+                    "type": "missing_tables",
+                    "severity": "error",
+                    "tables": list(missing_tables),
+                    "impact": "Core functionality broken",
+                    "auto_fixable": False,
+                    "fix_method": "Run apply_migrations() to restore schema"
+                })
+    finally:
+        db.pool.putconn(conn)
+    return issues
+
+
+def _check_data_integrity(db, project_name: str) -> list:
+    """Check data consistency and detect orphaned records."""
+    issues = []
+    conn = db.pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            # Check for sessions without matching project
+            cur.execute(f"""
+                SELECT COUNT(*) as count
+                FROM {db.schema}.sessions s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM {db.schema}.projects p
+                    WHERE p.name = s.project_name
+                )
+            """)
+            orphan_sessions = cur.fetchone()["count"]
+
+            if orphan_sessions > 0:
+                issues.append({
+                    "type": "orphaned_sessions",
+                    "severity": "error",
+                    "count": orphan_sessions,
+                    "impact": "Data corruption, wasted space",
+                    "auto_fixable": True,
+                    "fix_method": "DELETE orphaned sessions"
+                })
+    finally:
+        db.pool.putconn(conn)
+    return issues
+
+
+def _check_embedding_health(db, project_name: str) -> list:
+    """Check embedding status and detect missing embeddings."""
+    issues = []
+    conn = db.pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT id, label
+                FROM {db.schema}.context_locks
+                WHERE project_name = %s
+                  AND embedding_vector IS NULL
+                LIMIT 100
+            """, (project_name,))
+            missing_emb = cur.fetchall()
+
+            if missing_emb:
+                issues.append({
+                    "type": "missing_embeddings",
+                    "severity": "warning",
+                    "count": len(missing_emb),
+                    "impact": f"Semantic search unavailable for {len(missing_emb)} contexts",
+                    "auto_fixable": True,
+                    "fix_method": "generate_embeddings()",
+                    "details": [{"id": r["id"], "label": r["label"]} for r in missing_emb[:5]]
+                })
+    finally:
+        db.pool.putconn(conn)
+    return issues
+
+
+def _check_performance_metrics(db) -> list:
+    """Gather performance data and detect slow tables."""
+    issues = []
+    conn = db.pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            # Find tables with high sequential scan ratio on large tables
+            cur.execute(f"""
+                SELECT
+                    schemaname || '.' || relname as table_name,
+                    seq_scan,
+                    idx_scan,
+                    COALESCE(idx_scan, 0) + seq_scan as total_scans,
+                    pg_size_pretty(pg_total_relation_size(schemaname||'.'||relname)) as size,
+                    pg_total_relation_size(schemaname||'.'||relname) as size_bytes
+                FROM pg_stat_user_tables
+                WHERE schemaname = %s
+                  AND seq_scan > 100
+                  AND pg_total_relation_size(schemaname||'.'||relname) > 1024*1024  -- > 1MB
+                ORDER BY seq_scan DESC
+                LIMIT 5
+            """, (db.schema,))
+            slow_tables = cur.fetchall()
+
+            for table in slow_tables:
+                # High seq scan ratio suggests missing index
+                total = table["total_scans"]
+                seq_ratio = (table["seq_scan"] / total * 100) if total > 0 else 0
+
+                if seq_ratio > 30:  # More than 30% sequential scans
+                    issues.append({
+                        "type": "high_seq_scans",
+                        "severity": "warning",
+                        "table": table["table_name"],
+                        "seq_scans": table["seq_scan"],
+                        "index_scans": table["idx_scan"],
+                        "size": table["size"],
+                        "impact": f"{int(seq_ratio)}% sequential scans - potential 20-80% speedup with index",
+                        "auto_fixable": False,  # Requires analysis to determine best index
+                        "fix_method": "Review query patterns and add appropriate indexes"
+                    })
+    finally:
+        db.pool.putconn(conn)
+    return issues
+
+
+async def _repair_common_issues(db, project_name: str, issues: list, dry_run: bool = False) -> list:
+    """Execute repairs for auto-fixable issues."""
+    fixes_applied = []
+
+    if dry_run:
+        return fixes_applied
+
+    for issue in issues:
+        if not issue.get("auto_fixable", False):
+            continue
+
+        try:
+            if issue["type"] == "missing_embeddings":
+                # Generate embeddings
+                result = await generate_embeddings(project=project_name)
+                fixes_applied.append({
+                    "issue": "missing_embeddings",
+                    "action": "generated embeddings",
+                    "count": issue["count"],
+                    "result": result
+                })
+
+            elif issue["type"] == "orphaned_sessions":
+                # Delete orphaned sessions
+                conn = db.pool.getconn()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(f"""
+                            DELETE FROM {db.schema}.sessions s
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM {db.schema}.projects p
+                                WHERE p.name = s.project_name
+                            )
+                        """)
+                        deleted = cur.rowcount
+                        conn.commit()
+
+                        fixes_applied.append({
+                            "issue": "orphaned_sessions",
+                            "action": "deleted orphaned sessions",
+                            "count": deleted
+                        })
+                finally:
+                    db.pool.putconn(conn)
+
+        except Exception as e:
+            fixes_applied.append({
+                "issue": issue["type"],
+                "action": "FAILED",
+                "error": str(e)
+            })
+
+    return fixes_applied
+
+
+def _build_health_report(stats: dict, issues: list, fixes_applied: list,
+                        auto_fix: bool, dry_run: bool, check_list: list) -> dict:
+    """Build comprehensive health report with recommendations."""
+    # Calculate remaining issues after fixes
+    if auto_fix and fixes_applied:
+        fixed_types = {f["issue"] for f in fixes_applied if f["action"] != "FAILED"}
+        remaining_issues = [i for i in issues if i["type"] not in fixed_types]
+    else:
+        remaining_issues = issues
+
+    # Determine health status
+    if not remaining_issues:
+        health = "healthy"
+    elif all(i["severity"] == "warning" for i in remaining_issues):
+        health = "good_with_warnings"
+    else:
+        health = "needs_attention"
+
+    # Generate recommendations
+    recommendations = []
+    if not remaining_issues and not auto_fix:
+        recommendations.append("✅ Database is healthy!")
+        recommendations.append("Consider running health_check_and_repair() weekly to maintain health")
+    elif not remaining_issues and auto_fix:
+        recommendations.append("✅ All issues fixed! Database is now healthy!")
+    elif remaining_issues and not auto_fix:
+        fixable_count = sum(1 for i in remaining_issues if i.get("auto_fixable", False))
+        if fixable_count > 0:
+            recommendations.append(f"Run health_check_and_repair(auto_fix=True) to automatically fix {fixable_count} issues")
+
+        # Add specific recommendations
+        for issue in remaining_issues[:3]:  # Top 3 issues
+            if issue.get("fix_method"):
+                recommendations.append(f"• {issue['type']}: {issue['fix_method']}")
+    elif remaining_issues and auto_fix:
+        recommendations.append(f"⚠️ {len(remaining_issues)} issues could not be auto-fixed")
+        for issue in remaining_issues:
+            recommendations.append(f"• {issue['type']}: {issue['fix_method']}")
+
+    # Build report
+    report = {
+        "health": health,
+        "summary": f"{len(remaining_issues)} issues found" if remaining_issues else "All checks passed",
+        "checks_performed": check_list,
+        "statistics": stats,
+        "issues_found": issues,
+        "fixes_applied": fixes_applied,
+        "remaining_issues": remaining_issues,
+        "recommendations": recommendations
+    }
+
+    if dry_run and auto_fix:
+        report["dry_run_note"] = "This is a DRY RUN. Set dry_run=False to apply fixes."
+
+    return report
+
+
 async def health_check_and_repair(
     project: Optional[str] = None,
     auto_fix: bool = False,
@@ -9042,304 +9438,27 @@ async def health_check_and_repair(
         if "all" in check_list:
             check_list = ["integrity", "embeddings", "performance", "schema"]
 
-        # ====================================================================
-        # STEP 1: INSPECT & GATHER STATISTICS
-        # ====================================================================
+        # STEP 1: Gather database statistics
+        stats = _gather_database_statistics(db, project_name)
 
-        conn = db.pool.getconn()
-        try:
-            with conn.cursor() as cur:
-                # Gather statistics
-                stats = {}
-
-                # Context statistics
-                cur.execute(f"""
-                    SELECT COUNT(*) as total,
-                           COUNT(CASE WHEN embedding_vector IS NOT NULL THEN 1 END) as with_embeddings,
-                           ROUND(AVG(LENGTH(content))::numeric, 2) as avg_size
-                    FROM {db.schema}.context_locks
-                    WHERE project_name = %s
-                """, (project_name,))
-                context_stats = cur.fetchone()
-                stats["contexts"] = {
-                    "total": context_stats["total"],
-                    "with_embeddings": context_stats["with_embeddings"],
-                    "coverage": round(context_stats["with_embeddings"] / context_stats["total"] * 100, 1) if context_stats["total"] > 0 else 0,
-                    "avg_size": float(context_stats["avg_size"]) if context_stats["avg_size"] else 0
-                }
-
-                # Session statistics
-                cur.execute(f"""
-                    SELECT COUNT(*) as total,
-                           COUNT(CASE WHEN expires_at > NOW() THEN 1 END) as active
-                    FROM {db.schema}.sessions
-                    WHERE project_name = %s
-                """, (project_name,))
-                session_stats = cur.fetchone()
-                stats["sessions"] = {
-                    "total": session_stats["total"],
-                    "active": session_stats["active"]
-                }
-
-                # Database size
-                cur.execute(f"""
-                    SELECT pg_size_pretty(pg_total_relation_size('{db.schema}.context_locks')) as size
-                """)
-                size_result = cur.fetchone()
-                stats["database_size"] = size_result["size"]
-
-        finally:
-            db.pool.putconn(conn)
-
-        # ====================================================================
-        # STEP 2: VALIDATE & DETECT ISSUES
-        # ====================================================================
-
+        # STEP 2: Run health checks
         issues = []
-
-        # CHECK: Missing embeddings
-        if "embeddings" in check_list:
-            conn = db.pool.getconn()
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(f"""
-                        SELECT id, label
-                        FROM {db.schema}.context_locks
-                        WHERE project_name = %s
-                          AND embedding_vector IS NULL
-                        LIMIT 100
-                    """, (project_name,))
-                    missing_emb = cur.fetchall()
-
-                    if missing_emb:
-                        issues.append({
-                            "type": "missing_embeddings",
-                            "severity": "warning",
-                            "count": len(missing_emb),
-                            "impact": f"Semantic search unavailable for {len(missing_emb)} contexts",
-                            "auto_fixable": True,
-                            "fix_method": "generate_embeddings()",
-                            "details": [{"id": r["id"], "label": r["label"]} for r in missing_emb[:5]]
-                        })
-            finally:
-                db.pool.putconn(conn)
-
-        # CHECK: Orphaned records (integrity)
-        if "integrity" in check_list:
-            conn = db.pool.getconn()
-            try:
-                with conn.cursor() as cur:
-                    # Check for sessions without matching project
-                    cur.execute(f"""
-                        SELECT COUNT(*) as count
-                        FROM {db.schema}.sessions s
-                        WHERE NOT EXISTS (
-                            SELECT 1 FROM {db.schema}.projects p
-                            WHERE p.name = s.project_name
-                        )
-                    """)
-                    orphan_sessions = cur.fetchone()["count"]
-
-                    if orphan_sessions > 0:
-                        issues.append({
-                            "type": "orphaned_sessions",
-                            "severity": "error",
-                            "count": orphan_sessions,
-                            "impact": "Data corruption, wasted space",
-                            "auto_fixable": True,
-                            "fix_method": "DELETE orphaned sessions"
-                        })
-            finally:
-                db.pool.putconn(conn)
-
-        # CHECK: Performance (using pg_stat_user_tables)
-        if "performance" in check_list:
-            conn = db.pool.getconn()
-            try:
-                with conn.cursor() as cur:
-                    # Find tables with high sequential scan ratio on large tables
-                    cur.execute(f"""
-                        SELECT
-                            schemaname || '.' || relname as table_name,
-                            seq_scan,
-                            idx_scan,
-                            COALESCE(idx_scan, 0) + seq_scan as total_scans,
-                            pg_size_pretty(pg_total_relation_size(schemaname||'.'||relname)) as size,
-                            pg_total_relation_size(schemaname||'.'||relname) as size_bytes
-                        FROM pg_stat_user_tables
-                        WHERE schemaname = %s
-                          AND seq_scan > 100
-                          AND pg_total_relation_size(schemaname||'.'||relname) > 1024*1024  -- > 1MB
-                        ORDER BY seq_scan DESC
-                        LIMIT 5
-                    """, (db.schema,))
-                    slow_tables = cur.fetchall()
-
-                    for table in slow_tables:
-                        # High seq scan ratio suggests missing index
-                        total = table["total_scans"]
-                        seq_ratio = (table["seq_scan"] / total * 100) if total > 0 else 0
-
-                        if seq_ratio > 30:  # More than 30% sequential scans
-                            issues.append({
-                                "type": "high_seq_scans",
-                                "severity": "warning",
-                                "table": table["table_name"],
-                                "seq_scans": table["seq_scan"],
-                                "index_scans": table["idx_scan"],
-                                "size": table["size"],
-                                "impact": f"{int(seq_ratio)}% sequential scans - potential 20-80% speedup with index",
-                                "auto_fixable": False,  # Requires analysis to determine best index
-                                "fix_method": "Review query patterns and add appropriate indexes"
-                            })
-            finally:
-                db.pool.putconn(conn)
-
-        # CHECK: Schema drift (compare to expected structure)
         if "schema" in check_list:
-            conn = db.pool.getconn()
-            try:
-                with conn.cursor() as cur:
-                    # Check for missing expected tables
-                    expected_tables = ["projects", "sessions", "context_locks", "memory_entries"]
-                    cur.execute(f"""
-                        SELECT table_name
-                        FROM information_schema.tables
-                        WHERE table_schema = %s
-                          AND table_type = 'BASE TABLE'
-                    """, (db.schema,))
-                    existing_tables = [row["table_name"] for row in cur.fetchall()]
+            issues.extend(_check_schema_health(db, project_name))
+        if "integrity" in check_list:
+            issues.extend(_check_data_integrity(db, project_name))
+        if "embeddings" in check_list:
+            issues.extend(_check_embedding_health(db, project_name))
+        if "performance" in check_list:
+            issues.extend(_check_performance_metrics(db))
 
-                    missing_tables = set(expected_tables) - set(existing_tables)
-                    if missing_tables:
-                        issues.append({
-                            "type": "missing_tables",
-                            "severity": "error",
-                            "tables": list(missing_tables),
-                            "impact": "Core functionality broken",
-                            "auto_fixable": False,
-                            "fix_method": "Run apply_migrations() to restore schema"
-                        })
-            finally:
-                db.pool.putconn(conn)
-
-        # ====================================================================
-        # STEP 3: AUTO-FIX (if requested)
-        # ====================================================================
-
+        # STEP 3: Auto-repair if requested
         fixes_applied = []
+        if auto_fix:
+            fixes_applied = await _repair_common_issues(db, project_name, issues, dry_run)
 
-        if auto_fix and not dry_run:
-            for issue in issues:
-                if not issue.get("auto_fixable", False):
-                    continue
-
-                try:
-                    if issue["type"] == "missing_embeddings":
-                        # Generate embeddings
-                        result = await generate_embeddings(project=project_name)
-                        fixes_applied.append({
-                            "issue": "missing_embeddings",
-                            "action": "generated embeddings",
-                            "count": issue["count"],
-                            "result": result
-                        })
-
-                    elif issue["type"] == "orphaned_sessions":
-                        # Delete orphaned sessions
-                        conn = db.pool.getconn()
-                        try:
-                            with conn.cursor() as cur:
-                                cur.execute(f"""
-                                    DELETE FROM {db.schema}.sessions s
-                                    WHERE NOT EXISTS (
-                                        SELECT 1 FROM {db.schema}.projects p
-                                        WHERE p.name = s.project_name
-                                    )
-                                """)
-                                deleted = cur.rowcount
-                                conn.commit()
-
-                                fixes_applied.append({
-                                    "issue": "orphaned_sessions",
-                                    "action": "deleted orphaned sessions",
-                                    "count": deleted
-                                })
-                        finally:
-                            db.pool.putconn(conn)
-
-                except Exception as e:
-                    fixes_applied.append({
-                        "issue": issue["type"],
-                        "action": "FAILED",
-                        "error": str(e)
-                    })
-
-        # ====================================================================
-        # STEP 4: FINAL VALIDATION
-        # ====================================================================
-
-        # If we applied fixes, remove those issues from remaining
-        remaining_issues = []
-        if auto_fix and fixes_applied:
-            fixed_types = {f["issue"] for f in fixes_applied if f["action"] != "FAILED"}
-            remaining_issues = [i for i in issues if i["type"] not in fixed_types]
-        else:
-            remaining_issues = issues
-
-        # ====================================================================
-        # STEP 5: DETERMINE HEALTH STATUS
-        # ====================================================================
-
-        if not remaining_issues:
-            health = "healthy"
-        elif all(i["severity"] == "warning" for i in remaining_issues):
-            health = "good_with_warnings"
-        else:
-            health = "needs_attention"
-
-        # ====================================================================
-        # STEP 6: GENERATE RECOMMENDATIONS
-        # ====================================================================
-
-        recommendations = []
-
-        if not remaining_issues and not auto_fix:
-            recommendations.append("✅ Database is healthy!")
-            recommendations.append("Consider running health_check_and_repair() weekly to maintain health")
-        elif not remaining_issues and auto_fix:
-            recommendations.append("✅ All issues fixed! Database is now healthy!")
-        elif remaining_issues and not auto_fix:
-            fixable_count = sum(1 for i in remaining_issues if i.get("auto_fixable", False))
-            if fixable_count > 0:
-                recommendations.append(f"Run health_check_and_repair(auto_fix=True) to automatically fix {fixable_count} issues")
-
-            # Add specific recommendations
-            for issue in remaining_issues[:3]:  # Top 3 issues
-                if issue.get("fix_method"):
-                    recommendations.append(f"• {issue['type']}: {issue['fix_method']}")
-        elif remaining_issues and auto_fix:
-            recommendations.append(f"⚠️ {len(remaining_issues)} issues could not be auto-fixed")
-            for issue in remaining_issues:
-                recommendations.append(f"• {issue['type']}: {issue['fix_method']}")
-
-        # ====================================================================
-        # RETURN COMPLETE REPORT
-        # ====================================================================
-
-        report = {
-            "health": health,
-            "summary": f"{len(remaining_issues)} issues found" if remaining_issues else "All checks passed",
-            "checks_performed": check_list,
-            "statistics": stats,
-            "issues_found": issues,
-            "fixes_applied": fixes_applied,
-            "remaining_issues": remaining_issues,
-            "recommendations": recommendations
-        }
-
-        if dry_run and auto_fix:
-            report["dry_run_note"] = "This is a DRY RUN. Set dry_run=False to apply fixes."
+        # STEP 4: Build comprehensive report
+        report = _build_health_report(stats, issues, fixes_applied, auto_fix, dry_run, check_list)
 
         return json.dumps(report, indent=2, default=str)
 
@@ -9538,6 +9657,349 @@ async def inspect_schema(
         }, indent=2)
 
 
+# ============================================================================
+# Migration Helper Functions
+# ============================================================================
+
+def _validate_migrations(migrations: list) -> dict:
+    """
+    Validate migration list format.
+
+    Args:
+        migrations: List of migration dictionaries
+
+    Returns:
+        dict with 'valid' (bool) and optional 'error' (str)
+    """
+    if not isinstance(migrations, list):
+        return {"valid": False, "error": "Migrations must be a list"}
+
+    for mig in migrations:
+        if not isinstance(mig, dict):
+            return {"valid": False, "error": f"Migration must be dict, got {type(mig)}"}
+
+        required_fields = ["id", "name", "description", "sql", "breaking_change", "affected_tables"]
+        for field in required_fields:
+            if field not in mig:
+                return {"valid": False, "error": f"Migration {mig.get('id', '?')} missing field: {field}"}
+
+    return {"valid": True}
+
+
+def _check_migration_status(cur, conn, migrations: list, db) -> dict:
+    """
+    Check which migrations have been applied.
+
+    Args:
+        cur: Database cursor
+        conn: Database connection
+        migrations: List of available migrations
+        db: Database adapter
+
+    Returns:
+        dict with 'current_version', 'applied', 'pending', 'pg_version'
+    """
+    # Ensure migration_history table exists
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS migration_history (
+            id SERIAL PRIMARY KEY,
+            migration_id INTEGER NOT NULL UNIQUE,
+            migration_name TEXT NOT NULL,
+            description TEXT,
+            sql_content TEXT,
+            applied_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            duration_ms INTEGER,
+            affected_rows INTEGER,
+            status TEXT DEFAULT 'success',
+            error_message TEXT
+        )
+    """)
+    conn.commit()
+
+    # Get PostgreSQL version
+    cur.execute("SELECT version() as version")
+    pg_version_raw = cur.fetchone()["version"]
+    pg_version = pg_version_raw.split()[1] if pg_version_raw else "unknown"
+
+    # Get list of already applied migrations
+    cur.execute("""
+        SELECT migration_id, migration_name, applied_at, status
+        FROM migration_history
+        ORDER BY migration_id
+    """)
+    applied = {row["migration_id"]: row for row in cur.fetchall()}
+
+    # Determine current schema version (highest applied migration)
+    current_version = max(applied.keys()) if applied else 0
+
+    # Find pending migrations
+    pending = [m for m in migrations if m["id"] not in applied]
+
+    return {
+        "current_version": current_version,
+        "applied": applied,
+        "pending": pending,
+        "pg_version": pg_version
+    }
+
+
+def _plan_migration_execution(pending: list, db, cur) -> dict:
+    """
+    Build execution plan for dry-run mode.
+
+    Args:
+        pending: List of pending migrations
+        db: Database adapter
+        cur: Database cursor
+
+    Returns:
+        dict with 'execution_plan', 'total_estimated_time_ms', 'has_breaking_changes'
+    """
+    execution_plan = []
+    total_estimated_time_ms = 0
+
+    # Estimate backup time
+    execution_plan.append("1. Backup current schema state (estimated: 500ms)")
+    total_estimated_time_ms += 500
+
+    # Build plan for each migration
+    for i, mig in enumerate(pending, start=2):
+        # Estimate duration based on SQL complexity
+        sql_lines = len(mig["sql"].strip().split('\n'))
+        estimated_ms = sql_lines * 25  # ~25ms per SQL statement
+
+        execution_plan.append(
+            f"{i}. Apply migration {mig['id']}: {mig['name']} (estimated: {estimated_ms}ms)"
+        )
+        total_estimated_time_ms += estimated_ms
+
+        execution_plan.append(
+            f"{i+1}. Validate schema integrity (estimated: 100ms)"
+        )
+        total_estimated_time_ms += 100
+
+    execution_plan.append(f"{len(pending)*2+2}. Update migration history table")
+
+    # Get row count estimates for affected tables
+    for mig in pending:
+        for table_spec in mig["affected_tables"]:
+            if "(new)" not in table_spec:
+                table_name = table_spec
+                try:
+                    cur.execute(f"""
+                        SELECT n_live_tup as rows
+                        FROM pg_stat_user_tables
+                        WHERE schemaname = %s AND relname = %s
+                    """, (db.schema, table_name))
+                    result = cur.fetchone()
+                    mig["affected_rows_estimate"] = result["rows"] if result else 0
+                except:
+                    mig["affected_rows_estimate"] = 0
+            else:
+                mig["affected_rows_estimate"] = 0
+
+    # Check for breaking changes
+    has_breaking_changes = any(m["breaking_change"] for m in pending)
+
+    return {
+        "execution_plan": execution_plan,
+        "total_estimated_time_ms": total_estimated_time_ms,
+        "has_breaking_changes": has_breaking_changes
+    }
+
+
+def _execute_single_migration(cur, conn, migration: dict) -> dict:
+    """
+    Execute a single migration.
+
+    Args:
+        cur: Database cursor
+        conn: Database connection
+        migration: Migration dictionary
+
+    Returns:
+        dict with 'status', 'duration_ms', 'affected_rows', optional 'error'
+    """
+    import time
+
+    migration_start = time.time()
+    affected_rows = 0
+
+    try:
+        logger.info(f"  ▶️ Applying migration {migration['id']}: {migration['name']}")
+
+        # Skip migration 1 (migration_history table - already created)
+        if migration["id"] == 1:
+            duration_ms = 0
+        else:
+            # Execute migration SQL
+            cur.execute(migration["sql"])
+            affected_rows = cur.rowcount if cur.rowcount >= 0 else 0
+            conn.commit()
+
+            duration_ms = int((time.time() - migration_start) * 1000)
+
+        logger.info(f"    ✅ Success ({duration_ms}ms, {affected_rows} rows)")
+
+        return {
+            "status": "success",
+            "duration_ms": duration_ms,
+            "affected_rows": affected_rows
+        }
+
+    except Exception as e:
+        conn.rollback()
+        error_msg = str(e)
+        logger.error(f"    ❌ Failed: {error_msg}")
+
+        return {
+            "status": "failed",
+            "error": error_msg
+        }
+
+
+def _record_migration_history(cur, conn, migration: dict, result: dict) -> None:
+    """
+    Record migration in history table.
+
+    Args:
+        cur: Database cursor
+        conn: Database connection
+        migration: Migration dictionary
+        result: Result from _execute_single_migration
+    """
+    try:
+        if result["status"] == "success":
+            cur.execute("""
+                INSERT INTO migration_history
+                (migration_id, migration_name, description, sql_content, duration_ms, affected_rows, status)
+                VALUES (%s, %s, %s, %s, %s, %s, 'success')
+                ON CONFLICT (migration_id) DO NOTHING
+            """, (
+                migration["id"],
+                migration["name"],
+                migration["description"],
+                migration["sql"],
+                result["duration_ms"],
+                result["affected_rows"]
+            ))
+        else:
+            cur.execute("""
+                INSERT INTO migration_history
+                (migration_id, migration_name, description, sql_content, status, error_message)
+                VALUES (%s, %s, %s, %s, 'failed', %s)
+                ON CONFLICT (migration_id) DO UPDATE
+                SET status = 'failed', error_message = EXCLUDED.error_message
+            """, (
+                migration["id"],
+                migration["name"],
+                migration["description"],
+                migration["sql"],
+                result["error"]
+            ))
+
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"Failed to record migration history: {e}")
+
+
+def _build_migration_report(
+    project_name: str,
+    db,
+    pg_version: str,
+    current_version: int,
+    pending: list,
+    plan_data: dict = None,
+    applied_migrations: list = None,
+    total_duration_ms: int = 0,
+    validation_result: dict = None,
+    backup_path: str = None,
+    dry_run: bool = True
+) -> dict:
+    """
+    Build final migration report.
+
+    Args:
+        project_name: Project name
+        db: Database adapter
+        pg_version: PostgreSQL version
+        current_version: Current schema version
+        pending: List of pending migrations
+        plan_data: Execution plan data (dry-run mode)
+        applied_migrations: List of applied migrations (execution mode)
+        total_duration_ms: Total execution time (execution mode)
+        validation_result: Schema validation result (execution mode)
+        backup_path: Backup file path (execution mode)
+        dry_run: Whether this is a dry-run
+
+    Returns:
+        dict with complete report
+    """
+    if dry_run:
+        # Dry-run report
+        return {
+            "project": project_name,
+            "database_type": "postgresql",
+            "database_version": pg_version,
+            "schema": db.schema,
+            "dry_run": True,
+            "current_schema_version": f"{current_version}.0",
+            "target_schema_version": f"{pending[-1]['id']}.0",
+            "pending_migrations": [
+                {
+                    "id": m["id"],
+                    "name": m["name"],
+                    "description": m["description"],
+                    "sql": m["sql"],
+                    "breaking_change": m["breaking_change"],
+                    "affected_tables": m["affected_tables"],
+                    "affected_rows_estimate": m.get("affected_rows_estimate", 0)
+                }
+                for m in pending
+            ],
+            "execution_plan": plan_data["execution_plan"],
+            "total_estimated_time_ms": plan_data["total_estimated_time_ms"],
+            "safety_checks": {
+                "data_backed_up": "not yet (dry-run)",
+                "rollback_available": True,
+                "breaking_changes": plan_data["has_breaking_changes"]
+            },
+            "recommendation": (
+                "⚠️ CAUTION: Contains breaking changes. Review carefully."
+                if plan_data["has_breaking_changes"]
+                else "✅ Safe to apply. Run with dry_run=False and confirm=True to execute."
+            )
+        }
+    else:
+        # Execution report
+        # Get new schema version
+        new_version = max([m["id"] for m in applied_migrations if m["status"] == "success"], default=current_version)
+
+        # Check if any migrations failed
+        failed_migrations = [m for m in applied_migrations if m["status"] == "failed"]
+        overall_status = "partial_success" if failed_migrations else "success"
+
+        return {
+            "project": project_name,
+            "database_type": "postgresql",
+            "database_version": pg_version,
+            "schema": db.schema,
+            "dry_run": False,
+            "status": overall_status,
+            "previous_schema_version": f"{current_version}.0",
+            "new_schema_version": f"{new_version}.0",
+            "applied_migrations": applied_migrations,
+            "total_duration_ms": total_duration_ms,
+            "validation": validation_result,
+            "backup_location": backup_path,
+            "summary": {
+                "total_attempted": len(applied_migrations),
+                "successful": len([m for m in applied_migrations if m["status"] == "success"]),
+                "failed": len(failed_migrations)
+            }
+        }
+
+
 @mcp.tool()
 async def apply_migrations(
     project: Optional[str] = None,
@@ -9575,11 +10037,12 @@ async def apply_migrations(
     """
     import time
     import tempfile
-    import subprocess
     from datetime import datetime
 
     try:
-        # Resolve project
+        # ====================================================================
+        # STEP 1: RESOLVE PROJECT
+        # ====================================================================
         project_name = project or ACTIVE_PROJECT or _auto_detect_project()
         if not project_name:
             return json.dumps({
@@ -9595,30 +10058,9 @@ async def apply_migrations(
         try:
             cur = conn.cursor(cursor_factory=RealDictCursor)
 
-            # Ensure migration_history table exists
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS migration_history (
-                    id SERIAL PRIMARY KEY,
-                    migration_id INTEGER NOT NULL UNIQUE,
-                    migration_name TEXT NOT NULL,
-                    description TEXT,
-                    sql_content TEXT,
-                    applied_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                    duration_ms INTEGER,
-                    affected_rows INTEGER,
-                    status TEXT DEFAULT 'success',
-                    error_message TEXT
-                )
-            """)
-            conn.commit()
-
-            # Get PostgreSQL version
-            cur.execute("SELECT version() as version")
-            pg_version_raw = cur.fetchone()["version"]
-            pg_version = pg_version_raw.split()[1] if pg_version_raw else "unknown"
-
-            # Define available migrations (in execution order)
-            # Each migration has: id, name, description, sql, breaking_change flag
+            # ====================================================================
+            # STEP 2: DEFINE AVAILABLE MIGRATIONS
+            # ====================================================================
             available_migrations = [
                 {
                     "id": 1,
@@ -9667,20 +10109,20 @@ async def apply_migrations(
                 }
             ]
 
-            # Get list of already applied migrations
-            cur.execute("""
-                SELECT migration_id, migration_name, applied_at, status
-                FROM migration_history
-                ORDER BY migration_id
-            """)
-            applied = {row["migration_id"]: row for row in cur.fetchall()}
+            # Validate migrations
+            validation = _validate_migrations(available_migrations)
+            if not validation["valid"]:
+                return json.dumps({"error": validation["error"]}, indent=2)
 
-            # Determine current schema version (highest applied migration)
-            current_version = max(applied.keys()) if applied else 0
+            # ====================================================================
+            # STEP 3: CHECK MIGRATION STATUS
+            # ====================================================================
+            status_info = _check_migration_status(cur, conn, available_migrations, db)
+            current_version = status_info["current_version"]
+            pg_version = status_info["pg_version"]
+            pending = status_info["pending"]
 
-            # Find pending migrations
-            pending = [m for m in available_migrations if m["id"] not in applied]
-
+            # No pending migrations - return early
             if not pending:
                 return json.dumps({
                     "project": project_name,
@@ -9690,93 +10132,31 @@ async def apply_migrations(
                     "current_schema_version": f"{current_version}.0",
                     "status": "up_to_date",
                     "message": "No pending migrations. Schema is up to date.",
-                    "applied_migrations": len(applied),
+                    "applied_migrations": len(status_info["applied"]),
                     "available_migrations": len(available_migrations)
                 }, indent=2)
 
-            # DRY RUN MODE - Preview what would happen
+            # ====================================================================
+            # STEP 4: DRY RUN MODE - Preview changes
+            # ====================================================================
             if dry_run:
-                execution_plan = []
-                total_estimated_time_ms = 0
+                plan_data = _plan_migration_execution(pending, db, cur)
+                report = _build_migration_report(
+                    project_name=project_name,
+                    db=db,
+                    pg_version=pg_version,
+                    current_version=current_version,
+                    pending=pending,
+                    plan_data=plan_data,
+                    dry_run=True
+                )
+                return json.dumps(report, indent=2, default=str)
 
-                # Estimate backup time
-                execution_plan.append("1. Backup current schema state (estimated: 500ms)")
-                total_estimated_time_ms += 500
+            # ====================================================================
+            # STEP 5: EXECUTION MODE - Apply migrations
+            # ====================================================================
 
-                # Build plan for each migration
-                for i, mig in enumerate(pending, start=2):
-                    # Estimate duration based on SQL complexity
-                    sql_lines = len(mig["sql"].strip().split('\n'))
-                    estimated_ms = sql_lines * 25  # ~25ms per SQL statement
-
-                    execution_plan.append(
-                        f"{i}. Apply migration {mig['id']}: {mig['name']} (estimated: {estimated_ms}ms)"
-                    )
-                    total_estimated_time_ms += estimated_ms
-
-                    execution_plan.append(
-                        f"{i+1}. Validate schema integrity (estimated: 100ms)"
-                    )
-                    total_estimated_time_ms += 100
-
-                execution_plan.append(f"{len(pending)*2+2}. Update migration history table")
-
-                # Get row count estimates for affected tables
-                for mig in pending:
-                    for table_spec in mig["affected_tables"]:
-                        if "(new)" not in table_spec:
-                            table_name = table_spec
-                            try:
-                                cur.execute(f"""
-                                    SELECT n_live_tup as rows
-                                    FROM pg_stat_user_tables
-                                    WHERE schemaname = %s AND relname = %s
-                                """, (db.schema, table_name))
-                                result = cur.fetchone()
-                                mig["affected_rows_estimate"] = result["rows"] if result else 0
-                            except:
-                                mig["affected_rows_estimate"] = 0
-                        else:
-                            mig["affected_rows_estimate"] = 0
-
-                # Check for breaking changes
-                has_breaking_changes = any(m["breaking_change"] for m in pending)
-
-                return json.dumps({
-                    "project": project_name,
-                    "database_type": "postgresql",
-                    "database_version": pg_version,
-                    "schema": db.schema,
-                    "dry_run": True,
-                    "current_schema_version": f"{current_version}.0",
-                    "target_schema_version": f"{pending[-1]['id']}.0",
-                    "pending_migrations": [
-                        {
-                            "id": m["id"],
-                            "name": m["name"],
-                            "description": m["description"],
-                            "sql": m["sql"],
-                            "breaking_change": m["breaking_change"],
-                            "affected_tables": m["affected_tables"],
-                            "affected_rows_estimate": m.get("affected_rows_estimate", 0)
-                        }
-                        for m in pending
-                    ],
-                    "execution_plan": execution_plan,
-                    "total_estimated_time_ms": total_estimated_time_ms,
-                    "safety_checks": {
-                        "data_backed_up": "not yet (dry-run)",
-                        "rollback_available": True,
-                        "breaking_changes": has_breaking_changes
-                    },
-                    "recommendation": (
-                        "⚠️ CAUTION: Contains breaking changes. Review carefully."
-                        if has_breaking_changes
-                        else "✅ Safe to apply. Run with dry_run=False and confirm=True to execute."
-                    )
-                }, indent=2, default=str)
-
-            # EXECUTION MODE - Apply migrations
+            # Safety check: require confirm=True
             if not confirm:
                 return json.dumps({
                     "error": "Safety check failed",
@@ -9797,98 +10177,37 @@ async def apply_migrations(
                 )
                 backup_path = backup_file.name
                 backup_file.close()
-
-                # Use pg_dump to backup the schema
-                # Note: This requires pg_dump to be installed and PostgreSQL credentials
                 logger.info(f"📦 Creating backup: {backup_path}")
             except Exception as e:
                 logger.warning(f"⚠️ Could not create backup: {e}")
 
-            # Apply each migration in a transaction
+            # Execute migrations
             applied_migrations = []
             start_time = time.time()
 
             for mig in pending:
-                migration_start = time.time()
-                affected_rows = 0
+                # Execute single migration
+                result = _execute_single_migration(cur, conn, mig)
 
-                try:
-                    logger.info(f"  ▶️ Applying migration {mig['id']}: {mig['name']}")
+                # Record in history
+                _record_migration_history(cur, conn, mig, result)
 
-                    # Skip migration 1 (already created above)
-                    if mig["id"] == 1:
-                        duration_ms = 0
-                    else:
-                        # Execute migration SQL
-                        cur.execute(mig["sql"])
-                        affected_rows = cur.rowcount if cur.rowcount >= 0 else 0
-                        conn.commit()
+                # Track results
+                applied_migrations.append({
+                    "id": mig["id"],
+                    "name": mig["name"],
+                    **result
+                })
 
-                        duration_ms = int((time.time() - migration_start) * 1000)
-
-                    # Record in migration history
-                    cur.execute("""
-                        INSERT INTO migration_history
-                        (migration_id, migration_name, description, sql_content, duration_ms, affected_rows, status)
-                        VALUES (%s, %s, %s, %s, %s, %s, 'success')
-                        ON CONFLICT (migration_id) DO NOTHING
-                    """, (
-                        mig["id"],
-                        mig["name"],
-                        mig["description"],
-                        mig["sql"],
-                        duration_ms,
-                        affected_rows
-                    ))
-                    conn.commit()
-
-                    applied_migrations.append({
-                        "id": mig["id"],
-                        "name": mig["name"],
-                        "status": "success",
-                        "duration_ms": duration_ms,
-                        "affected_rows": affected_rows
-                    })
-
-                    logger.info(f"    ✅ Success ({duration_ms}ms, {affected_rows} rows)")
-
-                except Exception as e:
-                    conn.rollback()
-                    error_msg = str(e)
-                    logger.error(f"    ❌ Failed: {error_msg}")
-
-                    # Record failure
-                    try:
-                        cur.execute("""
-                            INSERT INTO migration_history
-                            (migration_id, migration_name, description, sql_content, status, error_message)
-                            VALUES (%s, %s, %s, %s, 'failed', %s)
-                            ON CONFLICT (migration_id) DO UPDATE
-                            SET status = 'failed', error_message = EXCLUDED.error_message
-                        """, (
-                            mig["id"],
-                            mig["name"],
-                            mig["description"],
-                            mig["sql"],
-                            error_msg
-                        ))
-                        conn.commit()
-                    except:
-                        pass
-
-                    applied_migrations.append({
-                        "id": mig["id"],
-                        "name": mig["name"],
-                        "status": "failed",
-                        "error": error_msg
-                    })
-
-                    # Stop on first failure
+                # Stop on first failure
+                if result["status"] == "failed":
                     break
 
             total_duration_ms = int((time.time() - start_time) * 1000)
 
-            # Validate schema after migration
+            # ====================================================================
+            # STEP 6: VALIDATE SCHEMA
+            # ====================================================================
             validation_result = {
                 "schema_valid": True,
                 "data_intact": True,
@@ -9897,7 +10216,7 @@ async def apply_migrations(
             }
 
             try:
-                # Check that all expected tables exist
+                # Check tables
                 cur.execute("""
                     SELECT COUNT(*) as count
                     FROM information_schema.tables
@@ -9913,8 +10232,7 @@ async def apply_migrations(
                     FROM information_schema.table_constraints
                     WHERE table_schema = %s
                 """, (db.schema,))
-                constraint_count = cur.fetchone()["count"]
-                validation_result["constraint_count"] = constraint_count
+                validation_result["constraint_count"] = cur.fetchone()["count"]
 
                 # Check indexes
                 cur.execute("""
@@ -9930,38 +10248,23 @@ async def apply_migrations(
                 validation_result["schema_valid"] = False
                 validation_result["validation_error"] = str(e)
 
-            # Get new schema version
-            cur.execute("""
-                SELECT MAX(migration_id) as max_version
-                FROM migration_history
-                WHERE status = 'success'
-            """)
-            new_version_row = cur.fetchone()
-            new_version = new_version_row["max_version"] if new_version_row else 0
+            # ====================================================================
+            # STEP 7: BUILD FINAL REPORT
+            # ====================================================================
+            report = _build_migration_report(
+                project_name=project_name,
+                db=db,
+                pg_version=pg_version,
+                current_version=current_version,
+                pending=pending,
+                applied_migrations=applied_migrations,
+                total_duration_ms=total_duration_ms,
+                validation_result=validation_result,
+                backup_path=backup_path,
+                dry_run=False
+            )
 
-            # Check if any migrations failed
-            failed_migrations = [m for m in applied_migrations if m["status"] == "failed"]
-            overall_status = "partial_success" if failed_migrations else "success"
-
-            return json.dumps({
-                "project": project_name,
-                "database_type": "postgresql",
-                "database_version": pg_version,
-                "schema": db.schema,
-                "dry_run": False,
-                "status": overall_status,
-                "previous_schema_version": f"{current_version}.0",
-                "new_schema_version": f"{new_version}.0",
-                "applied_migrations": applied_migrations,
-                "total_duration_ms": total_duration_ms,
-                "validation": validation_result,
-                "backup_location": backup_path,
-                "summary": {
-                    "total_attempted": len(applied_migrations),
-                    "successful": len([m for m in applied_migrations if m["status"] == "success"]),
-                    "failed": len(failed_migrations)
-                }
-            }, indent=2, default=str)
+            return json.dumps(report, indent=2, default=str)
 
         finally:
             db.pool.putconn(conn)
