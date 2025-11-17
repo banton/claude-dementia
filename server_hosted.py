@@ -466,7 +466,9 @@ app.routes.insert(4, Route('/metrics', metrics_endpoint, methods=['GET']))
 
 # Replace FastMCP's default DELETE /mcp handler with graceful version
 # Find and remove existing DELETE route, then add our custom one
-app.routes = [r for r in app.routes if not (r.path == '/mcp' and r.methods and 'DELETE' in r.methods)]
+routes_to_keep = [r for r in app.routes if not (r.path == '/mcp' and r.methods and 'DELETE' in r.methods)]
+app.routes.clear()
+app.routes.extend(routes_to_keep)
 app.routes.insert(5, Route('/mcp', graceful_mcp_delete, methods=['DELETE']))
 
 # Add OAuth routes for Claude.ai compatibility (unauthenticated - public OAuth flow)
