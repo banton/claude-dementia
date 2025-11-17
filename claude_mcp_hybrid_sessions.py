@@ -5349,6 +5349,86 @@ async def sync_project_memory(
 # DATABASE QUERY TOOLS
 # ============================================================
 
+# Helper functions for query_database (extracted for DRY and testability)
+
+def _validate_query(query: str) -> Optional[str]:
+    """
+    Validate that query is safe (SELECT-only, no dangerous keywords).
+    Returns error string if invalid, None if valid.
+    """
+    query_upper = query.strip().upper()
+    dangerous_keywords = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE', 'PRAGMA', 'ATTACH', 'DETACH']
+
+    if not query_upper.startswith('SELECT'):
+        return "❌ Error: Only SELECT queries are allowed.\n\nUse query_database() for read-only operations only.\n\nFor modifications, use the provided MCP tools:\n- lock_context() to create/update contexts\n- unlock_context() to delete contexts\n- memory_update() to add memories"
+
+    for keyword in dangerous_keywords:
+        if keyword in query_upper:
+            return f"❌ Error: Query contains dangerous keyword '{keyword}'.\n\nOnly SELECT queries are allowed for safety."
+
+    return None
+
+
+def _execute_query_with_timing(conn, query: str, params: Optional[list] = None):
+    """
+    Execute query and measure execution time.
+    Returns (rows, execution_time_ms) tuple.
+    """
+    start_time = time.time()
+
+    cursor = conn.cursor()
+    if params:
+        cursor.execute(query, params)
+    else:
+        cursor.execute(query)
+
+    rows = cursor.fetchall()
+    execution_time_ms = (time.time() - start_time) * 1000
+
+    return rows, execution_time_ms
+
+
+def _format_as_json(rows, keys):
+    """Format query results as JSON array."""
+    result = [dict(row) for row in rows]
+    return json.dumps(result, indent=2, default=str)
+
+
+def _format_as_csv(rows, keys):
+    """Format query results as CSV with header row."""
+    output = []
+    output.append(','.join(keys))
+    for row in rows:
+        output.append(','.join(str(v) for v in row))
+    return '\n'.join(output)
+
+
+def _format_as_table(rows, keys, execution_time_ms):
+    """Format query results as ASCII table with borders and execution stats."""
+    output = []
+
+    # Calculate column widths
+    widths = {k: len(k) for k in keys}
+    for row in rows:
+        for k in keys:
+            widths[k] = max(widths[k], len(str(row[k])))
+
+    # Header
+    header = ' | '.join(k.ljust(widths[k]) for k in keys)
+    separator = '-+-'.join('-' * widths[k] for k in keys)
+    output.append(header)
+    output.append(separator)
+
+    # Rows
+    for row in rows:
+        output.append(' | '.join(str(row[k]).ljust(widths[k]) for k in keys))
+
+    output.append(f'\n✅ {len(rows)} rows returned.')
+    output.append(f'⏱️ Execution time: {execution_time_ms:.2f}ms')
+
+    return '\n'.join(output)
+
+
 @breadcrumb
 @mcp.tool()
 async def query_database(
@@ -5430,19 +5510,13 @@ async def query_database(
     from pathlib import Path
 
     try:
-        # Safety check: Only allow SELECT queries
-        query_upper = query.strip().upper()
-        dangerous_keywords = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE', 'PRAGMA', 'ATTACH', 'DETACH']
-
-        if not query_upper.startswith('SELECT'):
-            return f"❌ Error: Only SELECT queries are allowed.\n\nUse query_database() for read-only operations only.\n\nFor modifications, use the provided MCP tools:\n- lock_context() to create/update contexts\n- unlock_context() to delete contexts\n- memory_update() to add memories"
-
-        for keyword in dangerous_keywords:
-            if keyword in query_upper:
-                return f"❌ Error: Query contains dangerous keyword '{keyword}'.\n\nOnly SELECT queries are allowed for safety."
+        # Safety check using helper
+        validation_error = _validate_query(query)
+        if validation_error:
+            return validation_error
 
         # Add LIMIT if not present (prevent huge result sets)
-        if 'LIMIT' not in query_upper:
+        if 'LIMIT' not in query.upper():
             query = query.strip().rstrip(';') + ' LIMIT 100'
 
         # ✅ FIX: Use context managers to ensure connections are closed
@@ -5490,57 +5564,24 @@ async def query_database(
         if not rows:
             return f"✅ Query executed successfully.\n\n0 rows returned.\n⏱️ Execution time: {execution_time:.2f}ms"
 
-        # Format output based on requested format
+        # Format output using helpers
+        keys = list(rows[0].keys())
+
         if format == "json":
-            import json
-            result = [dict(row) for row in rows]
-            return json.dumps(result, indent=2, default=str)
-
+            return _format_as_json(rows, keys)
         elif format == "csv":
-            output = []
-            # Header
-            output.append(','.join(rows[0].keys()))
-            # Rows
-            for row in rows:
-                output.append(','.join(str(v) for v in row))
-            return '\n'.join(output)
-
+            return _format_as_csv(rows, keys)
         elif format == "markdown":
+            # Keep markdown format inline (not extracted to helper)
             output = []
-            keys = list(rows[0].keys())
-            # Header
             output.append('| ' + ' | '.join(keys) + ' |')
             output.append('| ' + ' | '.join(['---' for _ in keys]) + ' |')
-            # Rows
             for row in rows:
                 output.append('| ' + ' | '.join(str(v) for v in row) + ' |')
             output.append(f'\n{len(rows)} rows')
             return '\n'.join(output)
-
         else:  # table format (default)
-            output = []
-            keys = list(rows[0].keys())
-
-            # Calculate column widths
-            widths = {k: len(k) for k in keys}
-            for row in rows:
-                for k in keys:
-                    widths[k] = max(widths[k], len(str(row[k])))
-
-            # Header
-            header = ' | '.join(k.ljust(widths[k]) for k in keys)
-            separator = '-+-'.join('-' * widths[k] for k in keys)
-            output.append(header)
-            output.append(separator)
-
-            # Rows
-            for row in rows:
-                output.append(' | '.join(str(row[k]).ljust(widths[k]) for k in keys))
-
-            output.append(f'\n✅ {len(rows)} rows returned.')
-            output.append(f'⏱️ Execution time: {execution_time:.2f}ms')
-
-            return '\n'.join(output)
+            return _format_as_table(rows, keys, execution_time)
 
     except Exception as e:
         return f"❌ Query failed: {str(e)}\n\nCheck your SQL syntax and try again."
