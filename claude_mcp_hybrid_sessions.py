@@ -6268,6 +6268,281 @@ async def execute_sql(
         return f"❌ Error: {str(e)}"
 
 
+# ============================================================================
+# Helper Functions for manage_workspace_table
+# ============================================================================
+
+def _validate_operation(operation: str) -> Optional[dict]:
+    """
+    Validate operation parameter.
+
+    Args:
+        operation: Operation to validate
+
+    Returns:
+        Error dict if invalid, None if valid
+    """
+    valid_operations = ['create', 'drop', 'inspect', 'list']
+    if operation not in valid_operations:
+        return {
+            "error": "Invalid operation",
+            "provided": operation,
+            "valid_operations": valid_operations
+        }
+    return None
+
+
+def _handle_list_operation(conn) -> dict:
+    """
+    List workspace tables.
+
+    Args:
+        conn: Database connection
+
+    Returns:
+        Dict with list of workspace tables
+    """
+    rows = _get_table_list(conn, 'workspace_%')
+    tables = []
+    for row in rows:
+        # Get row count
+        if hasattr(conn, 'execute'):
+            count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {row['name']}")
+        else:
+            count_cursor = conn.cursor()
+            count_cursor.execute(f"SELECT COUNT(*) as count FROM {row['name']}")
+        count = count_cursor.fetchone()['count']
+
+        tables.append({
+            "name": row['name'],
+            "schema": row['sql'] if row['sql'] else "(PostgreSQL table)",
+            "row_count": count
+        })
+
+    return {
+        "operation": "list",
+        "workspace_tables": tables,
+        "total_count": len(tables)
+    }
+
+
+def _validate_and_sanitize_table_name(table_name: str) -> tuple:
+    """
+    Validate and sanitize table name.
+
+    Args:
+        table_name: Raw table name
+
+    Returns:
+        Tuple of (error_dict or None, safe_table_name, full_table_name)
+    """
+    import re
+
+    if not table_name:
+        return ({"error": "table_name is required for this operation"}, None, None)
+
+    # Sanitize table name and add workspace_ prefix
+    safe_table_name = re.sub(r'[^a-zA-Z0-9_]', '', table_name)
+    full_table_name = f"workspace_{safe_table_name}"
+
+    # Protect core tables
+    core_tables = [
+        'sessions', 'memory_entries', 'context_locks', 'context_archives',
+        'file_tags', 'todos', 'project_variables', 'query_results_cache',
+        'file_semantic_model'
+    ]
+    if safe_table_name in core_tables or table_name.startswith('workspace_'):
+        return (
+            {
+                "error": "Cannot use reserved table names or 'workspace_' prefix",
+                "attempted": table_name,
+                "reserved_tables": core_tables
+            },
+            None,
+            None
+        )
+
+    return (None, safe_table_name, full_table_name)
+
+
+def _handle_inspect_operation(conn, table_name: str) -> dict:
+    """
+    Inspect table schema and contents.
+
+    Args:
+        conn: Database connection
+        table_name: Full table name (with workspace_ prefix)
+
+    Returns:
+        Dict with inspection results
+    """
+    # Check if table exists
+    if not _table_exists(conn, table_name):
+        return {
+            "error": "Table not found",
+            "table": table_name,
+            "note": "Use operation='list' to see all workspace tables"
+        }
+
+    # Get row count
+    if hasattr(conn, 'execute'):
+        count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {table_name}")
+        sample_cursor = conn.execute(f"SELECT * FROM {table_name} LIMIT 5")
+    else:
+        count_cursor = conn.cursor()
+        count_cursor.execute(f"SELECT COUNT(*) as count FROM {table_name}")
+        sample_cursor = conn.cursor()
+        sample_cursor.execute(f"SELECT * FROM {table_name} LIMIT 5")
+
+    count = count_cursor.fetchone()['count']
+
+    # Get sample data (first 5 rows)
+    sample_data = [dict(row) for row in sample_cursor.fetchall()]
+
+    return {
+        "operation": "inspect",
+        "table": table_name,
+        "row_count": count,
+        "sample_data": sample_data
+    }
+
+
+def _handle_create_operation(
+    conn,
+    table_name: str,
+    schema: Optional[str],
+    dry_run: bool,
+    confirm: bool
+) -> dict:
+    """
+    Create a workspace table.
+
+    Args:
+        conn: Database connection
+        table_name: Full table name (with workspace_ prefix)
+        schema: Table schema definition
+        dry_run: If True, preview only
+        confirm: Must be True to execute
+
+    Returns:
+        Dict with create operation results
+    """
+    if not schema:
+        return {
+            "error": "schema is required for create operation",
+            "example": "id INTEGER PRIMARY KEY, name TEXT, value REAL"
+        }
+
+    # Check if table already exists
+    if _table_exists(conn, table_name):
+        return {
+            "error": "Table already exists",
+            "table": table_name,
+            "note": "Use operation='drop' first to recreate, or choose a different name"
+        }
+
+    create_sql = f"CREATE TABLE {table_name} ({schema})"
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "operation": "create",
+            "table": table_name,
+            "sql": create_sql,
+            "note": "Set dry_run=False and confirm=True to execute"
+        }
+
+    if not confirm:
+        return {
+            "error": "Confirmation required",
+            "note": "Set confirm=True to execute this operation"
+        }
+
+    # Execute CREATE
+    if hasattr(conn, 'execute'):
+        conn.execute(create_sql)
+    else:
+        cursor = conn.cursor()
+        cursor.execute(create_sql)
+    conn.commit()
+
+    return {
+        "success": True,
+        "operation": "create",
+        "table": table_name,
+        "sql": create_sql,
+        "usage": f"Use query_database() with: SELECT * FROM {table_name}"
+    }
+
+
+def _handle_drop_operation(
+    conn,
+    table_name: str,
+    dry_run: bool,
+    confirm: bool
+) -> dict:
+    """
+    Drop a workspace table.
+
+    Args:
+        conn: Database connection
+        table_name: Full table name (with workspace_ prefix)
+        dry_run: If True, preview only
+        confirm: Must be True to execute
+
+    Returns:
+        Dict with drop operation results
+    """
+    # Check if table exists
+    if not _table_exists(conn, table_name):
+        return {
+            "error": "Table not found",
+            "table": table_name,
+            "note": "Use operation='list' to see existing tables"
+        }
+
+    drop_sql = f"DROP TABLE {table_name}"
+
+    if dry_run:
+        # Get row count for preview
+        if hasattr(conn, 'execute'):
+            count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {table_name}")
+        else:
+            count_cursor = conn.cursor()
+            count_cursor.execute(f"SELECT COUNT(*) as count FROM {table_name}")
+        count = count_cursor.fetchone()['count']
+
+        return {
+            "dry_run": True,
+            "operation": "drop",
+            "table": table_name,
+            "rows_to_delete": count,
+            "sql": drop_sql,
+            "note": "Set dry_run=False and confirm=True to execute"
+        }
+
+    if not confirm:
+        return {
+            "error": "Confirmation required",
+            "note": "Set confirm=True to execute this operation"
+        }
+
+    # Execute DROP
+    if hasattr(conn, 'execute'):
+        conn.execute(drop_sql)
+    else:
+        cursor = conn.cursor()
+        cursor.execute(drop_sql)
+    conn.commit()
+
+    return {
+        "success": True,
+        "operation": "drop",
+        "table": table_name,
+        "sql": drop_sql
+    }
+
+
 @mcp.tool()
 async def manage_workspace_table(
     operation: str,
@@ -6370,207 +6645,162 @@ async def manage_workspace_table(
     Returns:
         JSON with operation result, including table info and SQL executed
     """
-    import time
-    import re
-
     try:
         # Validate operation
-        valid_operations = ['create', 'drop', 'inspect', 'list']
-        if operation not in valid_operations:
-            return json.dumps({
-                "error": "Invalid operation",
-                "provided": operation,
-                "valid_operations": valid_operations
-            }, indent=2)
+        error = _validate_operation(operation)
+        if error:
+            return json.dumps(error, indent=2)
 
-        # ✅ FIX: Use context manager to ensure connection is closed
+        # Use context manager to ensure connection is closed
         with _get_db_for_project(project) as conn:
-            # Handle LIST operation
+            # Handle LIST operation (no table_name needed)
             if operation == 'list':
-                rows = _get_table_list(conn, 'workspace_%')
-                tables = []
-                for row in rows:
-                    # Get row count
-                    if hasattr(conn, 'execute'):
-                        count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {row['name']}")
-                    else:
-                        count_cursor = conn.cursor()
-                        count_cursor.execute(f"SELECT COUNT(*) as count FROM {row['name']}")
-                    count = count_cursor.fetchone()['count']
-    
-                    tables.append({
-                        "name": row['name'],
-                        "schema": row['sql'] if row['sql'] else "(PostgreSQL table)",
-                        "row_count": count
-                    })
-    
-                return json.dumps({
-                    "operation": "list",
-                    "workspace_tables": tables,
-                    "total_count": len(tables)
-                }, indent=2)
-    
-            # Validate table_name
-            if not table_name:
-                return json.dumps({
-                    "error": "table_name is required for this operation"
-                }, indent=2)
-    
-            # Sanitize table name and add workspace_ prefix
-            safe_table_name = re.sub(r'[^a-zA-Z0-9_]', '', table_name)
-            full_table_name = f"workspace_{safe_table_name}"
-    
-            # Protect core tables
-            core_tables = [
-                'sessions', 'memory_entries', 'context_locks', 'context_archives',
-                'file_tags', 'todos', 'project_variables', 'query_results_cache',
-                'file_semantic_model'
-            ]
-            if safe_table_name in core_tables or table_name.startswith('workspace_'):
-                return json.dumps({
-                    "error": "Cannot use reserved table names or 'workspace_' prefix",
-                    "attempted": table_name,
-                    "reserved_tables": core_tables
-                }, indent=2)
-    
-            # Handle INSPECT operation
+                result = _handle_list_operation(conn)
+                return json.dumps(result, indent=2)
+
+            # For all other operations, validate and sanitize table_name
+            error, safe_table_name, full_table_name = _validate_and_sanitize_table_name(table_name)
+            if error:
+                return json.dumps(error, indent=2)
+
+            # Dispatch to appropriate handler based on operation
             if operation == 'inspect':
-                # Check if table exists
-                if not _table_exists(conn, full_table_name):
-                    return json.dumps({
-                        "error": "Table not found",
-                        "table": full_table_name,
-                        "note": "Use operation='list' to see all workspace tables"
-                    }, indent=2)
-    
-                # Get row count
-                if hasattr(conn, 'execute'):
-                    count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
-                    sample_cursor = conn.execute(f"SELECT * FROM {full_table_name} LIMIT 5")
-                else:
-                    count_cursor = conn.cursor()
-                    count_cursor.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
-                    sample_cursor = conn.cursor()
-                    sample_cursor.execute(f"SELECT * FROM {full_table_name} LIMIT 5")
-    
-                count = count_cursor.fetchone()['count']
-    
-                # Get sample data (first 5 rows)
-                sample_data = [dict(row) for row in sample_cursor.fetchall()]
-    
-                return json.dumps({
-                    "operation": "inspect",
-                    "table": full_table_name,
-                    "row_count": count,
-                    "sample_data": sample_data
-                }, indent=2)
-    
-            # Handle CREATE operation
-            if operation == 'create':
-                if not schema:
-                    return json.dumps({
-                        "error": "schema is required for create operation",
-                        "example": "id INTEGER PRIMARY KEY, name TEXT, value REAL"
-                    }, indent=2)
-    
-                # Check if table already exists
-                if _table_exists(conn, full_table_name):
-                    return json.dumps({
-                        "error": "Table already exists",
-                        "table": full_table_name,
-                        "note": "Use operation='drop' first to recreate, or choose a different name"
-                    }, indent=2)
-    
-                create_sql = f"CREATE TABLE {full_table_name} ({schema})"
-    
-                if dry_run:
-                    return json.dumps({
-                        "dry_run": True,
-                        "operation": "create",
-                        "table": full_table_name,
-                        "sql": create_sql,
-                        "note": "Set dry_run=False and confirm=True to execute"
-                    }, indent=2)
-    
-                if not confirm:
-                    return json.dumps({
-                        "error": "Confirmation required",
-                        "note": "Set confirm=True to execute this operation"
-                    }, indent=2)
-    
-                # Execute CREATE
-                if hasattr(conn, 'execute'):
-                    conn.execute(create_sql)
-                else:
-                    cursor = conn.cursor()
-                    cursor.execute(create_sql)
-                conn.commit()
-    
-                return json.dumps({
-                    "success": True,
-                    "operation": "create",
-                    "table": full_table_name,
-                    "sql": create_sql,
-                    "usage": f"Use query_database() with: SELECT * FROM {full_table_name}"
-                }, indent=2)
-    
-            # Handle DROP operation
-            if operation == 'drop':
-                # Check if table exists
-                if not _table_exists(conn, full_table_name):
-                    return json.dumps({
-                        "error": "Table not found",
-                        "table": full_table_name,
-                        "note": "Use operation='list' to see existing tables"
-                    }, indent=2)
-    
-                drop_sql = f"DROP TABLE {full_table_name}"
-    
-                if dry_run:
-                    # Get row count for preview
-                    if hasattr(conn, 'execute'):
-                        count_cursor = conn.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
-                    else:
-                        count_cursor = conn.cursor()
-                        count_cursor.execute(f"SELECT COUNT(*) as count FROM {full_table_name}")
-                    count = count_cursor.fetchone()['count']
-    
-                    return json.dumps({
-                        "dry_run": True,
-                        "operation": "drop",
-                        "table": full_table_name,
-                        "rows_to_delete": count,
-                        "sql": drop_sql,
-                        "note": "Set dry_run=False and confirm=True to execute"
-                    }, indent=2)
-    
-                if not confirm:
-                    return json.dumps({
-                        "error": "Confirmation required",
-                        "note": "Set confirm=True to execute this operation"
-                    }, indent=2)
-    
-                # Execute DROP
-                if hasattr(conn, 'execute'):
-                    conn.execute(drop_sql)
-                else:
-                    cursor = conn.cursor()
-                    cursor.execute(drop_sql)
-                conn.commit()
-    
-                return json.dumps({
-                    "success": True,
-                    "operation": "drop",
-                    "table": full_table_name,
-                    "sql": drop_sql
-                }, indent=2)
-    
+                result = _handle_inspect_operation(conn, full_table_name)
+            elif operation == 'create':
+                result = _handle_create_operation(conn, full_table_name, schema, dry_run, confirm)
+            elif operation == 'drop':
+                result = _handle_drop_operation(conn, full_table_name, dry_run, confirm)
+            else:
+                # Should never reach here due to validation, but just in case
+                result = {
+                    "error": f"Unhandled operation: {operation}",
+                    "note": "This is a bug - please report it"
+                }
+
+            return json.dumps(result, indent=2)
+
     except Exception as e:
         return json.dumps({
             "error": str(e),
             "operation": operation
         }, indent=2)
-    
+
+
+def _perform_semantic_search(conn, text: str, limit: int = 5) -> list:
+    """
+    Try semantic search with embeddings.
+
+    Args:
+        conn: Database connection
+        text: Search query text
+        limit: Maximum number of results
+
+    Returns:
+        List of formatted semantic result strings, or empty list if unavailable
+    """
+    semantic_results = []
+    try:
+        from src.services import embedding_service
+        from src.services.semantic_search import SemanticSearch
+
+        if embedding_service and embedding_service.enabled:
+            semantic_search = SemanticSearch(conn, embedding_service)
+
+            # Check if any contexts have embeddings
+            cursor = conn.execute("SELECT COUNT(*) as count FROM context_locks WHERE embedding IS NOT NULL")
+            embedded_count = cursor.fetchone()['count']
+
+            if embedded_count > 0:
+                # Use semantic search for better relevance
+                results = semantic_search.search_similar(
+                    query=text,
+                    limit=limit,
+                    threshold=0.5  # Lower threshold for check_contexts
+                )
+
+                if results:
+                    semantic_results.append("🔍 **Semantic Search Results:**\n")
+                    for result in results:
+                        priority_emoji = {
+                            'always_check': '⚠️',
+                            'important': '📌',
+                            'reference': '📄'
+                        }.get(result.get('priority', 'reference'), '📄')
+
+                        semantic_results.append(
+                            f"{priority_emoji} **{result['label']}** (similarity: {result['similarity']:.2f})\n"
+                            f"   {result['preview'][:150]}..."
+                        )
+
+                    semantic_results.append("\n💡 Use `recall_context(topic)` for full details")
+    except Exception as e:
+        # Graceful fallback - semantic search failed, use keyword matching
+        print(f"⚠️  Semantic search unavailable: {e}", file=sys.stderr)
+
+    return semantic_results
+
+
+def _get_keyword_based_results(conn, text: str, session_id: str, current_db_path: str) -> tuple:
+    """
+    Get keyword-based matching results (fallback method).
+
+    Args:
+        conn: Database connection (unused but kept for consistency)
+        text: Search query text
+        session_id: Current session ID
+        current_db_path: Database path
+
+    Returns:
+        Tuple of (relevant_contexts, violations) or (None, None) if unavailable
+    """
+    relevant = None
+    violations = None
+    try:
+        relevant = get_relevant_contexts_for_text(text, session_id, current_db_path)
+        violations = check_command_context(text, session_id, current_db_path)
+    except Exception as fallback_error:
+        # Keyword matching unavailable (PostgreSQL mode)
+        print(f"⚠️  Keyword fallback unavailable: {fallback_error}", file=sys.stderr)
+
+    return relevant, violations
+
+
+def _format_results_output(semantic_results: list, relevant: str, violations: str) -> str:
+    """
+    Format combined semantic and keyword results into output string.
+
+    Args:
+        semantic_results: List of semantic result strings
+        relevant: Keyword-based relevant contexts string
+        violations: Rule violations string
+
+    Returns:
+        Formatted output string or "No relevant locked contexts found." if empty
+    """
+    output = []
+
+    # Add semantic results if available
+    if semantic_results:
+        output.extend(semantic_results)
+        if relevant or violations:
+            output.append("\n" + "─" * 50 + "\n")
+
+    # Add keyword-based results
+    if relevant:
+        if semantic_results:
+            output.append("📝 **Keyword Matching Results:**\n")
+        output.append(relevant)
+
+    if violations:
+        if output:
+            output.append("")  # Add spacing
+        output.append(violations)
+
+    if not output:
+        return "No relevant locked contexts found."
+
+    return "\n".join(output)
+
 
 @mcp.tool()
 async def check_contexts(text: str, project: Optional[str] = None) -> str:
@@ -6659,79 +6889,14 @@ async def check_contexts(text: str, project: Optional[str] = None) -> str:
 
     # ✅ FIX: Use context manager to ensure connection is closed
     with _get_db_for_project(project) as conn:
-        # Enhanced relevance detection: Try semantic search first, fall back to keyword matching
-        semantic_results = []
-        try:
-            from src.services import embedding_service
-            from src.services.semantic_search import SemanticSearch
+        # Stage 1: Try semantic search first (faster, more accurate)
+        semantic_results = _perform_semantic_search(conn, text, limit=5)
 
-            if embedding_service and embedding_service.enabled:
-                semantic_search = SemanticSearch(conn, embedding_service)
+        # Stage 2: Get keyword-based results (fallback/supplement)
+        relevant, violations = _get_keyword_based_results(conn, text, session_id, current_db_path)
 
-                # Check if any contexts have embeddings
-                cursor = conn.execute("SELECT COUNT(*) as count FROM context_locks WHERE embedding IS NOT NULL")
-                embedded_count = cursor.fetchone()['count']
-
-                if embedded_count > 0:
-                    # Use semantic search for better relevance
-                    results = semantic_search.search_similar(
-                        query=text,
-                        limit=5,
-                        threshold=0.5  # Lower threshold for check_contexts
-                    )
-
-                    if results:
-                        semantic_results.append("🔍 **Semantic Search Results:**\n")
-                        for result in results:
-                            priority_emoji = {
-                                'always_check': '⚠️',
-                                'important': '📌',
-                                'reference': '📄'
-                            }.get(result.get('priority', 'reference'), '📄')
-
-                            semantic_results.append(
-                                f"{priority_emoji} **{result['label']}** (similarity: {result['similarity']:.2f})\n"
-                                f"   {result['preview'][:150]}..."
-                            )
-
-                        semantic_results.append("\n💡 Use `recall_context(topic)` for full details")
-        except Exception as e:
-            # Graceful fallback - semantic search failed, use keyword matching
-            print(f"⚠️  Semantic search unavailable: {e}", file=sys.stderr)
-
-        # Get keyword-based relevant contexts (original logic - graceful fallback for SQLite)
-        relevant = None
-        violations = None
-        try:
-            relevant = get_relevant_contexts_for_text(text, session_id, current_db_path)
-            violations = check_command_context(text, session_id, current_db_path)
-        except Exception as fallback_error:
-            # Keyword matching unavailable (PostgreSQL mode)
-            print(f"⚠️  Keyword fallback unavailable: {fallback_error}", file=sys.stderr)
-
-        output = []
-
-        # Add semantic results if available
-        if semantic_results:
-            output.extend(semantic_results)
-            if relevant or violations:
-                output.append("\n" + "─" * 50 + "\n")
-
-        # Add keyword-based results
-        if relevant:
-            if semantic_results:
-                output.append("📝 **Keyword Matching Results:**\n")
-            output.append(relevant)
-
-        if violations:
-            if output:
-                output.append("")  # Add spacing
-            output.append(violations)
-
-        if not output:
-            return "No relevant locked contexts found."
-
-        return "\n".join(output)
+        # Stage 3: Format and combine results
+        return _format_results_output(semantic_results, relevant, violations)
 
 @breadcrumb
 @mcp.tool()
@@ -8015,6 +8180,101 @@ Model: {embedding_service.model}
     }, indent=2)
 
 
+def _validate_llm_service():
+    """
+    Validate LLM service availability.
+
+    Returns: Tuple (error_response, llm_service)
+        - error_response: JSON error string or None if valid
+        - llm_service: Service instance if valid, else None
+    """
+    try:
+        from src.services import llm_service
+    except Exception as e:
+        error_json = json.dumps({
+            "error": "Service initialization failed",
+            "reason": str(e)
+        }, indent=2)
+        return error_json, None
+
+    if not llm_service.enabled:
+        error_json = json.dumps({
+            "error": "AI summarization not available",
+            "reason": "Ollama not running or LLM model not installed",
+            "setup": "1. Start Ollama\n2. Run: ollama pull qwen2.5-coder:1.5b",
+            "fallback": "Use recall_context(topic, preview_only=True) for extract-based summary"
+        }, indent=2)
+        return error_json, None
+
+    return None, llm_service
+
+
+def _retrieve_and_summarize_context(conn, topic: str, llm_service):
+    """
+    Fetch context from database and generate AI summary.
+
+    Args:
+        conn: Database connection
+        topic: Context topic/label
+        llm_service: LLM service instance
+
+    Returns: Dict with "error" key (error JSON) or "summary"/"preview" keys on success
+    """
+    cursor = conn.execute("""
+        SELECT content, preview FROM context_locks
+        WHERE label = ?
+        ORDER BY version DESC LIMIT 1
+    """, (topic,))
+
+    row = cursor.fetchone()
+    if not row:
+        return {"error": json.dumps({
+            "error": "Context not found",
+            "topic": topic
+        }, indent=2)}
+
+    summary = llm_service.summarize_context(row['content'])
+    if not summary:
+        return {"error": json.dumps({
+            "error": "Summary generation failed",
+            "fallback_preview": row['preview']
+        }, indent=2)}
+
+    return {"summary": summary, "preview": row['preview']}
+
+
+def _format_summary_response(summary: str, topic: str, model_info: str) -> str:
+    """
+    Format AI summary into standardized JSON response.
+
+    Args:
+        summary: AI-generated summary text
+        topic: Context topic/label
+        model_info: LLM model name
+
+    Returns: JSON formatted response string
+    """
+    summary_text = f"""
+🤖 AI-Generated Summary
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Topic: {topic}
+Model: {model_info}
+Performance: ~1-2s
+Cost: FREE (local)
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+""".strip()
+
+    return json.dumps({
+        "summary": summary_text,
+        "topic": topic,
+        "ai_summary": summary,
+        "model": model_info,
+        "performance": "~1-2s per summary",
+        "cost": "FREE (local)",
+        "note": "AI-generated summary may differ from extract-based preview"
+    }, indent=2)
+
+
 @mcp.tool()
 async def ai_summarize_context(topic: str, project: Optional[str] = None) -> str:
     """
@@ -8041,66 +8301,19 @@ async def ai_summarize_context(topic: str, project: Optional[str] = None) -> str
         #   - Key rules (MUST/ALWAYS/NEVER)
         #   - Technical concepts
     """
-    try:
-        from src.services import llm_service
-    except Exception as e:
-        return json.dumps({
-            "error": "Service initialization failed",
-            "reason": str(e)
-        }, indent=2)
+    # Step 1: Validate LLM service availability
+    error_response, llm_service = _validate_llm_service()
+    if error_response:
+        return error_response
 
-    if not llm_service.enabled:
-        return json.dumps({
-            "error": "AI summarization not available",
-            "reason": "Ollama not running or LLM model not installed",
-            "setup": "1. Start Ollama\n2. Run: ollama pull qwen2.5-coder:1.5b",
-            "fallback": "Use recall_context(topic, preview_only=True) for extract-based summary"
-        }, indent=2)
-
-    # ✅ FIX: Use context manager to ensure connection is closed
+    # Step 2: Retrieve context and generate summary
     with _get_db_for_project(project) as conn:
-        # Get context content
-        cursor = conn.execute("""
-            SELECT content, preview FROM context_locks
-            WHERE label = ?
-            ORDER BY version DESC LIMIT 1
-        """, (topic,))
+        result = _retrieve_and_summarize_context(conn, topic, llm_service)
+        if "error" in result:
+            return result["error"]
 
-        row = cursor.fetchone()
-        if not row:
-            return json.dumps({
-                "error": "Context not found",
-                "topic": topic
-            }, indent=2)
-
-        # Generate AI summary
-        summary = llm_service.summarize_context(row['content'])
-
-    if not summary:
-        return json.dumps({
-            "error": "Summary generation failed",
-            "fallback_preview": row['preview']
-        }, indent=2)
-
-    summary_text = f"""
-🤖 AI-Generated Summary
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-Topic: {topic}
-Model: {llm_service.default_model}
-Performance: ~1-2s
-Cost: FREE (local)
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-""".strip()
-
-    return json.dumps({
-        "summary": summary_text,
-        "topic": topic,
-        "ai_summary": summary,
-        "model": llm_service.default_model,
-        "performance": "~1-2s per summary",
-        "cost": "FREE (local)",
-        "note": "AI-generated summary may differ from extract-based preview"
-    }, indent=2)
+    # Step 3: Format and return response
+    return _format_summary_response(result["summary"], topic, llm_service.default_model)
 
 
 # DEPRECATED: Replaced by health_check_and_repair()
