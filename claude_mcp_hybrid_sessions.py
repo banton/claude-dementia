@@ -4085,6 +4085,183 @@ async def recall_context(
         else:
             return f"❌ No locked context found for '{topic}' (version: {version})"
 
+
+# ============================================================================
+# Helper Functions for unlock_context (Extracted for DRY and Testability)
+# ============================================================================
+
+def _find_contexts_to_delete(
+    conn,
+    topic: str,
+    version: str,
+    session_id: str
+) -> list[dict]:
+    """
+    Find contexts to delete based on topic and version criteria.
+
+    Searches the context_locks table for contexts matching the given topic
+    and version specification, filtered by session_id for isolation.
+
+    Args:
+        conn: Database connection (SQLite cursor-compatible)
+        topic: Context label/topic to search for
+        version: Version specifier - "all", "latest", or specific version string
+        session_id: Current session ID for session isolation
+
+    Returns:
+        List of context dictionaries matching the criteria (may be empty).
+        Each dict contains: id, label, version, content, metadata, session_id, etc.
+
+    Raises:
+        None - returns empty list if no matches found
+
+    Examples:
+        # Find all versions of a topic
+        contexts = _find_contexts_to_delete(conn, "api_config", "all", "sess_123")
+        # Returns: [{"id": 1, "label": "api_config", "version": "1.0", ...}, ...]
+
+        # Find only the latest version
+        contexts = _find_contexts_to_delete(conn, "api_config", "latest", "sess_123")
+        # Returns: [{"id": 5, "label": "api_config", "version": "2.3", ...}]
+
+        # Find specific version
+        contexts = _find_contexts_to_delete(conn, "api_config", "1.0", "sess_123")
+        # Returns: [{"id": 1, "label": "api_config", "version": "1.0", ...}]
+
+        # No matches found
+        contexts = _find_contexts_to_delete(conn, "nonexistent", "all", "sess_123")
+        # Returns: []
+    """
+    if version == "all":
+        cursor = conn.execute(
+            "SELECT * FROM context_locks WHERE label = ? AND session_id = ?",
+            (topic, session_id)
+        )
+    elif version == "latest":
+        cursor = conn.execute(
+            """SELECT * FROM context_locks
+               WHERE label = ? AND session_id = ?
+               ORDER BY version DESC
+               LIMIT 1""",
+            (topic, session_id)
+        )
+    else:
+        cursor = conn.execute(
+            "SELECT * FROM context_locks WHERE label = ? AND version = ? AND session_id = ?",
+            (topic, version, session_id)
+        )
+
+    return cursor.fetchall()
+
+
+def _check_critical_contexts(contexts: list[dict]) -> bool:
+    """
+    Check if any context in the list has critical (always_check) priority.
+
+    Args:
+        contexts: List of context dictionaries with 'metadata' field
+
+    Returns:
+        True if at least one context is critical, False otherwise
+
+    Notes:
+        - Handles None metadata gracefully (treats as non-critical)
+        - Handles malformed JSON gracefully (treats as non-critical)
+        - A context is critical if metadata.priority == 'always_check'
+
+    Examples:
+        >>> contexts = [
+        ...     {'metadata': '{"priority": "always_check"}'},
+        ...     {'metadata': '{"priority": "normal"}'}
+        ... ]
+        >>> _check_critical_contexts(contexts)
+        True
+
+        >>> contexts = [{'metadata': '{"priority": "normal"}'}]
+        >>> _check_critical_contexts(contexts)
+        False
+
+        >>> contexts = [{'metadata': None}]
+        >>> _check_critical_contexts(contexts)
+        False
+    """
+    for ctx in contexts:
+        try:
+            metadata = json.loads(ctx['metadata']) if ctx['metadata'] else {}
+            if metadata.get('priority') == 'always_check':
+                return True
+        except (json.JSONDecodeError, KeyError, TypeError):
+            # Treat malformed metadata as non-critical
+            continue
+
+    return False
+
+
+def _archive_contexts(
+    conn,
+    contexts: list[dict],
+    delete_reason: str
+) -> tuple[bool, Optional[str]]:
+    """
+    Archive contexts to context_archives table before deletion.
+
+    Args:
+        conn: Database connection object with execute() method
+        contexts: List of context dictionaries to archive. Each dict must contain:
+                  'id', 'session_id', 'label', 'version', 'content', 'preview',
+                  'key_concepts', 'metadata'
+        delete_reason: Reason for deletion (e.g., "Deleted all version(s)")
+
+    Returns:
+        Tuple of (success: bool, error_message: Optional[str])
+        - (True, None) if all archives succeeded
+        - (False, error_msg) if any archive failed
+
+    Notes:
+        - Archives are inserted with timestamp (time.time())
+        - Preserves all context fields (id, session_id, label, version, etc.)
+        - Returns on first failure (no partial archives)
+        - Uses parameterized queries to prevent SQL injection
+
+    Examples:
+        >>> contexts = [
+        ...     {
+        ...         'id': 1,
+        ...         'session_id': 'sess_123',
+        ...         'label': 'api_config',
+        ...         'version': 1,
+        ...         'content': 'API_KEY=xyz',
+        ...         'preview': 'API configuration',
+        ...         'key_concepts': 'api, config',
+        ...         'metadata': '{}'
+        ...     }
+        ... ]
+        >>> success, error = _archive_contexts(conn, contexts, "Deleted all version(s)")
+        >>> assert success is True
+        >>> assert error is None
+
+        >>> # Handle archive failure
+        >>> success, error = _archive_contexts(bad_conn, contexts, "Manual deletion")
+        >>> assert success is False
+        >>> assert "Failed to archive" in error
+    """
+    for ctx in contexts:
+        try:
+            conn.execute("""
+                INSERT INTO context_archives
+                (original_id, session_id, label, version, content, preview, key_concepts,
+                 metadata, deleted_at, delete_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (ctx['id'], ctx['session_id'], ctx['label'], ctx['version'],
+                  ctx['content'], ctx['preview'], ctx['key_concepts'],
+                  ctx['metadata'], time.time(), delete_reason))
+        except Exception as e:
+            error_msg = f"Failed to archive context '{ctx.get('label', 'unknown')}' (version {ctx.get('version', '?')}): {str(e)}"
+            return (False, error_msg)
+
+    return (True, None)
+
+
 @mcp.tool()
 async def unlock_context(
     topic: str,
@@ -4163,77 +4340,33 @@ async def unlock_context(
     with _get_db_for_project(project) as conn:
         session_id = _get_session_id_for_project(conn, project)
 
-        # 1. Find contexts to delete
-        if version == "all":
-            cursor = conn.execute("""
-                SELECT * FROM context_locks
-                WHERE label = ? AND session_id = ?
-            """, (topic, session_id))
-        elif version == "latest":
-            cursor = conn.execute("""
-                SELECT * FROM context_locks
-                WHERE label = ? AND session_id = ?
-                ORDER BY version DESC
-                LIMIT 1
-            """, (topic, session_id))
-        else:
-            cursor = conn.execute("""
-                SELECT * FROM context_locks
-                WHERE label = ? AND version = ? AND session_id = ?
-            """, (topic, version, session_id))
-
-        contexts = cursor.fetchall()
+        # Step 1: Find contexts to delete (using helper function)
+        contexts = _find_contexts_to_delete(conn, topic, version, session_id)
 
         if not contexts:
             return f"❌ Context '{topic}' (version: {version}) not found"
 
-        # 2. Check for critical contexts
-        has_critical = False
-        for ctx in contexts:
-            metadata = json.loads(ctx['metadata']) if ctx['metadata'] else {}
-            if metadata.get('priority') == 'always_check':
-                has_critical = True
-                break
+        # Step 2: Check for critical contexts (using helper function)
+        has_critical = _check_critical_contexts(contexts)
 
         if has_critical and not force:
             return f"⚠️  Cannot delete critical (always_check) context '{topic}' without force=True\n" \
                    f"   This context contains important rules. Use force=True if you're sure."
 
-        # 3. Archive before deletion
+        # Step 3: Archive before deletion (using helper function)
         if archive:
-            for ctx in contexts:
-                try:
-                    conn.execute("""
-                        INSERT INTO context_archives
-                        (original_id, session_id, label, version, content, preview, key_concepts,
-                         metadata, deleted_at, delete_reason)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (ctx['id'], ctx['session_id'], ctx['label'], ctx['version'],
-                          ctx['content'], ctx['preview'], ctx['key_concepts'],
-                          ctx['metadata'], time.time(), f"Deleted {version} version(s)"))
-                except Exception as e:
-                    return f"❌ Failed to archive context: {str(e)}"
+            delete_reason = f"Deleted {version} version(s)"
+            success, error = _archive_contexts(conn, contexts, delete_reason)
+            if not success:
+                return f"❌ {error}"
 
-        # 4. Delete contexts
+        # Step 4: Delete contexts
         try:
-            if version == "all":
-                conn.execute("""
-                    DELETE FROM context_locks
-                    WHERE label = ? AND session_id = ?
-                """, (topic, session_id))
-            elif version == "latest":
-                # Delete the latest version (already fetched in contexts)
-                conn.execute("""
-                    DELETE FROM context_locks
-                    WHERE id = ?
-                """, (contexts[0]['id'],))
-            else:
-                conn.execute("""
-                    DELETE FROM context_locks
-                    WHERE label = ? AND version = ? AND session_id = ?
-                """, (topic, version, session_id))
+            # Delete all found contexts by ID (simpler than query branching)
+            for ctx in contexts:
+                conn.execute("DELETE FROM context_locks WHERE id = ?", (ctx['id'],))
 
-            # Create audit trail entry
+            # Step 5: Create audit trail entry
             current_time = time.time()
             count = len(contexts)
             version_str = f"{count} version(s)" if version == "all" else f"version {version}"
