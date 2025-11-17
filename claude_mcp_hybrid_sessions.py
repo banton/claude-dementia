@@ -3671,6 +3671,89 @@ async def get_query_page(query_id: str, offset: int = 0, limit: int = 20, projec
 # CONTEXT LOCKING (unchanged)
 # ============================================================================
 #
+# Helper functions for lock_context (extracted for DRY and testability)
+
+def _auto_detect_priority(content: str) -> str:
+    """Auto-detect priority level based on content keywords."""
+    content_lower = content.lower()
+    if any(word in content_lower for word in ['always', 'never', 'must']):
+        return 'always_check'
+    elif any(word in content_lower for word in ['important', 'critical', 'required']):
+        return 'important'
+    else:
+        return 'reference'
+
+
+def _get_next_version(conn, topic: str, session_id: str) -> str:
+    """Get the next version number for a context topic."""
+    cursor = conn.execute("""
+        SELECT version FROM context_locks
+        WHERE label = ? AND session_id = ?
+        ORDER BY locked_at DESC
+        LIMIT 1
+    """, (topic, session_id))
+
+    row = cursor.fetchone()
+    if row:
+        parts = row['version'].split('.')
+        if len(parts) == 2:
+            major, minor = parts
+            return f"{major}.{int(minor)+1}"
+        else:
+            return "1.1"
+    else:
+        return "1.0"
+
+
+def _extract_keywords_from_content(content: str) -> list[str]:
+    """Extract technical keywords from content using pattern matching."""
+    keywords = []
+    keyword_patterns = {
+        'output': r'\b(output|directory|folder|path)\b',
+        'test': r'\b(test|testing|spec)\b',
+        'config': r'\b(config|settings|configuration)\b',
+        'api': r'\b(api|endpoint|rest|graphql)\b',
+        'database': r'\b(database|db|sql|table)\b',
+        'security': r'\b(auth|token|password|secret)\b',
+    }
+    content_lower = content.lower()
+    for key, pattern in keyword_patterns.items():
+        if re.search(pattern, content_lower):
+            keywords.append(key)
+    return keywords
+
+
+def _generate_and_store_embedding(conn, context_id: int, preview: str, topic: str) -> str:
+    """Generate and store embedding for context, returns status string."""
+    embedding_status = ""
+    try:
+        from src.services import embedding_service
+        if embedding_service and embedding_service.enabled:
+            embedding_text = preview if len(preview) <= 1020 else preview[:1020]
+            embedding = embedding_service.generate_embedding(embedding_text)
+
+            if embedding:
+                import pickle
+                embedding_bytes = pickle.dumps(embedding)
+
+                conn.execute("""
+                    UPDATE context_locks
+                    SET embedding = ?, embedding_model = ?
+                    WHERE id = ?
+                """, (embedding_bytes, embedding_service.model, context_id))
+                conn.commit()
+                embedding_status = " [embedded]"
+            else:
+                print(f"⚠️  Embedding generation returned None for context '{topic}'", file=sys.stderr)
+        else:
+            print(f"⚠️  Embedding service not available for context '{topic}' - run generate_embeddings() later", file=sys.stderr)
+    except Exception as e:
+        print(f"⚠️  Could not generate embedding for '{topic}': {e}", file=sys.stderr)
+        print(f"   Run generate_embeddings() to add embeddings later", file=sys.stderr)
+
+    return embedding_status
+
+
 @breadcrumb
 @mcp.tool()
 async def lock_context(
@@ -3777,15 +3860,9 @@ async def lock_context(
         except Exception as e:
             print(f"⚠️  Warning: Could not ensure session exists: {e}", file=sys.stderr)
 
-        # Auto-detect priority if not specified
+        # Auto-detect priority if not specified (using helper)
         if priority is None:
-            content_lower = content.lower()
-            if any(word in content_lower for word in ['always', 'never', 'must']):
-                priority = 'always_check'
-            elif any(word in content_lower for word in ['important', 'critical', 'required']):
-                priority = 'important'
-            else:
-                priority = 'reference'
+            priority = _auto_detect_priority(content)
 
         # Validate priority
         valid_priorities = ['always_check', 'important', 'reference']
@@ -3795,40 +3872,11 @@ async def lock_context(
         # Generate hash
         content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
 
-        # Get latest version for this topic
-        cursor = conn.execute("""
-            SELECT version FROM context_locks
-            WHERE label = ? AND session_id = ?
-            ORDER BY locked_at DESC
-            LIMIT 1
-        """, (topic, session_id))
+        # Get next version (using helper)
+        version = _get_next_version(conn, topic, session_id)
 
-        row = cursor.fetchone()
-        if row:
-            # Parse and increment version
-            parts = row['version'].split('.')
-            if len(parts) == 2:
-                major, minor = parts
-                version = f"{major}.{int(minor)+1}"
-            else:
-                version = "1.1"
-        else:
-            version = "1.0"
-
-        # Extract keywords for better matching
-        keywords = []
-        keyword_patterns = {
-            'output': r'\b(output|directory|folder|path)\b',
-            'test': r'\b(test|testing|spec)\b',
-            'config': r'\b(config|settings|configuration)\b',
-            'api': r'\b(api|endpoint|rest|graphql)\b',
-            'database': r'\b(database|db|sql|table)\b',
-            'security': r'\b(auth|token|password|secret)\b',
-        }
-        content_lower = content.lower()
-        for key, pattern in keyword_patterns.items():
-            if re.search(pattern, content_lower):
-                keywords.append(key)
+        # Extract keywords (using helper)
+        keywords = _extract_keywords_from_content(content)
 
         # Prepare metadata with priority and keywords
         metadata = {
@@ -3875,37 +3923,8 @@ async def lock_context(
 
             conn.commit()
 
-            # Generate embedding (non-blocking, graceful failure)
-            embedding_status = ""
-            try:
-                from src.services import embedding_service
-                if embedding_service and embedding_service.enabled:
-                    # Use preview for embedding (optimized for 1020 char limit)
-                    embedding_text = preview if len(preview) <= 1020 else preview[:1020]
-                    embedding = embedding_service.generate_embedding(embedding_text)
-
-                    if embedding:
-                        # Store embedding - convert to bytes for PostgreSQL BYTEA
-                        import pickle
-                        embedding_bytes = pickle.dumps(embedding)
-
-                        conn.execute("""
-                            UPDATE context_locks
-                            SET embedding = ?, embedding_model = ?
-                            WHERE id = ?
-                        """, (embedding_bytes, embedding_service.model, context_id))
-                        conn.commit()
-                        embedding_status = " [embedded]"
-                    else:
-                        # Mark for manual embedding generation
-                        print(f"⚠️  Embedding generation returned None for context '{topic}'", file=sys.stderr)
-                else:
-                    # Service not available - context will need manual embedding
-                    print(f"⚠️  Embedding service not available for context '{topic}' - run generate_embeddings() later", file=sys.stderr)
-            except Exception as e:
-                # Graceful failure - context is saved, just without embedding
-                print(f"⚠️  Could not generate embedding for '{topic}': {e}", file=sys.stderr)
-                print(f"   Run generate_embeddings() to add embeddings later", file=sys.stderr)
+            # Generate embedding (using helper - non-blocking, graceful failure)
+            embedding_status = _generate_and_store_embedding(conn, context_id, preview, topic)
 
             priority_indicator = {
                 'always_check': ' ⚠️ [ALWAYS CHECK]',
@@ -3923,6 +3942,82 @@ async def lock_context(
             raise
         except Exception as e:
             return f"❌ Failed to lock context: {str(e)}"
+
+
+# Helper functions for recall_context (extracted for DRY and testability)
+
+def _fetch_context_by_version(conn, topic, version, session_id):
+    """
+    Query context_locks table for a specific topic and version.
+    Returns the database row or None if not found.
+    """
+    if version == "latest":
+        cursor = conn.execute("""
+            SELECT id, content, preview, key_concepts, version, locked_at, metadata
+            FROM context_locks
+            WHERE label = ? AND session_id = ?
+            ORDER BY locked_at DESC
+            LIMIT 1
+        """, (topic, session_id))
+    else:
+        # Clean version (remove 'v' prefix if present)
+        clean_version = version[1:] if version.startswith('v') else version
+        cursor = conn.execute("""
+            SELECT id, content, preview, key_concepts, version, locked_at, metadata
+            FROM context_locks
+            WHERE label = ? AND version = ? AND session_id = ?
+        """, (topic, clean_version, session_id))
+
+    return cursor.fetchone()
+
+
+def _format_recall_preview(row, topic):
+    """
+    Format a context row as a JSON preview response.
+    Returns token-efficient summary with key metadata.
+    """
+    dt = datetime.fromtimestamp(row['locked_at'])
+    metadata = json.loads(row['metadata']) if row['metadata'] else {}
+    tags = metadata.get('tags', [])
+    key_concepts = json.loads(row['key_concepts']) if row['key_concepts'] else []
+
+    content_size_kb = len(row['content']) / 1024
+    preview_text = row['preview'] or row['content'][:500] + "..."
+
+    return json.dumps({
+        "topic": topic,
+        "version": row['version'],
+        "preview": preview_text,
+        "key_concepts": key_concepts[:5],  # Top 5 concepts
+        "tags": tags,
+        "locked_at": dt.strftime('%Y-%m-%d %H:%M'),
+        "content_size_kb": round(content_size_kb, 1),
+        "note": "Use preview_only=False to get full content"
+    }, indent=2)
+
+
+def _format_recall_full(row, topic):
+    """
+    Format a context row as full content response.
+    Returns complete context with metadata header.
+    """
+    dt = datetime.fromtimestamp(row['locked_at'])
+    metadata = json.loads(row['metadata']) if row['metadata'] else {}
+    tags = metadata.get('tags', [])
+    key_concepts = json.loads(row['key_concepts']) if row['key_concepts'] else []
+
+    output = []
+    output.append(f"📌 {topic} v{row['version']}")
+    output.append(f"Locked: {dt.strftime('%Y-%m-%d %H:%M')}")
+    if tags:
+        output.append(f"Tags: {', '.join(tags)}")
+    if key_concepts:
+        output.append(f"Concepts: {', '.join(key_concepts[:5])}")
+    output.append("-" * 40)
+    output.append(row['content'])
+
+    return "\n".join(output)
+
 
 @breadcrumb
 @mcp.tool()
@@ -4020,30 +4115,11 @@ async def recall_context(
     with _get_db_for_project(project) as conn:
         session_id = _get_session_id_for_project(conn, project)
 
-        if version == "latest":
-            cursor = conn.execute("""
-                SELECT id, content, preview, key_concepts, version, locked_at, metadata
-                FROM context_locks
-                WHERE label = ? AND session_id = ?
-                ORDER BY locked_at DESC
-                LIMIT 1
-            """, (topic, session_id))
-        else:
-            # Clean version (remove 'v' prefix if present)
-            clean_version = version[1:] if version.startswith('v') else version
-            cursor = conn.execute("""
-                SELECT id, content, preview, key_concepts, version, locked_at, metadata
-                FROM context_locks
-                WHERE label = ? AND version = ? AND session_id = ?
-            """, (topic, clean_version, session_id))
+        # Fetch context using helper
+        row = _fetch_context_by_version(conn, topic, version, session_id)
 
-        row = cursor.fetchone()
         if row:
             context_id = row['id']
-            dt = datetime.fromtimestamp(row['locked_at'])
-            metadata = json.loads(row['metadata']) if row['metadata'] else {}
-            tags = metadata.get('tags', [])
-            key_concepts = json.loads(row['key_concepts']) if row['key_concepts'] else []
 
             # Track access
             conn.execute("""
@@ -4054,34 +4130,11 @@ async def recall_context(
             """, (time.time(), context_id))
             conn.commit()
 
+            # Return formatted response using helpers
             if preview_only:
-                # Return preview mode (token-efficient)
-                content_size_kb = len(row['content']) / 1024
-                preview_text = row['preview'] or row['content'][:500] + "..."
-
-                return json.dumps({
-                    "topic": topic,
-                    "version": row['version'],
-                    "preview": preview_text,
-                    "key_concepts": key_concepts[:5],  # Top 5 concepts
-                    "tags": tags,
-                    "locked_at": dt.strftime('%Y-%m-%d %H:%M'),
-                    "content_size_kb": round(content_size_kb, 1),
-                    "note": "Use preview_only=False to get full content"
-                }, indent=2)
+                return _format_recall_preview(row, topic)
             else:
-                # Return full content
-                output = []
-                output.append(f"📌 {topic} v{row['version']}")
-                output.append(f"Locked: {dt.strftime('%Y-%m-%d %H:%M')}")
-                if tags:
-                    output.append(f"Tags: {', '.join(tags)}")
-                if key_concepts:
-                    output.append(f"Concepts: {', '.join(key_concepts[:5])}")
-                output.append("-" * 40)
-                output.append(row['content'])
-
-                return "\n".join(output)
+                return _format_recall_full(row, topic)
         else:
             return f"❌ No locked context found for '{topic}' (version: {version})"
 
