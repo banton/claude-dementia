@@ -10,6 +10,7 @@ Run with: python3 -m pytest test_claude_mcp_utils.py -v
 
 import pytest
 import json
+import sys
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
 
@@ -100,22 +101,25 @@ class TestSanitizeProjectName:
     def test_unicode_characters(self):
         """Test handling of unicode characters."""
         assert sanitize_project_name("café") == "caf"
-        assert sanitize_project_name("项目") == ""  # Should raise on empty
-
+        # Chinese characters only - should raise ValueError
         with pytest.raises(ValueError):
-            sanitize_project_name("项目")  # Chinese chars only
+            sanitize_project_name("项目")
 
 
 class TestValidateSessionStore:
     """Test validate_session_store() function."""
 
-    @patch('claude_mcp_utils._session_store')
-    @patch('claude_mcp_utils._local_session_id')
-    def test_valid_session_store(self, mock_session_id, mock_store):
+    def test_valid_session_store(self):
         """Test with valid session store and ID."""
-        # Note: This test requires mocking the imports correctly
-        # In actual implementation, this would need proper module mocking
-        pass  # Placeholder - see note below
+        # Create a mock module with required attributes
+        mock_module = MagicMock()
+        mock_module._session_store = Mock()  # Non-None value
+        mock_module._local_session_id = 'test_session_123'  # Non-empty value
+
+        with patch.dict('sys.modules', {'claude_mcp_hybrid_sessions': mock_module}):
+            is_valid, error = validate_session_store()
+            assert is_valid is True
+            assert error is None
 
     def test_import_error_handling(self):
         """Test handling when module import fails."""
@@ -232,62 +236,78 @@ class TestSafeJsonResponse:
 class TestGetDbConnection:
     """Test get_db_connection() context manager."""
 
-    @patch('claude_mcp_utils._get_db_for_project')
-    def test_yields_connection(self, mock_get_db):
+    def test_yields_connection(self):
         """Test that context manager yields connection."""
         mock_conn = Mock()
-        mock_get_db.return_value = mock_conn
+        mock_get_db = Mock(return_value=mock_conn)
 
-        with get_db_connection("test_project") as conn:
-            assert conn == mock_conn
+        # Create mock module
+        mock_module = MagicMock()
+        mock_module._get_db_for_project = mock_get_db
 
-        mock_get_db.assert_called_once_with("test_project")
+        with patch.dict('sys.modules', {'claude_mcp_hybrid_sessions': mock_module}):
+            with get_db_connection("test_project") as conn:
+                assert conn == mock_conn
 
-    @patch('claude_mcp_utils._get_db_for_project')
-    def test_closes_connection_on_success(self, mock_get_db):
+            mock_get_db.assert_called_once_with("test_project")
+
+    def test_closes_connection_on_success(self):
         """Test connection is closed on successful execution."""
         mock_conn = Mock()
-        mock_get_db.return_value = mock_conn
+        mock_get_db = Mock(return_value=mock_conn)
 
-        with get_db_connection("test_project") as conn:
-            pass
+        mock_module = MagicMock()
+        mock_module._get_db_for_project = mock_get_db
 
-        mock_conn.close.assert_called_once()
+        with patch.dict('sys.modules', {'claude_mcp_hybrid_sessions': mock_module}):
+            with get_db_connection("test_project") as conn:
+                pass
 
-    @patch('claude_mcp_utils._get_db_for_project')
-    def test_closes_connection_on_error(self, mock_get_db):
+            mock_conn.close.assert_called_once()
+
+    def test_closes_connection_on_error(self):
         """Test connection is closed even on exception."""
         mock_conn = Mock()
-        mock_get_db.return_value = mock_conn
+        mock_get_db = Mock(return_value=mock_conn)
 
-        with pytest.raises(ValueError):
-            with get_db_connection("test_project") as conn:
-                raise ValueError("Test error")
+        mock_module = MagicMock()
+        mock_module._get_db_for_project = mock_get_db
 
-        mock_conn.close.assert_called_once()
+        with patch.dict('sys.modules', {'claude_mcp_hybrid_sessions': mock_module}):
+            with pytest.raises(ValueError):
+                with get_db_connection("test_project") as conn:
+                    raise ValueError("Test error")
 
-    @patch('claude_mcp_utils._get_db_for_project')
-    def test_handles_none_connection(self, mock_get_db):
+            mock_conn.close.assert_called_once()
+
+    def test_handles_none_connection(self):
         """Test handling when connection is None."""
-        mock_get_db.return_value = None
+        mock_get_db = Mock(return_value=None)
 
-        # Should not raise error
-        with get_db_connection("test_project") as conn:
-            assert conn is None
+        mock_module = MagicMock()
+        mock_module._get_db_for_project = mock_get_db
 
-    @patch('claude_mcp_utils._get_db_for_project')
-    def test_handles_close_error(self, mock_get_db):
+        with patch.dict('sys.modules', {'claude_mcp_hybrid_sessions': mock_module}):
+            # Should not raise error
+            with get_db_connection("test_project") as conn:
+                assert conn is None
+
+    def test_handles_close_error(self):
         """Test handling when close() raises error."""
         mock_conn = Mock()
         mock_conn.close.side_effect = Exception("Close failed")
-        mock_get_db.return_value = mock_conn
+        mock_get_db = Mock(return_value=mock_conn)
 
-        # Should not raise error, just log warning
-        with get_db_connection("test_project") as conn:
-            pass
+        mock_module = MagicMock()
+        mock_module._get_db_for_project = mock_get_db
 
-        # Verify close was attempted
-        mock_conn.close.assert_called_once()
+        with patch.dict('sys.modules', {'claude_mcp_hybrid_sessions': mock_module}):
+            # Should not raise error, just log warning
+            with get_db_connection("test_project") as conn:
+                pass
+
+            # Verify close was attempted
+            mock_conn.close.assert_called_once()
 
 
 class TestFormatErrorResponse:
