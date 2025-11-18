@@ -253,8 +253,10 @@ async def graceful_mcp_delete(request: Request):
                 session_id=session_id,
                 correlation_id=correlation_id)
 
-    # Return 204 No Content (must provide empty content for Starlette)
-    return Response(status_code=204)
+    # Return 202 Accepted instead of 204 to prevent Custom Connector token discard
+    # 202 means "accepted for processing" not "resource deleted"
+    # Workaround for Custom Connector bug where it discards OAuth token after DELETE 204
+    return Response(status_code=202, content=b"")
 
 async def health_check(request: Request):
     """Health check for DigitalOcean (unauthenticated)."""
