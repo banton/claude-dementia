@@ -325,7 +325,8 @@ async def list_tools_endpoint(request: Request):
     for tool in tools_list:
         tools.append({
             "name": tool.name,
-            "description": tool.description or "No description"
+            "description": tool.description or "No description",
+            "inputSchema": tool.inputSchema
         })
 
     logger.info("list_tools_success",
