@@ -162,6 +162,12 @@ class MCPRequestLoggingMiddleware(BaseHTTPMiddleware):
         # Process the request
         start_time = time.time()
         response = await call_next(request)
+        
+        # Ensure SSE responses are not buffered by Nginx/DigitalOcean
+        if request.url.path.startswith('/mcp'):
+            response.headers['X-Accel-Buffering'] = 'no'
+            
+        # Log response details (header-only)
         elapsed_ms = (time.time() - start_time) * 1000
 
         # Log the response for /mcp endpoint
@@ -194,10 +200,10 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         start_time = time.time()
         try:
-            # 45 second timeout (longer than client's 30s timeout)
+            # 300 second timeout (matching research recommendation for cold starts)
             response = await asyncio.wait_for(
                 call_next(request),
-                timeout=45.0
+                timeout=300.0
             )
 
             elapsed = time.time() - start_time
@@ -221,7 +227,7 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
                 status_code=504,
                 content={
                     "error": "Request timeout",
-                    "detail": f"Request exceeded 45 second timeout (elapsed: {round(elapsed, 2)}s)"
+                    "detail": f"Request exceeded 300 second timeout (elapsed: {round(elapsed, 2)}s)"
                 }
             )
 
@@ -470,7 +476,7 @@ app.routes.insert(4, Route('/metrics', metrics_endpoint, methods=['GET']))
 
 # Replace FastMCP's default DELETE /mcp handler with graceful version
 # Find and remove existing DELETE route, then add our custom one
-routes_to_keep = [r for r in app.routes if not (r.path == '/mcp' and r.methods and 'DELETE' in r.methods)]
+routes_to_keep = [r for r in app.routes if not (isinstance(r, Route) and r.path == '/mcp' and r.methods and 'DELETE' in r.methods)]
 app.routes.clear()
 app.routes.extend(routes_to_keep)
 app.routes.insert(5, Route('/mcp', graceful_mcp_delete, methods=['DELETE']))
@@ -480,7 +486,9 @@ for idx, route in enumerate(OAUTH_ROUTES):
     app.routes.insert(5 + idx, route)
 
 # Add middleware (order matters - last added runs first in Starlette)
-# Execution order: Timeout -> RequestLogging -> SessionPersistence -> Auth -> CorrelationID -> Handler
+# Execution order: Timeout -> RequestLogging -> SessionPersistence -> Auth -> CorrelationID -> CORS -> Handler
+from starlette.middleware.cors import CORSMiddleware
+
 app.add_middleware(CorrelationIdMiddleware)              # Innermost - adds correlation ID
 app.add_middleware(BearerAuthMiddleware)                 # Auth check
 if adapter is not None:
@@ -488,6 +496,23 @@ if adapter is not None:
                        db_pool=adapter)                  # Pass database adapter (not pool)
 app.add_middleware(MCPRequestLoggingMiddleware)          # Log /mcp requests/responses
 app.add_middleware(TimeoutMiddleware)                    # Catch timeouts
+
+# Add CORS middleware (outermost to handle preflight requests)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://claude.ai", 
+        "https://preview.claude.ai", 
+        "http://localhost:5173",  # MCP Inspector
+        "http://localhost:3000"   # Local dev
+    ],
+    allow_origin_regex="https://.*\.claude\.ai",  # Allow all claude.ai subdomains
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS", "DELETE"],
+    allow_headers=["Content-Type", "Authorization", "Mcp-Session-Id", "X-Correlation-ID"],
+    expose_headers=["Mcp-Session-Id", "X-Correlation-ID", "X-Request-Id"]
+)
+
 # NOTE: SSE crash suppression now handled by graceful DELETE handler, not middleware
 
 logger.info("app_initialized",

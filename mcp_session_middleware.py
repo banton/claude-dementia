@@ -215,9 +215,19 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                     logger.info(f"Allowing discovery method '{method}' for pending session: {stable_session_id[:8]}")
                     return await call_next(request)
 
+                # Allow DELETE requests (client disconnection)
+                if request.method == 'DELETE':
+                    logger.info(f"Allowing DELETE request for pending session: {stable_session_id[:8]}")
+                    return await call_next(request)
+
                 # Allow MCP protocol notifications (needed for client initialization)
-                if method.startswith('notifications/'):
+                if method.startswith('notifications/') or method.startswith('logging/'):
                     logger.info(f"Allowing notification '{method}' for pending session: {stable_session_id[:8]}")
+                    return await call_next(request)
+                
+                # Allow ping (health check)
+                if method == 'ping':
+                    logger.info(f"Allowing ping for pending session: {stable_session_id[:8]}")
                     return await call_next(request)
 
                 # Allow project selection tools (needed to choose a project!)
