@@ -449,6 +449,16 @@ async def metrics_endpoint(request: Request):
 # APPLICATION SETUP
 # ============================================================================
 
+# PATCH: Fix schema compatibility for Custom Connector
+# Removes 'title' fields and simplifies 'anyOf' structures that confuse the connector
+try:
+    from schema_patcher import patch_mcp_tools
+    logger.info("patching_tool_schemas_start")
+    patch_mcp_tools(mcp)
+    logger.info("patching_tool_schemas_complete")
+except Exception as e:
+    logger.error("patching_tool_schemas_failed", error=str(e))
+
 # Get FastMCP's Starlette app (already has /mcp routes and lifespan)
 app = mcp.streamable_http_app()
 
