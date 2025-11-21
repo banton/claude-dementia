@@ -59,11 +59,18 @@ def patch_mcp_tools(mcp_instance):
     count = 0
     
     for name, tool in tools.items():
-        if hasattr(tool, 'parameters'):
+        # FastMCP tools have inputSchema, not parameters
+        if hasattr(tool, 'inputSchema'):
+            try:
+                clean_schema(tool.inputSchema)
+                count += 1
+            except Exception as e:
+                logger.error(f"Failed to clean schema for tool {name}: {e}")
+        elif hasattr(tool, 'parameters'):
             try:
                 clean_schema(tool.parameters)
                 count += 1
             except Exception as e:
                 logger.error(f"Failed to clean schema for tool {name}: {e}")
-                
+
     logger.info(f"Patched schemas for {count} tools")
