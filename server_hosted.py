@@ -494,6 +494,42 @@ except Exception as e:
 # Get FastMCP's Starlette app (already has /mcp routes and lifespan)
 app = mcp.streamable_http_app()
 
+# Wrap FastMCP's lifespan with database keep-alive task
+# This prevents Neon from sleeping and causing 5-11 second response times
+from database_keepalive import start_keepalive_scheduler
+
+_original_lifespan = app.router.lifespan_context
+
+@asynccontextmanager
+async def lifespan_with_keepalive(app_instance):
+    """Wrap FastMCP's lifespan to add database keep-alive task."""
+    # Start database keep-alive task (ping every 5 minutes)
+    keepalive_task = None
+    if adapter is not None:
+        keepalive_task = asyncio.create_task(
+            start_keepalive_scheduler(adapter, interval_seconds=300)
+        )
+        logger.info("database_keepalive_task_started")
+
+    # Enter FastMCP's lifespan (if it exists)
+    if _original_lifespan is not None:
+        async with _original_lifespan(app_instance):
+            yield
+    else:
+        yield
+
+    # Cleanup: Cancel keep-alive task on shutdown
+    if keepalive_task is not None:
+        keepalive_task.cancel()
+        try:
+            await keepalive_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("database_keepalive_task_stopped")
+
+# Replace app's lifespan with wrapped version
+app.router.lifespan_context = lifespan_with_keepalive
+
 # Eagerly initialize database at module load to prevent first-request timeout
 # Neon database may be suspended and take 10-15s to wake up
 # This ensures the connection pool is ready before serving requests
