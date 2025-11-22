@@ -3227,7 +3227,7 @@ async def wake_up(project: Optional[str] = None) -> str:
 #    return json.dumps(session_data, indent=2)
 #
 #
-@mcp.tool()
+#@mcp.tool()
 async def sleep(project: Optional[str] = None) -> str:
     """
     ⚠️  **DEPRECATED**: This tool is no longer needed.
