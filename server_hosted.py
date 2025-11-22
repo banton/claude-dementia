@@ -527,8 +527,8 @@ async def lifespan_with_keepalive(app_instance):
             pass
         logger.info("database_keepalive_task_stopped")
 
-# Replace app's lifespan with wrapped version
-app.router.lifespan_context = lifespan_with_keepalive
+# NOTE: Don't replace lifespan yet - middleware additions will reset it
+# We'll replace it AFTER all middleware is added
 
 # Eagerly initialize database at module load to prevent first-request timeout
 # Neon database may be suspended and take 10-15s to wake up
@@ -604,6 +604,10 @@ for r in app.routes:
         logger.info("route_debug", path=r.path, methods=getattr(r, 'methods', 'ALL'))
     else:
         logger.info("route_debug", route=str(r))
+
+# NOW replace app's lifespan with wrapped version (after all middleware added)
+# This prevents middleware additions from resetting it
+app.router.lifespan_context = lifespan_with_keepalive
 
 logger.info("lifespan_debug", lifespan=str(app.router.lifespan_context))
 
