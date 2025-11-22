@@ -84,10 +84,13 @@ def sanitize_project_name(name: str, max_length: int = 32) -> str:
 
 def validate_session_store() -> Tuple[bool, Optional[str]]:
     """
-    Check if session store and local session ID are available.
+    Check if session store and current session ID are available.
 
     This utility centralizes the session validation pattern used throughout
     the codebase (e.g., lines 2026-2030, 369-373).
+
+    FIX: Now uses get_current_session_id() which works in both stdio and hosted modes.
+    Previously used _local_session_id directly which was None in hosted mode.
 
     Returns:
         Tuple of (is_valid, error_message):
@@ -100,20 +103,26 @@ def validate_session_store() -> Tuple[bool, Optional[str]]:
         ...     return json.dumps({"error": error})
 
     Note:
-        This function accesses global variables _session_store and
-        _local_session_id from claude_mcp_hybrid_sessions.py
+        This function accesses _session_store and get_current_session_id()
+        from claude_mcp_hybrid_sessions.py
     """
     # Import here to avoid circular dependencies
     try:
-        from claude_mcp_hybrid_sessions import _session_store, _local_session_id
+        from claude_mcp_hybrid_sessions import _session_store, get_current_session_id
     except ImportError:
         return False, "Session management module not available"
 
     if not _session_store:
         return False, "Session store not initialized"
 
-    if not _local_session_id:
-        return False, "No active session ID"
+    # FIX: Use get_current_session_id() instead of _local_session_id
+    # This works in both stdio mode (_local_session_id) and hosted mode (config._current_session_id)
+    try:
+        session_id = get_current_session_id()
+        if not session_id:
+            return False, "No active session ID"
+    except Exception as e:
+        return False, f"Failed to get session ID: {e}"
 
     return True, None
 

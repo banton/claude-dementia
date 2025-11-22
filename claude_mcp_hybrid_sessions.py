@@ -379,11 +379,17 @@ def _check_project_selection_required(project: Optional[str] = None) -> Optional
         return None  # Project validated or validation unavailable
 
     # Check if session exists and has __PENDING__ project
-    if not _session_store or not _local_session_id:
+    if not _session_store:
         return None  # No session management active
 
+    # FIX: Use get_current_session_id() instead of checking _local_session_id
+    # This works in both stdio and hosted modes
     try:
-        session = _session_store.get_session(_local_session_id)
+        session_id = get_current_session_id()
+        if not session_id:
+            return None  # No session ID available
+
+        session = _session_store.get_session(session_id)
 
         if session and session.get('project_name') == '__PENDING__':
             # Get available projects
@@ -2292,21 +2298,28 @@ async def switch_project(name: str) -> str:
             }, success=False)
 
         # Step 2: Validate session store using DRY utility
-        # CRITICAL: Use _local_session_id as single source of truth (Bug #1 fix)
         is_valid, error = validate_session_store()
         if not is_valid:
             return safe_json_response({"error": error}, success=False)
 
+        # Step 2.5: Get current session ID (works in both stdio and hosted modes)
+        # FIX: Use get_current_session_id() instead of _local_session_id
+        # This fixes project switching in hosted mode where _local_session_id is None
+        session_id = get_current_session_id()
+
+        # Add defensive logging for debugging
+        print(f"🔍 switch_project: session_id={session_id[:8] if session_id else 'None'}, project={safe_name}", file=sys.stderr)
+
         # Step 3: Update session store (database)
         # CRITICAL: This MUST happen before cache update to maintain consistency
         try:
-            updated = _session_store.update_session_project(_local_session_id, safe_name)
+            updated = _session_store.update_session_project(session_id, safe_name)
             if updated:
-                print(f"✅ Switched to project: {safe_name} (session: {_local_session_id[:8]})", file=sys.stderr)
+                print(f"✅ Switched to project: {safe_name} (session: {session_id[:8]})", file=sys.stderr)
             else:
-                print(f"⚠️  Session not found: {_local_session_id[:8]}", file=sys.stderr)
+                print(f"⚠️  Session not found: {session_id[:8]}", file=sys.stderr)
                 return safe_json_response({
-                    "error": f"Session {_local_session_id[:8]} not found in database"
+                    "error": f"Session {session_id[:8]} not found in database"
                 }, success=False)
         except Exception as e:
             print(f"❌ Failed to update session project: {e}", file=sys.stderr)
@@ -2315,8 +2328,8 @@ async def switch_project(name: str) -> str:
             }, success=False)
 
         # Step 4: Update in-memory cache (after database)
-        # CRITICAL: Uses same session ID as database update (Bug #1 fix)
-        _active_projects[_local_session_id] = safe_name
+        # CRITICAL: Uses same session ID as database update
+        _active_projects[session_id] = safe_name
 
         # Step 5: Check if project schema exists and get stats
         # Uses connection with try/finally to guarantee cleanup (prevents leaks)
