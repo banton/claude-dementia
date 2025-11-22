@@ -585,6 +585,109 @@ class PostgreSQLSessionStore:
         finally:
             self.adapter.release_connection(conn)
 
+    def store_breadcrumb(
+        self,
+        session_id: str,
+        marker: str,
+        tool: str,
+        message: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Store a breadcrumb in the database.
+
+        Args:
+            session_id: Session identifier
+            marker: Breadcrumb marker (e.g., CRUMB-ENTRY)
+            tool: Tool name
+            message: Log message
+            metadata: Additional structured data
+
+        Returns:
+            True if stored successfully, False otherwise
+        """
+        conn = self.adapter.get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO breadcrumbs (
+                        session_id, timestamp, marker, tool, message, metadata
+                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                """, (
+                    session_id,
+                    time.time(),
+                    marker,
+                    tool,
+                    message,
+                    json.dumps(metadata) if metadata else '{}'
+                ))
+                conn.commit()
+                return True
+        except Exception as e:
+            # Don't let logging failures crash the app
+            print(f"⚠️  Failed to store breadcrumb: {e}", file=sys.stderr)
+            return False
+        finally:
+            self.adapter.release_connection(conn)
+
+    def get_breadcrumbs(
+        self,
+        session_id: str,
+        limit: int = 50,
+        tool: Optional[str] = None,
+        marker: Optional[str] = None
+    ) -> list:
+        """
+        Retrieve breadcrumbs for a session.
+
+        Args:
+            session_id: Session identifier
+            limit: Max number of records to return (default: 50)
+            tool: Filter by tool name (optional)
+            marker: Filter by marker type (optional)
+
+        Returns:
+            List of breadcrumb dicts
+        """
+        conn = self.adapter.get_connection()
+        try:
+            with conn.cursor() as cur:
+                query = """
+                    SELECT timestamp, marker, tool, message, metadata
+                    FROM breadcrumbs
+                    WHERE session_id = %s
+                """
+                params = [session_id]
+
+                if tool:
+                    query += " AND tool = %s"
+                    params.append(tool)
+
+                if marker:
+                    query += " AND marker = %s"
+                    params.append(marker)
+
+                query += " ORDER BY timestamp DESC LIMIT %s"
+                params.append(limit)
+
+                cur.execute(query, params)
+                rows = cur.fetchall()
+
+                breadcrumbs = []
+                for row in rows:
+                    breadcrumbs.append({
+                        'timestamp': datetime.fromtimestamp(row['timestamp'], timezone.utc).isoformat(),
+                        'marker': row['marker'],
+                        'tool': row['tool'],
+                        'message': row['message'],
+                        'metadata': json.loads(row['metadata']) if isinstance(row['metadata'], str) else row['metadata']
+                    })
+
+                return breadcrumbs
+
+        finally:
+            self.adapter.release_connection(conn)
+
     def _generate_session_id(self) -> str:
         """
         Generate unique session ID.

@@ -51,6 +51,14 @@ class BreadcrumbMarkers:
     DEPRECATED = "⛔ CRUMB-DEPRECATED"
 
 
+# Global session store reference
+_session_store = None
+
+def set_session_store(store):
+    """Set the session store instance for breadcrumb persistence."""
+    global _session_store
+    _session_store = store
+
 def log_breadcrumb(
     marker: str,
     message: str,
@@ -84,6 +92,44 @@ def log_breadcrumb(
 
     # Log with marker for easy filtering
     logger.info(f"{marker} | {tool or 'unknown'} | {message} | {json.dumps(extra)}")
+
+    # Persist to session store if available
+    if _session_store:
+        try:
+            # Try to get session ID from config (set by claude_mcp_hybrid_sessions)
+            # This avoids circular imports
+            import sys
+            main_module = sys.modules.get('__main__')
+            
+            # Check if we can get the session ID
+            session_id = None
+            
+            # Try config first (if available in sys.modules)
+            if 'claude_mcp_hybrid_sessions' in sys.modules:
+                try:
+                    from claude_mcp_hybrid_sessions import config
+                    session_id = getattr(config, '_current_session_id', None)
+                except:
+                    pass
+            
+            # If not found, try to get from main module if it has get_current_session_id
+            if not session_id and hasattr(main_module, 'get_current_session_id'):
+                try:
+                    session_id = main_module.get_current_session_id()
+                except:
+                    pass
+
+            if session_id:
+                _session_store.store_breadcrumb(
+                    session_id=session_id,
+                    marker=marker,
+                    tool=tool,
+                    message=message,
+                    metadata=extra
+                )
+        except Exception as e:
+            # Don't let persistence failure break the tool
+            logger.warning(f"Failed to persist breadcrumb: {e}")
 
 
 def breadcrumb(func: Callable) -> Callable:

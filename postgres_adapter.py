@@ -508,6 +508,22 @@ class PostgreSQLAdapter:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mcp_sessions_expires ON mcp_sessions(expires_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mcp_sessions_last_active ON mcp_sessions(last_active)")
 
+        # Breadcrumbs table (for debugging tool execution flow)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS breadcrumbs (
+                id SERIAL PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                timestamp DOUBLE PRECISION NOT NULL,
+                marker TEXT NOT NULL,
+                tool TEXT,
+                message TEXT,
+                metadata TEXT,
+                FOREIGN KEY (session_id) REFERENCES mcp_sessions(session_id)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_breadcrumbs_session ON breadcrumbs(session_id, timestamp DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_breadcrumbs_marker ON breadcrumbs(marker)")
+
         # Run migrations for existing schemas
         self._run_migrations(cur)
 

@@ -42,7 +42,9 @@ from tool_breadcrumbs import (
     log_project_check,
     log_session_check,
     log_tool_stage,
-    BreadcrumbMarkers
+    log_tool_stage,
+    BreadcrumbMarkers,
+    set_session_store
 )
 
 # Import active context engine
@@ -236,6 +238,9 @@ def _init_local_session():
 
         # Set session context for tools to access
         config._current_session_id = _local_session_id
+
+        # Initialize breadcrumb persistence
+        set_session_store(_session_store)
 
         return _local_session_id
     except Exception as e:
@@ -11165,6 +11170,80 @@ async def import_project(
 # ============================================================================
 # RUN SERVER
 # ============================================================================
+
+# Assuming these imports are available or will be added elsewhere in the file
+from tool_breadcrumbs import set_session_store, breadcrumb
+
+
+# Assuming _init_local_session is defined earlier in the file,
+# modifying it to include set_session_store.
+# This is a placeholder for where _init_local_session would be defined.
+# def _init_local_session():
+#     # ... existing code ...
+#     db = get_db() # Assuming db is accessible or initialized here
+#     set_session_store(PostgreSQLSessionStore(db.adapter))
+#     # ... existing code ...
+#     return "some_session_id"
+
+
+@mcp.tool()
+@breadcrumb
+async def get_breadcrumbs(
+    limit: int = 50,
+    tool: Optional[str] = None,
+    marker: Optional[str] = None
+) -> str:
+    """
+    Retrieve breadcrumb trail for the current session.
+    Useful for debugging tool execution flow and diagnosing issues.
+
+    Args:
+        limit: Maximum number of records to return (default: 50)
+        tool: Filter by tool name (optional)
+        marker: Filter by marker type (optional)
+
+    Returns:
+        JSON string containing list of breadcrumbs
+    """
+    # Check project selection (required for session context)
+    project_check = _check_project_selection_required()
+    if project_check:
+        return project_check
+
+    session_id = get_current_session_id()
+    
+    # Get session store (global or from adapter)
+    store = _session_store
+    if not store:
+        # Try to initialize store if not available (e.g. in cloud mode)
+        try:
+            adapter = _get_db_adapter()
+            store = PostgreSQLSessionStore(adapter)
+        except Exception as e:
+            return json.dumps({
+                "error": "STORE_UNAVAILABLE",
+                "message": f"Session store unavailable: {e}"
+            })
+
+    try:
+        breadcrumbs = store.get_breadcrumbs(
+            session_id=session_id,
+            limit=limit,
+            tool=tool,
+            marker=marker
+        )
+        
+        return json.dumps({
+            "session_id": session_id,
+            "count": len(breadcrumbs),
+            "breadcrumbs": breadcrumbs
+        }, indent=2)
+        
+    except Exception as e:
+        return json.dumps({
+            "error": "RETRIEVAL_FAILED",
+            "message": f"Failed to retrieve breadcrumbs: {e}"
+        })
 
 if __name__ == "__main__":
     # DO NOT print anything to stdout - MCP requires clean JSON communication

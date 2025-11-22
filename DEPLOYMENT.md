@@ -160,7 +160,7 @@ Add remote MCP server to Claude Desktop configuration:
       "command": "/path/to/claude-dementia/claude-dementia-server.sh"
     },
     "dementia-cloud": {
-      "url": "https://your-app-url.ondigitalocean.app/execute",
+      "url": "https://your-app-url.ondigitalocean.app/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_API_KEY",
         "Content-Type": "application/json"
@@ -225,7 +225,7 @@ Response shows:
 **Fix**: Check logs for error details. Usually database connection or missing env var.
 
 **Issue**: Tools execute but Claude doesn't show results
-**Fix**: Check URL format in `claude_desktop_config.json` - should end with `/execute`
+**Fix**: Check URL format in `claude_desktop_config.json` - should end with `/mcp`
 
 **Issue**: Slow responses (>5 seconds)
 **Fix**: Check database connection pool settings in Neon. May need to upgrade plan.
