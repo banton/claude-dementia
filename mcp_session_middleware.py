@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
+from starlette.requests import Request, ClientDisconnect
 from starlette.responses import JSONResponse
 
 from mcp_session_store import PostgreSQLSessionStore
@@ -101,9 +101,16 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
         session_id = request.headers.get('Mcp-Session-Id', 'missing')
 
         # Read request body to check if it's an initialize request
-        body_bytes = await request.body()
         try:
+            body_bytes = await request.body()
             body = json.loads(body_bytes) if body_bytes else {}
+        except ClientDisconnect:
+            # Client disconnected during body read - log and re-raise
+            # Starlette will handle this appropriately
+            logger.warning("client_disconnected_during_body_read",
+                         path=request.url.path,
+                         session_id=session_id[:8] if session_id != 'missing' else 'missing')
+            raise
         except json.JSONDecodeError:
             body = {}
 
