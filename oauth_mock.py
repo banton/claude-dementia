@@ -368,9 +368,9 @@ def validate_oauth_token(token: str) -> Optional[dict]:
 # ============================================================================
 
 OAUTH_ROUTES = [
-    # Discovery endpoints
-    Route('/.well-known/oauth-authorization-server', oauth_authorization_server_metadata, methods=['GET']),
-    Route('/.well-known/oauth-protected-resource', oauth_protected_resource_metadata, methods=['GET']),
+    # Discovery endpoints (MCP spec requires /mcp suffix)
+    Route('/.well-known/oauth-authorization-server/mcp', oauth_authorization_server_metadata, methods=['GET']),
+    Route('/.well-known/oauth-protected-resource/mcp', oauth_protected_resource_metadata, methods=['GET']),
 
     # OAuth flow endpoints
     Route('/oauth/authorize', oauth_authorize, methods=['GET']),
@@ -387,4 +387,4 @@ def get_www_authenticate_header() -> str:
 
     Required by MCP spec to tell clients where to find OAuth metadata.
     """
-    return f'Bearer resource="{BASE_URL}/.well-known/oauth-protected-resource"'
+    return f'Bearer resource="{BASE_URL}/.well-known/oauth-protected-resource/mcp"'
