@@ -503,11 +503,13 @@ _original_lifespan = app.router.lifespan_context
 @asynccontextmanager
 async def lifespan_with_keepalive(app_instance):
     """Wrap FastMCP's lifespan to add database keep-alive task."""
-    # Start database keep-alive task (ping every 5 minutes)
+    # Start database keep-alive task (ping every 15 seconds to prevent Neon compute auto-suspend)
+    # Neon's compute auto-suspends after short inactivity, causing 10-15s cold starts
+    # Frequent pings keep the compute warm for sub-second response times
     keepalive_task = None
     if adapter is not None:
         keepalive_task = asyncio.create_task(
-            start_keepalive_scheduler(adapter, interval_seconds=300)
+            start_keepalive_scheduler(adapter, interval_seconds=15)
         )
         logger.info("database_keepalive_task_started")
 
