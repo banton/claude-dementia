@@ -312,7 +312,7 @@ from claude_mcp_hybrid_sessions import mcp
 DATABASE_URL=postgresql://neondb_owner:...@ep-jolly-shadow...
 VOYAGEAI_API_KEY=pa-w3lSPJ_I5V1yuAdJsyHIffebuEQ7fWA2N4VOrDGctke
 OPENROUTER_API_KEY=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
-DEMENTIA_API_KEY=wWKYw3FTk_IhCCVwwmKopF7RTvGn8yDEFobOyEXZOHU
+DEMENTIA_API_KEY=<REDACTED - stored in .env>
 ```
 
 ### Hosted (B)
@@ -358,7 +358,7 @@ LOG_LEVEL=INFO
         "https://dementia-mcp-7f4vf.ondigitalocean.app"
       ],
       "env": {
-        "DEMENTIA_API_KEY": "wWKYw3FTk_IhCCVwwmKopF7RTvGn8yDEFobOyEXZOHU"
+        "DEMENTIA_API_KEY": "<REDACTED - stored in .env>"
       }
     }
   }

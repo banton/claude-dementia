@@ -364,7 +364,7 @@ app.add_middleware(CorrelationIdMiddleware)
 
 ```bash
 # Export API key
-export DEMENTIA_API_KEY="wWKYw3FTk_IhCCVwwmKopF7RTvGn8yDEFobOyEXZOHU"
+export DEMENTIA_API_KEY="<REDACTED - see .env>"
 
 # Test valid JSON-RPC request
 curl -X POST https://dementia-mcp-server-x8fkw.ondigitalocean.app/mcp \

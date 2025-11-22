@@ -19,7 +19,7 @@
       "Bash(then echo \"=== Last 30 lines of MCP monitor ===\")",
       "Bash(else echo \"Monitor log not found\")",
       "Bash(APP_URL=\"https://dementia-mcp-7f4vf.ondigitalocean.app/health\")",
-      "Bash(API_KEY=\"wWKYw3FTk_IhCCVwwmKopF7RTvGn8yDEFobOyEXZOHU\" curl -s -H \"Authorization: Bearer $API_KEY\" https://dementia-mcp-7f4vf.ondigitalocean.app/tools)",
+      "Bash(API_KEY=\"<REDACTED>\" curl -s -H \"Authorization: Bearer $API_KEY\" https://dementia-mcp-7f4vf.ondigitalocean.app/tools)",
       "Bash(git switch:*)",
       "Bash(git fetch:*)",
       "Bash(git branch:*)",
@@ -52,7 +52,7 @@
       "Bash(doctl apps logs:*)",
       "Bash(APP_ID=\"20c874aa-0ed2-44e3-a433-699f17d88a44\" echo \"⏳ Waiting 60 seconds for deployment...\" sleep 60 echo \"\" echo \"📊 Checking deployment status...\" doctl apps list-deployments $APP_ID --format ID,Phase,Progress)",
       "Bash(doctl apps list-deployments:*)",
-      "Bash(APP_ID=\"20c874aa-0ed2-44e3-a433-699f17d88a44\" echo \"🔍 Checking what our /tools endpoint currently returns...\" curl -s -H \"Authorization: Bearer wWKYw3FTk_IhCCVwwmKopF7RTvGn8yDEFobOyEXZOHU\" https://dementia-mcp-7f4vf.ondigitalocean.app/tools)",
+      "Bash(APP_ID=\"20c874aa-0ed2-44e3-a433-699f17d88a44\" echo \"🔍 Checking what our /tools endpoint currently returns...\" curl -s -H \"Authorization: Bearer <REDACTED>\" https://dementia-mcp-7f4vf.ondigitalocean.app/tools)",
       "Bash(APP_ID=\"20c874aa-0ed2-44e3-a433-699f17d88a44\" echo:*)",
       "Bash(APP_ID=\"20c874aa-0ed2-44e3-a433-699f17d88a44\" echo \"🔍 Checking app initialization logs...\" doctl apps logs $APP_ID --type run --tail 200)",
       "Bash(APP_ID=\"20c874aa-0ed2-44e3-a433-699f17d88a44\" echo \"🔍 Checking for any /tools requests in recent logs...\" doctl apps logs $APP_ID --type run --tail 300)",
@@ -83,7 +83,8 @@
       "Bash(__NEW_LINE__ git add server_hosted.py PHASE_0_BATTLE_PLAN.md)",
       "Bash(__NEW_LINE__ git add oauth_mock.py)",
       "Bash(__NEW_LINE__ git add server_hosted.py ROOT_CAUSE_FOUND.md)",
-      "Bash(__NEW_LINE__ git status)"
+      "Bash(__NEW_LINE__ git status)",
+      "Bash(__NEW_LINE__ git log --all --oneline --follow -- CLOUD_TESTING_SUMMARY.md)"
     ],
     "deny": [],
     "ask": [],

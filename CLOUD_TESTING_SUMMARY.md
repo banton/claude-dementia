@@ -12,7 +12,7 @@ All local tests passed successfully. Server is production-ready for DigitalOcean
 - **Server**: `server_hosted.py` (204 lines)
 - **Host**: `localhost:8080`
 - **Database**: Neon PostgreSQL (`claude_dementia` schema)
-- **API Key**: `wWKYw3FTk_IhCCVwwmKopF7RTvGn8yDEFobOyEXZOHU`
+- **API Key**: `<REDACTED - stored in .env and DigitalOcean>`
 - **Auth**: Enabled (Bearer token)
 
 ### Test Suite (6 tests)
@@ -123,7 +123,7 @@ All local tests passed successfully. Server is production-ready for DigitalOcean
 4. **Set Environment Variables**
    ```
    DATABASE_URL=<your_neon_postgres_url>
-   DEMENTIA_API_KEY=wWKYw3FTk_IhCCVwwmKopF7RTvGn8yDEFobOyEXZOHU
+   DEMENTIA_API_KEY=<REDACTED - see .env>
    ENVIRONMENT=production
    LOG_LEVEL=INFO
    ```

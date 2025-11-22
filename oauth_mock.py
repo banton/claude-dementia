@@ -25,7 +25,7 @@ from starlette.requests import Request
 # Configuration
 # BASE_URL should be set in environment, fallback to localhost for local dev
 BASE_URL = os.getenv('BASE_URL', os.getenv('APP_URL', 'https://dementia-mcp-7f4vf.ondigitalocean.app'))
-STATIC_TOKEN = os.getenv('DEMENTIA_API_KEY', 'wWKYw3FTk_IhCCVwwmKopF7RTvGn8yDEFobOyEXZOHU')
+STATIC_TOKEN = os.getenv('DEMENTIA_API_KEY', '<MUST_SET_ENV_VAR>')
 
 # OAuth Client Credentials (REQUIRED for security)
 OAUTH_CLIENT_ID = os.getenv('OAUTH_CLIENT_ID')
