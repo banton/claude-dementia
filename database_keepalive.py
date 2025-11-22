@@ -26,12 +26,12 @@ except ImportError:
     logger = logging.getLogger(__name__)
 
 
-def ping_database_once(db_adapter) -> tuple[bool, float]:
+async def ping_database_once(db_adapter) -> tuple[bool, float]:
     """
-    Execute a lightweight query to keep database connection alive.
+    Execute a lightweight query to keep database connection alive (ASYNC).
 
     Args:
-        db_adapter: PostgreSQLAdapter instance
+        db_adapter: PostgreSQLAdapterAsync instance
 
     Returns:
         Tuple of (success: bool, elapsed_ms: float)
@@ -41,29 +41,20 @@ def ping_database_once(db_adapter) -> tuple[bool, float]:
     try:
         start_time = time.time()
 
-        # Use get_connection() which works for both pooled and non-pooled connections
-        conn = db_adapter.get_connection()
+        # Use async execute_query for lightweight ping
+        result = await db_adapter.execute_query("SELECT 1 as ping")
 
-        try:
-            with conn.cursor() as cur:
-                # Lightweight query - just check we can execute
-                cur.execute("SELECT 1")
-                result = cur.fetchone()
+        elapsed_ms = (time.time() - start_time) * 1000
 
-            elapsed_ms = (time.time() - start_time) * 1000
+        if elapsed_ms > 1000:  # Warn if query takes > 1 second
+            logger.warning("slow_database_keepalive",
+                         elapsed_ms=round(elapsed_ms, 2),
+                         threshold_ms=1000)
+        else:
+            logger.debug("database_keepalive_success",
+                       elapsed_ms=round(elapsed_ms, 2))
 
-            if elapsed_ms > 1000:  # Warn if query takes > 1 second
-                logger.warning("slow_database_keepalive",
-                             elapsed_ms=round(elapsed_ms, 2),
-                             threshold_ms=1000)
-            else:
-                logger.debug("database_keepalive_success",
-                           elapsed_ms=round(elapsed_ms, 2))
-
-            return (True, elapsed_ms)
-
-        finally:
-            conn.close()
+        return (True, elapsed_ms)
 
     except Exception as e:
         logger.error("database_keepalive_failed",
@@ -77,19 +68,19 @@ async def start_keepalive_scheduler(
     interval_seconds: int = 300  # Default: 5 minutes
 ) -> None:
     """
-    Start periodic database keep-alive task.
+    Start periodic database keep-alive task (ASYNC).
 
     Runs lightweight ping every interval_seconds until cancelled.
 
     Args:
-        db_adapter: PostgreSQLAdapter instance
+        db_adapter: PostgreSQLAdapterAsync instance
         interval_seconds: Ping interval in seconds (default: 300 = 5 minutes)
 
     Example:
         # Start keep-alive task in background
-        from claude_mcp_hybrid_sessions import _get_db_adapter
+        from postgres_adapter_async import PostgreSQLAdapterAsync
 
-        adapter = _get_db_adapter()
+        adapter = PostgreSQLAdapterAsync()
         keepalive_task = asyncio.create_task(
             start_keepalive_scheduler(adapter, interval_seconds=300)
         )
@@ -103,8 +94,8 @@ async def start_keepalive_scheduler(
 
     try:
         while True:
-            # Run ping
-            success, elapsed_ms = ping_database_once(db_adapter)
+            # Run ping (async)
+            success, elapsed_ms = await ping_database_once(db_adapter)
 
             if success:
                 logger.info("database_keepalive_ping",

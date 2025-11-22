@@ -32,9 +32,9 @@ from contextlib import asynccontextmanager
 # Import existing MCP server (LATEST version with session management)
 from claude_mcp_hybrid_sessions import mcp
 
-# Import session persistence
+# Import session persistence (ASYNC)
 from mcp_session_middleware import MCPSessionPersistenceMiddleware
-from mcp_session_store import PostgreSQLSessionStore
+from mcp_session_store_async import PostgreSQLSessionStoreAsync
 
 # Import production infrastructure
 from src.logging_config import configure_logging, get_logger
@@ -532,15 +532,18 @@ async def lifespan_with_keepalive(app_instance):
 # NOTE: Don't replace lifespan yet - middleware additions will reset it
 # We'll replace it AFTER all middleware is added
 
-# Eagerly initialize database at module load to prevent first-request timeout
+# Eagerly initialize async database adapter at module load to prevent first-request timeout
 # Neon database may be suspended and take 10-15s to wake up
 # This ensures the connection pool is ready before serving requests
-from claude_mcp_hybrid_sessions import _get_db_adapter
+from postgres_adapter_async import PostgreSQLAdapterAsync
 adapter = None  # Initialize to None in case initialization fails
 try:
     logger.info("database_initialization_start")
-    adapter = _get_db_adapter()
-    logger.info("database_initialization_success", schema=adapter.schema)
+    adapter = PostgreSQLAdapterAsync()
+    logger.info("database_initialization_success",
+                schema=adapter.schema,
+                adapter_type="async",
+                database_url_host=adapter.database_url.split('@')[1] if '@' in adapter.database_url else 'unknown')
 except Exception as e:
     logger.error("database_initialization_failed", error=str(e))
     # Don't crash the server, let it handle cold starts per-request
@@ -570,11 +573,11 @@ app.add_middleware(CorrelationIdMiddleware)              # Innermost - adds corr
 # Disabling auth for Custom Connector compatibility. Claude Desktop still works via npx with static token.
 # app.add_middleware(BearerAuthMiddleware)                 # Auth disabled for Custom Connector
 app.add_middleware(GracefulShutdownMiddleware)           # Handle DELETE /mcp gracefully
-# DISABLED: Session middleware causes blocking database calls (sync methods in async middleware)
-# This was adding 7-12 second delays on every request even with fast database
-# if adapter is not None:
-#     app.add_middleware(MCPSessionPersistenceMiddleware,  # Persist sessions in PostgreSQL
-#                        db_pool=adapter)                  # Pass database adapter (not pool)
+# Session middleware now uses async PostgreSQLAdapterAsync - no more blocking!
+if adapter is not None:
+    app.add_middleware(MCPSessionPersistenceMiddleware,  # Persist sessions in PostgreSQL
+                       db_pool=adapter)                  # Pass async database adapter
+    logger.info("session_middleware_enabled", adapter_type="async")
 app.add_middleware(MCPRequestLoggingMiddleware)          # Log /mcp requests/responses
 app.add_middleware(TimeoutMiddleware)                    # Catch timeouts
 
