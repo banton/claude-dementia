@@ -21,6 +21,7 @@ from urllib.parse import urlencode, parse_qs
 from starlette.routing import Route
 from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
 from starlette.requests import Request
+from postgres_adapter import PostgreSQLAdapter
 
 # Configuration
 # BASE_URL should be set in environment, fallback to localhost for local dev
@@ -38,10 +39,9 @@ if not OAUTH_CLIENT_ID or not OAUTH_CLIENT_SECRET:
         "print(f\"OAUTH_CLIENT_SECRET={secrets.token_urlsafe(32)}\")'"
     )
 
-# In-memory storage for demo (use PostgreSQL for production)
-# For single-user demo, this is fine - it resets on restart
-auth_codes: Dict[str, dict] = {}  # code -> {client_id, redirect_uri, code_challenge, user}
-access_tokens: Dict[str, dict] = {}  # token -> {client_id, user, expires_at}
+# PostgreSQL storage for OAuth data (persists across restarts)
+# Tables: oauth_authorization_codes, oauth_access_tokens (created in postgres_adapter.py)
+_db = PostgreSQLAdapter()
 
 # ============================================================================
 # OAUTH DISCOVERY ENDPOINTS (Required by MCP Spec)
@@ -129,16 +129,25 @@ async def oauth_authorize(request: Request):
     # Generate authorization code
     auth_code = secrets.token_urlsafe(32)
 
-    # Store authorization code with PKCE challenge
-    auth_codes[auth_code] = {
-        'client_id': client_id,
-        'redirect_uri': redirect_uri,
-        'code_challenge': code_challenge,
-        'code_challenge_method': code_challenge_method,
-        'user': 'demo-user',  # Single user
-        'scope': scope,
-        'expires_at': datetime.now(timezone.utc) + timedelta(minutes=5)
-    }
+    # Store authorization code in PostgreSQL
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    _db.execute_update(
+        """
+        INSERT INTO oauth_authorization_codes
+        (code, client_id, redirect_uri, code_challenge, code_challenge_method, user_id, scope, expires_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        params=[
+            auth_code,
+            client_id,
+            redirect_uri,
+            code_challenge,
+            code_challenge_method,
+            'demo-user',  # Single user
+            scope,
+            expires_at
+        ]
+    )
 
     # Auto-approve for single-user demo (no consent screen needed)
     # Redirect back to client with authorization code
@@ -194,67 +203,97 @@ async def oauth_token(request: Request):
             status_code=401
         )
 
-    # TESTING MODE: Accept any authorization code (in-memory storage is unreliable across deployments)
-    # In production, this should validate against PostgreSQL-backed storage
+    # Retrieve authorization code from PostgreSQL
+    result = _db.execute_query(
+        """
+        SELECT client_id, redirect_uri, code_challenge, scope, expires_at, used_at
+        FROM oauth_authorization_codes
+        WHERE code = %s
+        """,
+        params=[code]
+    )
 
-    # If code exists in memory, use it (normal flow)
-    if code in auth_codes:
-        auth_data = auth_codes[code]
+    if not result:
+        return JSONResponse(
+            {"error": "invalid_grant", "error_description": "Invalid or expired authorization code"},
+            status_code=400
+        )
 
-        # Check expiration
-        if datetime.now(timezone.utc) > auth_data['expires_at']:
-            del auth_codes[code]
-            # Fall through to accept anyway for testing
-        else:
-            # Validate client_id matches
-            if client_id != auth_data['client_id']:
-                return JSONResponse(
-                    {"error": "invalid_grant", "error_description": "Client ID mismatch"},
-                    status_code=400
-                )
+    auth_data = result[0]
 
-            # Validate redirect_uri matches
-            if redirect_uri != auth_data['redirect_uri']:
-                return JSONResponse(
-                    {"error": "invalid_grant", "error_description": "Redirect URI mismatch"},
-                    status_code=400
-                )
+    # Check if already used
+    if auth_data['used_at'] is not None:
+        return JSONResponse(
+            {"error": "invalid_grant", "error_description": "Authorization code already used"},
+            status_code=400
+        )
 
-            # Validate PKCE code_verifier
-            if not code_verifier:
-                return JSONResponse(
-                    {"error": "invalid_request", "error_description": "Missing code_verifier"},
-                    status_code=400
-                )
+    # Check expiration
+    if datetime.now(timezone.utc) > auth_data['expires_at']:
+        return JSONResponse(
+            {"error": "invalid_grant", "error_description": "Authorization code expired"},
+            status_code=400
+        )
 
-            # Verify PKCE challenge
-            verifier_hash = hashlib.sha256(code_verifier.encode()).digest()
-            verifier_challenge = base64.urlsafe_b64encode(verifier_hash).decode().rstrip('=')
+    # Validate client_id matches
+    if client_id != auth_data['client_id']:
+        return JSONResponse(
+            {"error": "invalid_grant", "error_description": "Client ID mismatch"},
+            status_code=400
+        )
 
-            if verifier_challenge != auth_data['code_challenge']:
-                return JSONResponse(
-                    {"error": "invalid_grant", "error_description": "PKCE verification failed"},
-                    status_code=400
-                )
+    # Validate redirect_uri matches
+    if redirect_uri != auth_data['redirect_uri']:
+        return JSONResponse(
+            {"error": "invalid_grant", "error_description": "Redirect URI mismatch"},
+            status_code=400
+        )
 
-            # Clean up used authorization code
-            del auth_codes[code]
+    # Validate PKCE code_verifier
+    if not code_verifier:
+        return JSONResponse(
+            {"error": "invalid_request", "error_description": "Missing code_verifier"},
+            status_code=400
+        )
 
-    # TESTING MODE: Accept authorization code even if not in memory
-    # (handles server restarts between authorize and token exchange)
-    # In production, store codes in PostgreSQL
+    # Verify PKCE challenge
+    verifier_hash = hashlib.sha256(code_verifier.encode()).digest()
+    verifier_challenge = base64.urlsafe_b64encode(verifier_hash).decode().rstrip('=')
+
+    if verifier_challenge != auth_data['code_challenge']:
+        return JSONResponse(
+            {"error": "invalid_grant", "error_description": "PKCE verification failed"},
+            status_code=400
+        )
+
+    # Mark authorization code as used
+    _db.execute_update(
+        "UPDATE oauth_authorization_codes SET used_at = NOW() WHERE code = %s",
+        params=[code]
+    )
 
     # Issue access token
     # For single-user demo, we use our static token as the access token
     access_token = STATIC_TOKEN
 
-    # Store token metadata (for validation)
-    access_tokens[access_token] = {
-        'client_id': client_id,
-        'user': 'demo-user',
-        'scope': 'mcp',
-        'expires_at': datetime.now(timezone.utc) + timedelta(hours=24)
-    }
+    # Store token metadata in PostgreSQL (upsert for idempotency)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    _db.execute_update(
+        """
+        INSERT INTO oauth_access_tokens
+        (access_token, client_id, user_id, scope, expires_at)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (access_token) DO UPDATE
+        SET last_used_at = NOW(), expires_at = EXCLUDED.expires_at
+        """,
+        params=[
+            access_token,
+            client_id,
+            'demo-user',
+            'mcp',
+            expires_at
+        ]
+    )
 
     # Return token response
     return JSONResponse({
@@ -270,34 +309,59 @@ async def oauth_token(request: Request):
 
 def validate_oauth_token(token: str) -> Optional[dict]:
     """
-    Validate OAuth access token.
+    Validate OAuth access token using PostgreSQL.
 
     For single-user demo: If token matches our static token, it's valid.
     Real OAuth would verify JWT signature or introspect with auth server.
     """
     # Check if it's our static token
-    if token == STATIC_TOKEN:
-        # Check if we have metadata for it
-        if token in access_tokens:
-            token_data = access_tokens[token]
+    if token != STATIC_TOKEN:
+        return None
 
-            # Check expiration
-            if datetime.now(timezone.utc) > token_data['expires_at']:
-                del access_tokens[token]
-                return None
+    # Query PostgreSQL for token metadata
+    result = _db.execute_query(
+        """
+        SELECT client_id, user_id, scope, expires_at
+        FROM oauth_access_tokens
+        WHERE access_token = %s
+        """,
+        params=[token]
+    )
 
-            return token_data
-        else:
-            # Token is valid but no metadata (e.g., used directly via env var)
-            # Create virtual metadata
-            return {
-                'client_id': 'static-client',
-                'user': 'demo-user',
-                'scope': 'mcp',
-                'expires_at': datetime.now(timezone.utc) + timedelta(hours=24)
-            }
+    if result:
+        token_data = result[0]
 
-    return None
+        # Check expiration
+        if datetime.now(timezone.utc) > token_data['expires_at']:
+            # Cleanup expired token
+            _db.execute_update(
+                "DELETE FROM oauth_access_tokens WHERE access_token = %s",
+                params=[token]
+            )
+            return None
+
+        # Update last_used_at timestamp
+        _db.execute_update(
+            "UPDATE oauth_access_tokens SET last_used_at = NOW() WHERE access_token = %s",
+            params=[token]
+        )
+
+        return {
+            'client_id': token_data['client_id'],
+            'user': token_data['user_id'],
+            'scope': token_data['scope'],
+            'expires_at': token_data['expires_at']
+        }
+    else:
+        # Token is valid but no metadata (e.g., used directly via env var)
+        # Create virtual metadata
+        return {
+            'client_id': 'static-client',
+            'user': 'demo-user',
+            'scope': 'mcp',
+            'expires_at': datetime.now(timezone.utc) + timedelta(hours=24)
+        }
+
 
 # ============================================================================
 # ROUTES TO ADD TO SERVER_HOSTED.PY

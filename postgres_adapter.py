@@ -492,6 +492,47 @@ class PostgreSQLAdapter:
             )
         """)
 
+        # OAuth authorization codes table (PKCE flow persistence)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
+                code TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                redirect_uri TEXT NOT NULL,
+                code_challenge TEXT NOT NULL,
+                code_challenge_method TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                used_at TIMESTAMP WITH TIME ZONE
+            )
+        """)
+
+        # Index for cleanup of expired authorization codes
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires_at
+            ON oauth_authorization_codes(expires_at)
+        """)
+
+        # OAuth access tokens table (token validation and tracking)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS oauth_access_tokens (
+                access_token TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                last_used_at TIMESTAMP WITH TIME ZONE
+            )
+        """)
+
+        # Index for cleanup of expired access tokens
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_oauth_tokens_expires_at
+            ON oauth_access_tokens(expires_at)
+        """)
+
         # Create indexes for performance
         cur.execute("CREATE INDEX IF NOT EXISTS idx_context_locks_session ON context_locks(session_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_context_locks_label ON context_locks(label)")
