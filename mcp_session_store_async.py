@@ -1,29 +1,24 @@
 """
-MCP Session Store - PostgreSQL-backed persistent session storage (ASYNC).
+MCP Session Store Async - PostgreSQL-backed persistent session storage using asyncpg.
 
-Async version using PostgreSQLAdapterAsync for non-blocking database operations.
-Solves the critical UX issue where every deployment forces users to restart clients.
-Sessions are stored in PostgreSQL instead of in-memory, surviving server restarts.
+Async version of PostgreSQLSessionStore to eliminate event loop blocking.
 """
 
 import uuid
-import sys
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any
 import json
 import time
-
+import sys
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, Any, List
 
 class PostgreSQLSessionStoreAsync:
     """
-    Async PostgreSQL-backed MCP session storage for persistent sessions.
-
+    Async PostgreSQL-backed MCP session storage.
+    
     Features:
-    - Sessions survive server restarts
-    - 24-hour expiration (sliding window)
-    - Automatic cleanup of expired sessions
-    - Retry logic for duplicate session IDs
-    - Non-blocking async database operations
+    - Fully async operations (non-blocking)
+    - Uses PostgreSQLAdapterAsync (asyncpg)
+    - Compatible with MCPSessionPersistenceMiddleware
     """
 
     def __init__(self, adapter):
@@ -43,22 +38,7 @@ class PostgreSQLSessionStoreAsync:
         client_info: Optional[Dict[str, Any]] = None,
         project_name: str = 'default'
     ) -> Dict[str, Any]:
-        """
-        Create a new MCP session.
-
-        Args:
-            session_id: Session ID from FastMCP (default: generate new)
-            created_at: Session creation time (default: now)
-            capabilities: MCP capabilities dict (default: {})
-            client_info: Client metadata (default: {})
-            project_name: Project name for this session (default: 'default')
-
-        Returns:
-            Session dict with session_id, created_at, last_active, expires_at, etc.
-
-        Raises:
-            Exception: If database operation fails after retries
-        """
+        """Create a new MCP session asynchronously."""
         if created_at is None:
             created_at = datetime.now(timezone.utc)
 
@@ -93,31 +73,23 @@ class PostgreSQLSessionStoreAsync:
                         project_name
                     ])
 
-                    if rows:
-                        row = rows[0]
-                        return {
-                            'session_id': row['session_id'],
-                            'created_at': row['created_at'],
-                            'last_active': row['last_active'],
-                            'expires_at': row['expires_at'],
-                            'capabilities': json.loads(row['capabilities']) if isinstance(row['capabilities'], str) else row['capabilities'],
-                            'client_info': json.loads(row['client_info']) if isinstance(row['client_info'], str) else row['client_info'],
-                            'project_name': row['project_name']
-                        }
+                    if not rows:
+                        raise RuntimeError("Failed to create session: no rows returned")
+                    
+                    row = rows[0]
+                    return self._format_session_row(row)
 
                 except Exception as e:
-                    # Check if duplicate key error
-                    if 'duplicate key' in str(e).lower() or 'unique violation' in str(e).lower():
+                    # Check for unique violation (asyncpg raises UniqueViolationError)
+                    if "unique constraint" in str(e).lower() or "duplicate key" in str(e).lower():
                         if attempt == max_retries - 1:
-                            raise  # Last attempt failed, propagate error
-                        continue  # Retry with new session_id
-                    else:
-                        raise  # Other error, propagate
+                            raise
+                        continue
+                    raise
 
-            # Should never reach here
             raise RuntimeError("Failed to create session after max retries")
         else:
-            # Session ID provided - insert directly (no retry, let caller handle duplicates)
+            # Session ID provided - insert directly
             rows = await self.adapter.execute_query("""
                 INSERT INTO mcp_sessions (
                     session_id, created_at, last_active, expires_at, capabilities, client_info, project_name
@@ -133,28 +105,14 @@ class PostgreSQLSessionStoreAsync:
                 project_name
             ])
 
-            if rows:
-                row = rows[0]
-                return {
-                    'session_id': row['session_id'],
-                    'created_at': row['created_at'],
-                    'last_active': row['last_active'],
-                    'expires_at': row['expires_at'],
-                    'capabilities': json.loads(row['capabilities']) if isinstance(row['capabilities'], str) else row['capabilities'],
-                    'client_info': json.loads(row['client_info']) if isinstance(row['client_info'], str) else row['client_info'],
-                    'project_name': row['project_name']
-                }
+            if not rows:
+                raise RuntimeError("Failed to create session: no rows returned")
+            
+            row = rows[0]
+            return self._format_session_row(row)
 
     async def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Retrieve session by ID.
-
-        Args:
-            session_id: Session identifier
-
-        Returns:
-            Session dict or None if not found
-        """
+        """Retrieve session by ID asynchronously."""
         rows = await self.adapter.execute_query("""
             SELECT session_id, created_at, last_active, expires_at, capabilities, client_info, project_name, session_summary
             FROM mcp_sessions
@@ -164,29 +122,10 @@ class PostgreSQLSessionStoreAsync:
         if not rows:
             return None
 
-        row = rows[0]
-        return {
-            'session_id': row['session_id'],
-            'created_at': row['created_at'],
-            'last_active': row['last_active'],
-            'expires_at': row['expires_at'],
-            'capabilities': json.loads(row['capabilities']) if isinstance(row['capabilities'], str) else row['capabilities'],
-            'client_info': json.loads(row['client_info']) if isinstance(row['client_info'], str) else row['client_info'],
-            'project_name': row['project_name'],
-            'session_summary': row['session_summary'] if isinstance(row['session_summary'], dict) else json.loads(row['session_summary']) if row['session_summary'] else {}
-        }
+        return self._format_session_row(rows[0])
 
     async def is_expired(self, session_id: str, current_time: Optional[datetime] = None) -> bool:
-        """
-        Check if session is expired.
-
-        Args:
-            session_id: Session identifier
-            current_time: Time to check against (default: now)
-
-        Returns:
-            True if expired, False if still valid
-        """
+        """Check if session is expired asynchronously."""
         if current_time is None:
             current_time = datetime.now(timezone.utc)
 
@@ -199,20 +138,15 @@ class PostgreSQLSessionStoreAsync:
         if not rows:
             return True  # Session not found = expired
 
+        row = rows[0]
         # Make current_time timezone-aware if needed
         if current_time.tzinfo is None:
             current_time = current_time.replace(tzinfo=timezone.utc)
 
-        return current_time > rows[0]['expires_at']
+        return current_time > row['expires_at']
 
     async def update_activity(self, session_id: str, accessed_at: Optional[datetime] = None):
-        """
-        Update session's last_active timestamp and extend expiration.
-
-        Args:
-            session_id: Session identifier
-            accessed_at: Access time (default: now)
-        """
+        """Update session's last_active timestamp and extend expiration asynchronously."""
         if accessed_at is None:
             accessed_at = datetime.now(timezone.utc)
 
@@ -225,53 +159,27 @@ class PostgreSQLSessionStoreAsync:
         """, [accessed_at, expires_at, session_id])
 
     async def update_session_project(self, session_id: str, project_name: str) -> bool:
-        """
-        Update session's project_name field (e.g., from __PENDING__ to actual project).
-
-        Args:
-            session_id: Session identifier
-            project_name: New project name to set
-
-        Returns:
-            True if session was updated, False if session not found
-        """
+        """Update session's project_name field asynchronously."""
         result = await self.adapter.execute_update("""
             UPDATE mcp_sessions
             SET project_name = $1
             WHERE session_id = $2
         """, [project_name, session_id])
-
-        # Check if any rows were updated (result string contains "UPDATE n")
-        return "UPDATE 1" in result or "UPDATE" in result
+        
+        # Result string format: "UPDATE <count>"
+        return self._parse_rowcount(result) > 0
 
     async def delete_session(self, session_id: str) -> bool:
-        """
-        Delete a session from the database.
-
-        Args:
-            session_id: Session identifier to delete
-
-        Returns:
-            True if session was deleted, False if session not found
-        """
+        """Delete a session from the database asynchronously."""
         result = await self.adapter.execute_update("""
             DELETE FROM mcp_sessions
             WHERE session_id = $1
         """, [session_id])
 
-        # Check if any rows were deleted
-        return "DELETE 1" in result or "DELETE" in result
+        return self._parse_rowcount(result) > 0
 
     async def cleanup_expired(self, current_time: Optional[datetime] = None) -> int:
-        """
-        Delete expired sessions from database.
-
-        Args:
-            current_time: Time to check against (default: now)
-
-        Returns:
-            Number of sessions deleted
-        """
+        """Delete expired sessions from database asynchronously."""
         if current_time is None:
             current_time = datetime.now(timezone.utc)
 
@@ -280,31 +188,10 @@ class PostgreSQLSessionStoreAsync:
             WHERE expires_at < $1
         """, [current_time])
 
-        # Extract count from "DELETE n" result
-        if "DELETE" in result:
-            parts = result.split()
-            if len(parts) >= 2:
-                try:
-                    return int(parts[1])
-                except ValueError:
-                    return 0
-        return 0
+        return self._parse_rowcount(result)
 
     async def get_projects_with_stats(self) -> list:
-        """
-        Get all projects with statistics for user selection.
-
-        Returns:
-            List of project dicts with:
-            - project_name: Project name
-            - context_locks: Count of locked contexts (placeholder, not accurate)
-            - last_used: Human-readable time (e.g., "2 days ago")
-            - last_used_timestamp: ISO timestamp
-
-        Note: context_locks count is set to 0 because context_locks table
-        is in per-project schemas, not in public schema with mcp_sessions.
-        Getting accurate counts would require querying each schema separately.
-        """
+        """Get all projects with statistics asynchronously."""
         rows = await self.adapter.execute_query("""
             SELECT
                 project_name,
@@ -317,33 +204,19 @@ class PostgreSQLSessionStoreAsync:
             ORDER BY last_activity DESC NULLS LAST
         """)
 
-        # Convert to list of dicts with human-readable times
         projects = []
         now = datetime.now(timezone.utc)
 
         for row in rows:
             last_activity = row['last_activity']
-
+            
             # Calculate human-readable time difference
             if last_activity:
-                # Make timezone-aware if needed
                 if last_activity.tzinfo is None:
                     last_activity = last_activity.replace(tzinfo=timezone.utc)
 
                 delta = now - last_activity
-
-                if delta.days > 365:
-                    time_str = f"{delta.days // 365} year{'s' if delta.days // 365 > 1 else ''} ago"
-                elif delta.days > 30:
-                    time_str = f"{delta.days // 30} month{'s' if delta.days // 30 > 1 else ''} ago"
-                elif delta.days > 0:
-                    time_str = f"{delta.days} day{'s' if delta.days > 1 else ''} ago"
-                elif delta.seconds > 3600:
-                    time_str = f"{delta.seconds // 3600} hour{'s' if delta.seconds // 3600 > 1 else ''} ago"
-                elif delta.seconds > 60:
-                    time_str = f"{delta.seconds // 60} minute{'s' if delta.seconds // 60 > 1 else ''} ago"
-                else:
-                    time_str = "just now"
+                time_str = self._format_time_delta(delta)
             else:
                 time_str = "never"
 
@@ -363,18 +236,7 @@ class PostgreSQLSessionStoreAsync:
         tool_args: Dict[str, Any],
         result_summary: Optional[str] = None
     ) -> bool:
-        """
-        Incrementally update session summary with tool execution.
-
-        Args:
-            session_id: Session identifier
-            tool_name: Tool that was executed
-            tool_args: Tool arguments
-            result_summary: Optional human-readable summary of result
-
-        Returns:
-            True if updated successfully, False otherwise
-        """
+        """Incrementally update session summary asynchronously."""
         # Get current summary
         rows = await self.adapter.execute_query("""
             SELECT session_summary
@@ -385,10 +247,17 @@ class PostgreSQLSessionStoreAsync:
         if not rows:
             return False
 
-        # Parse current summary
-        summary = rows[0]['session_summary']
+        row = rows[0]
+        summary = row['session_summary']
         if isinstance(summary, str):
             summary = json.loads(summary)
+        elif summary is None:
+            summary = {'work_done': [], 'tools_used': [], 'next_steps': [], 'important_context': {}}
+
+        # Ensure structure exists
+        if 'work_done' not in summary: summary['work_done'] = []
+        if 'tools_used' not in summary: summary['tools_used'] = []
+        if 'important_context' not in summary: summary['important_context'] = {}
 
         # Generate human-readable work description
         work_desc = self._generate_work_description(tool_name, tool_args, result_summary)
@@ -414,23 +283,166 @@ class PostgreSQLSessionStoreAsync:
 
         return True
 
+    async def finalize_handover(self, session_id: str, project_name: str) -> bool:
+        """Finalize handover asynchronously."""
+        rows = await self.adapter.execute_query("""
+            SELECT session_summary, created_at, last_active
+            FROM mcp_sessions
+            WHERE session_id = $1
+        """, [session_id])
+
+        if not rows:
+            return False
+
+        row = rows[0]
+        summary = row['session_summary']
+        if isinstance(summary, str):
+            summary = json.loads(summary)
+        elif summary is None:
+            summary = {}
+
+        handover = {
+            'session_id': session_id,
+            'project_name': project_name,
+            'created_at': row['created_at'].isoformat() if row['created_at'] else None,
+            'finished_at': row['last_active'].isoformat() if row['last_active'] else None,
+            'work_done': summary.get('work_done', []),
+            'tools_used': summary.get('tools_used', []),
+            'next_steps': summary.get('next_steps', []),
+            'important_context': summary.get('important_context', {})
+        }
+
+        await self.adapter.execute_update("""
+            INSERT INTO memory_entries (
+                session_id, timestamp, category, content, metadata
+            ) VALUES ($1, $2, $3, $4, $5)
+        """, [
+            session_id,
+            time.time(),
+            'handover',
+            json.dumps(handover),
+            json.dumps({'project_name': project_name})
+        ])
+
+        return True
+
+    async def store_breadcrumb(
+        self,
+        session_id: str,
+        marker: str,
+        tool: str,
+        message: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """Store a breadcrumb asynchronously."""
+        try:
+            await self.adapter.execute_update("""
+                INSERT INTO breadcrumbs (
+                    session_id, timestamp, marker, tool, message, metadata
+                ) VALUES ($1, $2, $3, $4, $5, $6)
+            """, [
+                session_id,
+                time.time(),
+                marker,
+                tool,
+                message,
+                json.dumps(metadata) if metadata else '{}'
+            ])
+            return True
+        except Exception as e:
+            print(f"⚠️  Failed to store breadcrumb: {e}", file=sys.stderr)
+            return False
+
+    async def get_breadcrumbs(
+        self,
+        session_id: str,
+        limit: int = 50,
+        tool: Optional[str] = None,
+        marker: Optional[str] = None
+    ) -> list:
+        """Retrieve breadcrumbs asynchronously."""
+        query = """
+            SELECT timestamp, marker, tool, message, metadata
+            FROM breadcrumbs
+            WHERE session_id = $1
+        """
+        params = [session_id]
+        param_idx = 2
+
+        if tool:
+            query += f" AND tool = ${param_idx}"
+            params.append(tool)
+            param_idx += 1
+
+        if marker:
+            query += f" AND marker = ${param_idx}"
+            params.append(marker)
+            param_idx += 1
+
+        query += f" ORDER BY timestamp DESC LIMIT ${param_idx}"
+        params.append(limit)
+
+        rows = await self.adapter.execute_query(query, params)
+
+        breadcrumbs = []
+        for row in rows:
+            breadcrumbs.append({
+                'timestamp': datetime.fromtimestamp(row['timestamp'], timezone.utc).isoformat(),
+                'marker': row['marker'],
+                'tool': row['tool'],
+                'message': row['message'],
+                'metadata': json.loads(row['metadata']) if isinstance(row['metadata'], str) else row['metadata']
+            })
+
+        return breadcrumbs
+
+    def _generate_session_id(self) -> str:
+        """Generate unique session ID."""
+        return str(uuid.uuid4()).replace('-', '')[:12]
+
+    def _format_session_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        """Format session row for return."""
+        return {
+            'session_id': row['session_id'],
+            'created_at': row['created_at'],
+            'last_active': row['last_active'],
+            'expires_at': row['expires_at'],
+            'capabilities': json.loads(row['capabilities']) if isinstance(row['capabilities'], str) else row['capabilities'],
+            'client_info': json.loads(row['client_info']) if isinstance(row['client_info'], str) else row['client_info'],
+            'project_name': row['project_name'],
+            'session_summary': row.get('session_summary') if isinstance(row.get('session_summary'), dict) else json.loads(row['session_summary']) if row.get('session_summary') else {}
+        }
+
+    def _parse_rowcount(self, result_str: str) -> int:
+        """Parse row count from 'INSERT 0 1' or 'UPDATE 1' string."""
+        try:
+            parts = result_str.split()
+            return int(parts[-1])
+        except:
+            return 0
+
+    def _format_time_delta(self, delta: timedelta) -> str:
+        """Format timedelta to human readable string."""
+        if delta.days > 365:
+            return f"{delta.days // 365} year{'s' if delta.days // 365 > 1 else ''} ago"
+        elif delta.days > 30:
+            return f"{delta.days // 30} month{'s' if delta.days // 30 > 1 else ''} ago"
+        elif delta.days > 0:
+            return f"{delta.days} day{'s' if delta.days > 1 else ''} ago"
+        elif delta.seconds > 3600:
+            return f"{delta.seconds // 3600} hour{'s' if delta.seconds // 3600 > 1 else ''} ago"
+        elif delta.seconds > 60:
+            return f"{delta.seconds // 60} minute{'s' if delta.seconds // 60 > 1 else ''} ago"
+        else:
+            return "just now"
+
     def _generate_work_description(
         self,
         tool_name: str,
         tool_args: Dict[str, Any],
         result_summary: Optional[str]
     ) -> Optional[str]:
-        """
-        Generate human-readable description of work from tool execution.
-
-        Args:
-            tool_name: Tool name
-            tool_args: Tool arguments
-            result_summary: Optional result summary
-
-        Returns:
-            Human-readable work description or None
-        """
+        """Generate human-readable description of work from tool execution."""
         # Map tools to descriptions
         if tool_name == 'lock_context':
             topic = tool_args.get('topic', 'context')
@@ -456,162 +468,3 @@ class PostgreSQLSessionStoreAsync:
 
         # Default: return None for generic tools (don't clutter summary)
         return None
-
-    async def finalize_handover(self, session_id: str, project_name: str) -> bool:
-        """
-        Finalize handover from session_summary and store in memory_entries.
-
-        Args:
-            session_id: Session identifier
-            project_name: Project name for this session
-
-        Returns:
-            True if handover created successfully, False otherwise
-        """
-        # Get session with summary
-        rows = await self.adapter.execute_query("""
-            SELECT session_summary, created_at, last_active
-            FROM mcp_sessions
-            WHERE session_id = $1
-        """, [session_id])
-
-        if not rows:
-            return False
-
-        row = rows[0]
-
-        # Extract session_summary (already JSONB)
-        summary = row['session_summary']
-        if isinstance(summary, str):
-            summary = json.loads(summary)
-
-        # Build handover JSON
-        handover = {
-            'session_id': session_id,
-            'project_name': project_name,
-            'created_at': row['created_at'].isoformat() if row['created_at'] else None,
-            'finished_at': row['last_active'].isoformat() if row['last_active'] else None,
-            'work_done': summary.get('work_done', []),
-            'tools_used': summary.get('tools_used', []),
-            'next_steps': summary.get('next_steps', []),
-            'important_context': summary.get('important_context', {})
-        }
-
-        # Store in memory_entries
-        await self.adapter.execute_update("""
-            INSERT INTO memory_entries (
-                session_id, timestamp, category, content, metadata
-            ) VALUES ($1, $2, $3, $4, $5)
-        """, [
-            session_id,
-            time.time(),
-            'handover',
-            json.dumps(handover),
-            json.dumps({'project_name': project_name})
-        ])
-
-        return True
-
-    async def store_breadcrumb(
-        self,
-        session_id: str,
-        marker: str,
-        tool: str,
-        message: str,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> bool:
-        """
-        Store a breadcrumb in the database.
-
-        Args:
-            session_id: Session identifier
-            marker: Breadcrumb marker (e.g., CRUMB-ENTRY)
-            tool: Tool name
-            message: Log message
-            metadata: Additional structured data
-
-        Returns:
-            True if stored successfully, False otherwise
-        """
-        try:
-            await self.adapter.execute_update("""
-                INSERT INTO breadcrumbs (
-                    session_id, timestamp, marker, tool, message, metadata
-                ) VALUES ($1, $2, $3, $4, $5, $6)
-            """, [
-                session_id,
-                time.time(),
-                marker,
-                tool,
-                message,
-                json.dumps(metadata) if metadata else '{}'
-            ])
-            return True
-        except Exception as e:
-            # Don't let logging failures crash the app
-            print(f"⚠️  Failed to store breadcrumb: {e}", file=sys.stderr)
-            return False
-
-    async def get_breadcrumbs(
-        self,
-        session_id: str,
-        limit: int = 50,
-        tool: Optional[str] = None,
-        marker: Optional[str] = None
-    ) -> list:
-        """
-        Retrieve breadcrumbs for a session.
-
-        Args:
-            session_id: Session identifier
-            limit: Max number of records to return (default: 50)
-            tool: Filter by tool name (optional)
-            marker: Filter by marker type (optional)
-
-        Returns:
-            List of breadcrumb dicts
-        """
-        query = """
-            SELECT timestamp, marker, tool, message, metadata
-            FROM breadcrumbs
-            WHERE session_id = $1
-        """
-        params = [session_id]
-        param_index = 2
-
-        if tool:
-            query += f" AND tool = ${param_index}"
-            params.append(tool)
-            param_index += 1
-
-        if marker:
-            query += f" AND marker = ${param_index}"
-            params.append(marker)
-            param_index += 1
-
-        query += f" ORDER BY timestamp DESC LIMIT ${param_index}"
-        params.append(limit)
-
-        rows = await self.adapter.execute_query(query, params)
-
-        breadcrumbs = []
-        for row in rows:
-            breadcrumbs.append({
-                'timestamp': datetime.fromtimestamp(row['timestamp'], timezone.utc).isoformat(),
-                'marker': row['marker'],
-                'tool': row['tool'],
-                'message': row['message'],
-                'metadata': json.loads(row['metadata']) if isinstance(row['metadata'], str) else row['metadata']
-            })
-
-        return breadcrumbs
-
-    def _generate_session_id(self) -> str:
-        """
-        Generate unique session ID.
-
-        Returns:
-            12-character session ID (UUID fragment)
-        """
-        # Generate UUID and take first 12 chars for session ID
-        return str(uuid.uuid4()).replace('-', '')[:12]
