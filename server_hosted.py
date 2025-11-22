@@ -528,7 +528,9 @@ for idx, route in enumerate(OAUTH_ROUTES):
 from starlette.middleware.cors import CORSMiddleware
 
 app.add_middleware(CorrelationIdMiddleware)              # Innermost - adds correlation ID
-app.add_middleware(BearerAuthMiddleware)                 # Auth check (re-enabled - OAuth fixed)
+# NOTE: Custom Connector doesn't send Bearer token in MCP requests (only in OAuth flow)
+# Disabling auth for Custom Connector compatibility. Claude Desktop still works via npx with static token.
+# app.add_middleware(BearerAuthMiddleware)                 # Auth disabled for Custom Connector
 app.add_middleware(GracefulShutdownMiddleware)           # Handle DELETE /mcp gracefully
 if adapter is not None:
     app.add_middleware(MCPSessionPersistenceMiddleware,  # Persist sessions in PostgreSQL

@@ -45,22 +45,34 @@ access_tokens[access_token] = {
 }
 ```
 
-## What We Also Did (May Not Be Necessary)
+## Secondary Issue: Custom Connector Doesn't Send Bearer Tokens
 
-During troubleshooting, we **disabled BearerAuthMiddleware** in `server_hosted.py`:
-```python
-# PHASE 1: OAuth/Auth DISABLED for testing
-# app.add_middleware(BearerAuthMiddleware)  # Auth check
+After fixing OAuth, we tested re-enabling BearerAuthMiddleware and found:
+
+**Custom Connector does NOT send the Bearer token in MCP requests!**
+
+Logs show:
+```
+"has_auth": false
+"status_code": 401
 ```
 
-**Question:** Is this necessary, or was the OAuth fix alone sufficient?
+Even though OAuth completes successfully and Custom Connector receives a token, it **does not include it in the Authorization header** when making MCP requests (`POST /mcp`, `GET /mcp`).
 
-## Testing Next Steps
+**Result:** BearerAuthMiddleware **must remain disabled** for Custom Connector compatibility.
 
-1. **Re-enable BearerAuthMiddleware**
-2. **Test if tools still appear**
-3. If YES → OAuth fix was sufficient, auth can stay enabled
-4. If NO → Custom Connector has issue with Bearer auth validation
+## Final Configuration
+
+```python
+# Custom Connector doesn't send Bearer token in MCP requests (only in OAuth flow)
+# Disabling auth for Custom Connector compatibility
+# app.add_middleware(BearerAuthMiddleware)  # Auth disabled
+```
+
+**Trade-off:**
+- ✅ Custom Connector works (OAuth for connection, no auth on MCP calls)
+- ❌ MCP endpoints are unauthenticated (relies on OAuth'd connection only)
+- ✅ Claude Desktop via npx still works (doesn't need auth middleware)
 
 ## Production Fix Needed
 
