@@ -1,37 +1,52 @@
 #!/usr/bin/env python3
 """
-MINIMAL MCP Server for Debugging Custom Connector Tool Visibility
+ULTRA-MINIMAL MCP Server for Custom Connector Testing
 
-PHASE 0: Absolute Minimum
-- FastMCP only
+PHASE 0: Absolute Bare Minimum
+- Standalone FastMCP server (no imports from claude_mcp_hybrid_sessions)
+- 3 simple test tools
+- NO database
+- NO auth/OAuth
 - NO middleware
-- NO auth
 - NO session management
-- NO custom routes
-- NO CORS
-- NO logging
+- NO dependencies on existing codebase
 
 Goal: Verify Custom Connector can discover tools with pure FastMCP
 """
 
 import os
-from claude_mcp_hybrid_sessions import mcp
+from mcp.server.fastmcp import FastMCP
 
-# PHASE 0: Pure FastMCP - NO MIDDLEWARE AT ALL
-print("=" * 60)
-print("MINIMAL MCP SERVER - PHASE 0")
-print("=" * 60)
-print("FastMCP only - NO middleware, NO auth, NO routes")
-print("Testing if Custom Connector can discover tools")
-print("=" * 60)
+# Create standalone FastMCP server
+mcp = FastMCP("test-server")
 
-# Get FastMCP's Starlette app (already has /mcp routes and lifespan)
+@mcp.tool()
+def test_echo(message: str) -> str:
+    """Echo a message back."""
+    return f"Echo: {message}"
+
+@mcp.tool()
+def test_add(a: int, b: int) -> int:
+    """Add two numbers."""
+    return a + b
+
+@mcp.tool()
+def test_hello(name: str = "World") -> str:
+    """Say hello to someone."""
+    return f"Hello, {name}!"
+
+# Get FastMCP's Starlette app
 app = mcp.streamable_http_app()
 
-print(f"Routes registered: {len(app.routes)}")
-for r in app.routes:
-    if hasattr(r, 'path'):
-        print(f"  - {r.path}")
+print("=" * 60)
+print("ULTRA-MINIMAL MCP SERVER - PHASE 0")
+print("=" * 60)
+print("Standalone FastMCP with 3 test tools:")
+print("  - test_echo")
+print("  - test_add")
+print("  - test_hello")
+print("NO database, NO auth, NO middleware")
+print("=" * 60)
 
 if __name__ == "__main__":
     import uvicorn
@@ -44,5 +59,5 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=port,
-        log_config=None
+        log_level="info"
     )
