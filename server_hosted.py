@@ -570,9 +570,11 @@ app.add_middleware(CorrelationIdMiddleware)              # Innermost - adds corr
 # Disabling auth for Custom Connector compatibility. Claude Desktop still works via npx with static token.
 # app.add_middleware(BearerAuthMiddleware)                 # Auth disabled for Custom Connector
 app.add_middleware(GracefulShutdownMiddleware)           # Handle DELETE /mcp gracefully
-if adapter is not None:
-    app.add_middleware(MCPSessionPersistenceMiddleware,  # Persist sessions in PostgreSQL
-                       db_pool=adapter)                  # Pass database adapter (not pool)
+# DISABLED: Session middleware causes blocking database calls (sync methods in async middleware)
+# This was adding 7-12 second delays on every request even with fast database
+# if adapter is not None:
+#     app.add_middleware(MCPSessionPersistenceMiddleware,  # Persist sessions in PostgreSQL
+#                        db_pool=adapter)                  # Pass database adapter (not pool)
 app.add_middleware(MCPRequestLoggingMiddleware)          # Log /mcp requests/responses
 app.add_middleware(TimeoutMiddleware)                    # Catch timeouts
 
