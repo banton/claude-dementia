@@ -232,8 +232,40 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
             )
 
 # ============================================================================
-# CUSTOM ROUTES
+# GRACEFUL SHUTDOWN MIDDLEWARE
 # ============================================================================
+
+class GracefulShutdownMiddleware(BaseHTTPMiddleware):
+    """
+    Intercept DELETE /mcp requests to handle graceful shutdown.
+    
+    Claude.ai sends DELETE /mcp to close sessions, then immediately sends new
+    POST requests. This causes ClosedResourceError if we close SSE streams immediately.
+    
+    Solution: Wait 2 seconds before closing to allow pending requests to complete.
+    """
+    
+    async def dispatch(self, request, call_next):
+        # Check for DELETE /mcp or /mcp/
+        if request.method == 'DELETE' and request.url.path.rstrip('/') == '/mcp':
+            session_id = request.headers.get('mcp-session-id', 'unknown')
+            correlation_id = getattr(request.state, 'correlation_id', 'unknown')
+            
+            logger.info("graceful_session_close_start",
+                        session_id=session_id,
+                        correlation_id=correlation_id)
+            
+            # Wait 2 seconds for pending requests to complete
+            await asyncio.sleep(2)
+            
+            logger.info("graceful_session_close_complete",
+                        session_id=session_id,
+                        correlation_id=correlation_id)
+            
+            # Return 202 Accepted
+            return Response(status_code=202, content=b"")
+            
+        return await call_next(request)
 
 async def graceful_mcp_delete(request: Request):
     """
@@ -484,12 +516,8 @@ app.routes.insert(2, Route('/tools', list_tools_endpoint, methods=['GET']))
 app.routes.insert(3, Route('/execute', execute_tool_endpoint, methods=['POST']))
 app.routes.insert(4, Route('/metrics', metrics_endpoint, methods=['GET']))
 
-# Replace FastMCP's default DELETE /mcp handler with graceful version
-# Find and remove existing DELETE route, then add our custom one
-routes_to_keep = [r for r in app.routes if not (isinstance(r, Route) and r.path == '/mcp' and r.methods and 'DELETE' in r.methods)]
-app.routes.clear()
-app.routes.extend(routes_to_keep)
-app.routes.insert(5, Route('/mcp', graceful_mcp_delete, methods=['DELETE']))
+# NOTE: Route modification removed in favor of GracefulShutdownMiddleware
+# This avoids breaking FastMCP's internal routing and task group initialization
 
 # Add OAuth routes for Claude.ai compatibility (unauthenticated - public OAuth flow)
 for idx, route in enumerate(OAUTH_ROUTES):
@@ -501,6 +529,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 app.add_middleware(CorrelationIdMiddleware)              # Innermost - adds correlation ID
 app.add_middleware(BearerAuthMiddleware)                 # Auth check
+app.add_middleware(GracefulShutdownMiddleware)           # Handle DELETE /mcp gracefully
 if adapter is not None:
     app.add_middleware(MCPSessionPersistenceMiddleware,  # Persist sessions in PostgreSQL
                        db_pool=adapter)                  # Pass database adapter (not pool)
@@ -530,6 +559,15 @@ logger.info("app_initialized",
             environment=ENVIRONMENT,
             routes=['/health', '/session-health', '/tools', '/execute', '/metrics', '/mcp',
                     '/.well-known/oauth-*', '/oauth/authorize', '/oauth/token'])
+
+# Debug: Print all routes
+for r in app.routes:
+    if hasattr(r, 'path'):
+        logger.info("route_debug", path=r.path, methods=getattr(r, 'methods', 'ALL'))
+    else:
+        logger.info("route_debug", route=str(r))
+
+logger.info("lifespan_debug", lifespan=str(app.router.lifespan_context))
 
 # ============================================================================
 # STARTUP
