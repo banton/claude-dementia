@@ -22,7 +22,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request, ClientDisconnect
 from starlette.responses import JSONResponse
 
-from mcp_session_store import PostgreSQLSessionStore
+from mcp_session_store_async import PostgreSQLSessionStoreAsync
 
 # Use structlog for consistent logging format
 try:
@@ -36,13 +36,15 @@ except ImportError:
 
 class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
     """
-    Middleware to persist MCP sessions in PostgreSQL.
+    Middleware to persist MCP sessions in PostgreSQL (ASYNC).
 
     Intercepts /mcp requests to:
     1. Create new sessions in PostgreSQL on initialize
     2. Validate existing sessions haven't expired
     3. Update activity timestamps on each request
     4. Return helpful errors for expired/invalid sessions
+
+    Uses async PostgreSQLSessionStoreAsync for non-blocking database operations.
     """
 
     def __init__(self, app, db_pool):
@@ -51,10 +53,10 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
 
         Args:
             app: Starlette application
-            db_pool: PostgreSQL connection pool (psycopg2)
+            db_pool: PostgreSQLAdapterAsync instance
         """
         super().__init__(app)
-        self.session_store = PostgreSQLSessionStore(db_pool)
+        self.session_store = PostgreSQLSessionStoreAsync(db_pool)
 
     def _generate_stable_session_id(self, api_key: str, user_agent: str) -> str:
         """
@@ -127,14 +129,14 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
             stable_session_id = self._generate_stable_session_id(api_key, user_agent)
 
             # Check if session already exists (reconnection)
-            existing_session = self.session_store.get_session(stable_session_id)
+            existing_session = await self.session_store.get_session(stable_session_id)
 
             if existing_session:
                 # Resume existing session
                 logger.info(f"🔄 Resuming session: {stable_session_id[:8]}, project: {existing_session.get('project_name', 'unknown')}, user_agent: {user_agent[:50]}")
 
                 # Update activity timestamp
-                self.session_store.update_activity(stable_session_id)
+                await self.session_store.update_activity(stable_session_id)
 
                 # Set session context for tools to access
                 try:
@@ -149,7 +151,7 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                 logger.info(f"📦 Creating new session: {stable_session_id[:8]}, user_agent: {user_agent[:50]}")
 
                 try:
-                    result = self.session_store.create_session(
+                    result = await self.session_store.create_session(
                         session_id=stable_session_id,
                         project_name='__PENDING__',
                         client_info={'user_agent': user_agent}
@@ -179,7 +181,7 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
             stable_session_id = self._generate_stable_session_id(api_key, user_agent)
 
             # Check if session exists in PostgreSQL
-            pg_session = self.session_store.get_session(stable_session_id)
+            pg_session = await self.session_store.get_session(stable_session_id)
 
             if pg_session is None:
                 # Session not found - return 401 to force re-initialization
@@ -258,7 +260,7 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
 
                 # Get available projects
                 try:
-                    projects = self.session_store.get_projects_with_stats()
+                    projects = await self.session_store.get_projects_with_stats()
 
                     # Format project info for display
                     project_list = []
@@ -320,14 +322,14 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
 
                 # Finalize handover from session_summary
                 try:
-                    self.session_store.finalize_handover(stable_session_id, project_name)
+                    await self.session_store.finalize_handover(stable_session_id, project_name)
                     logger.info(f"MCP handover finalized: {stable_session_id[:8]}, project: {project_name}")
                 except Exception as e:
                     logger.error(f"MCP handover finalization failed: {stable_session_id[:8]}, error: {e}")
 
                 # Delete session
                 try:
-                    self.session_store.delete_session(stable_session_id)
+                    await self.session_store.delete_session(stable_session_id)
                     logger.info(f"MCP session deleted: {stable_session_id[:8]}")
                 except Exception as e:
                     logger.error(f"MCP session deletion failed: {stable_session_id[:8]}, error: {e}")
@@ -351,7 +353,7 @@ class MCPSessionPersistenceMiddleware(BaseHTTPMiddleware):
                 )
 
             # Valid session - update activity timestamp
-            self.session_store.update_activity(stable_session_id)
+            await self.session_store.update_activity(stable_session_id)
             logger.debug(f"MCP session activity updated: {stable_session_id[:8]}")
 
             # Set session context for tools to access
