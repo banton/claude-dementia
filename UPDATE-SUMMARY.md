@@ -1,3 +1,24 @@
+# Claude Memory System Update Summary
+
+## v3.1.0: Lean Local MCP Server
+**Date:** 2025-11-23
+
+### New Features
+*   **Lean Local MCP Server**: A lightweight, local-first MCP server (`server.py`) that replaces the complex hybrid/Postgres system.
+*   **Local SQLite Database**: Uses `.claude-memory.db` in the project root for zero-config persistence.
+*   **Local Embeddings**: Integrates with **Ollama** (using `nomic-embed-text`) for semantic search and memory retrieval.
+*   **Graceful Degradation**: Falls back to keyword search if Ollama is unavailable.
+*   **Simplified Architecture**: Removed heavy dependencies (Postgres, asyncpg) in favor of standard library `sqlite3` and `httpx`.
+
+### Changes
+*   Added `server.py`: The new core server implementation.
+*   Added `requirements.txt`: Minimal dependencies (`mcp`, `httpx`, `numpy`).
+*   Added `verify_local.py`: Verification script for local features.
+*   Updated `README.md`: Complete rewrite to focus on the new local server onboarding.
+*   Updated `CLAUDE.md`, `INSTALL-FOR-CLAUDE.md`, `QUICK-REFERENCE.md`: Bumped version to 3.1.0.
+
+---
+
 # Claude Memory System v3.0 Update Summary
 
 ## What Was Done
