@@ -1,0 +1,7 @@
+.env
+.claude-memory.db
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+.vscode/
