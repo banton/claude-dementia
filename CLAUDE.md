@@ -252,5 +252,5 @@ Before EVERY commit:
 
 **Load this file first in EVERY session. Your memory system depends on it.**
 
-**Version**: 3.0.0  
+**Version**: 3.1.0  
 **Token Budget**: This file uses ~1,000 tokens

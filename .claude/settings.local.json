@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh pr:*)",
+      "Bash(/tmp/app-spec.yaml)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -170,5 +170,5 @@ This system makes you a reliable development partner by solving the memory probl
 
 ---
 **Source**: https://github.com/banton/claude-dementia  
-**Version**: 3.0.0  
+**Version**: 3.1.0  
 **For**: Claude Code installation

@@ -144,4 +144,4 @@ chmod +x .git/hooks/post-commit
 
 **Remember**: Information density > Verbosity | Automation > Manual | Progress > Perfection
 
-**Version**: 3.0.0 | **Budget**: 10,000 tokens | **Updated**: 2024-06-22
+**Version**: 3.1.0 | **Budget**: 10,000 tokens | **Updated**: 2024-06-22
