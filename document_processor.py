@@ -1,7 +1,8 @@
 import os
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 from markitdown import MarkItDown
+import asyncio
 
 class DocumentProcessor:
     """Handles document text extraction and processing."""
@@ -69,10 +70,10 @@ class DocumentProcessor:
     def get_file_metadata(self, file_path: str) -> dict:
         """
         Get file metadata.
-        
+
         Args:
             file_path: Path to file
-            
+
         Returns:
             Dictionary with file metadata
         """
@@ -82,3 +83,67 @@ class DocumentProcessor:
             "file_type": path_obj.suffix.lower() or "unknown",
             "size_bytes": path_obj.stat().st_size
         }
+
+    # ============================================================================
+    # ASYNC WRAPPERS (using run_in_executor to prevent event loop blocking)
+    # ============================================================================
+
+    async def extract_text_from_file_async(self, file_path: str) -> Tuple[str, str]:
+        """
+        Async wrapper for extract_text_from_file.
+
+        Prevents event loop blocking by running CPU-intensive MarkItDown
+        operations in executor.
+
+        Args:
+            file_path: Path to the file
+
+        Returns:
+            Tuple of (extracted_text, file_type)
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self.extract_text_from_file,
+            file_path
+        )
+
+    async def chunk_text_if_needed_async(self, text: str, max_chars: int = 60000) -> Tuple[str, bool]:
+        """
+        Async wrapper for chunk_text_if_needed.
+
+        Note: This is very fast (string slicing), but wrapped for consistency.
+
+        Args:
+            text: Text to check
+            max_chars: Maximum character count
+
+        Returns:
+            Tuple of (text_or_preview, was_truncated)
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self.chunk_text_if_needed,
+            text,
+            max_chars
+        )
+
+    async def get_file_metadata_async(self, file_path: str) -> Dict[str, Any]:
+        """
+        Async wrapper for get_file_metadata.
+
+        Note: This is very fast (filesystem stat), but wrapped for consistency.
+
+        Args:
+            file_path: Path to file
+
+        Returns:
+            Dictionary with file metadata
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self.get_file_metadata,
+            file_path
+        )

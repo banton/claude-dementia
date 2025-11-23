@@ -2,6 +2,8 @@ import os
 import boto3
 from botocore.exceptions import ClientError
 import mimetypes
+import asyncio
+from typing import Optional, Dict, Any, List
 
 class S3StorageService:
     def __init__(self):
@@ -111,8 +113,67 @@ class S3StorageService:
              # endpoint: https://nyc3.digitaloceanspaces.com
              # bucket: mybucket
              # url: https://mybucket.nyc3.digitaloceanspaces.com/key
-             
+
              clean_endpoint = self.endpoint_url.replace("https://", "").replace("http://", "")
              url = f"https://{self.bucket_name}.{clean_endpoint}/{object_name}"
-             
+
         return url
+
+    # ============================================================================
+    # ASYNC WRAPPERS (using run_in_executor to prevent event loop blocking)
+    # ============================================================================
+
+    async def upload_file_async(self, file_path: str, object_name: Optional[str] = None) -> bool:
+        """
+        Async wrapper for upload_file.
+
+        Prevents event loop blocking by running sync boto3 operations in executor.
+
+        Args:
+            file_path: File to upload
+            object_name: S3 object name (defaults to filename)
+
+        Returns:
+            True if file was uploaded, else raises exception
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self.upload_file,
+            file_path,
+            object_name
+        )
+
+    async def list_files_async(self, prefix: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Async wrapper for list_files.
+
+        Args:
+            prefix: Optional prefix to filter files
+
+        Returns:
+            List of file dictionaries
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self.list_files,
+            prefix
+        )
+
+    async def get_file_url_async(self, object_name: str) -> str:
+        """
+        Async wrapper for get_file_url.
+
+        Args:
+            object_name: S3 object name
+
+        Returns:
+            Public URL for the file
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self.get_file_url,
+            object_name
+        )

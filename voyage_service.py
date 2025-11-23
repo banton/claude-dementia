@@ -1,5 +1,7 @@
 import os
 import voyageai
+import asyncio
+from typing import List
 
 class VoyageEmbeddingService:
     """Service for generating embeddings using VoyageAI API."""
@@ -69,3 +71,47 @@ class VoyageEmbeddingService:
         except Exception as e:
             print(f"VoyageAI batch embedding generation failed: {e}")
             raise e
+
+    # ============================================================================
+    # ASYNC WRAPPERS (using run_in_executor to prevent event loop blocking)
+    # ============================================================================
+
+    async def generate_embedding_async(self, text: str, model: str = "voyage-3-lite") -> list:
+        """
+        Async wrapper for generate_embedding.
+
+        Prevents event loop blocking by running sync VoyageAI API calls in executor.
+
+        Args:
+            text: Text to embed
+            model: VoyageAI model to use (default: voyage-3-lite)
+
+        Returns:
+            List of floats representing the embedding vector
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self.generate_embedding,
+            text,
+            model
+        )
+
+    async def generate_embeddings_batch_async(self, texts: List[str], model: str = "voyage-3-lite") -> list:
+        """
+        Async wrapper for generate_embeddings_batch.
+
+        Args:
+            texts: List of texts to embed
+            model: VoyageAI model to use (default: voyage-3-lite)
+
+        Returns:
+            List of embedding vectors
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self.generate_embeddings_batch,
+            texts,
+            model
+        )

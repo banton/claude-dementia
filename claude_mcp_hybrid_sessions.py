@@ -66,8 +66,14 @@ from file_semantic_model import (
     check_standard_file_warnings,
     analyze_file_semantics,
     walk_project_files,
-    cluster_files_by_semantics
+    cluster_files_by_semantics,
+    FileSemanticModel
 )
+
+# Import document ingestion services
+from storage_service import S3StorageService
+from voyage_service import VoyageEmbeddingService
+from document_processor import DocumentProcessor
 
 # Initialize MCP server
 mcp = FastMCP("claude-dementia")
@@ -11257,6 +11263,376 @@ async def get_breadcrumbs(
             "error": "RETRIEVAL_FAILED",
             "message": f"Failed to retrieve breadcrumbs: {e}"
         })
+
+# ============================================================================
+# STORAGE TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def upload_to_storage(
+    file_path: str,
+    object_name: Optional[str] = None
+) -> str:
+    """
+    Upload a file to S3-compatible storage (e.g. DigitalOcean Spaces).
+    Max file size: 10MB.
+
+    Args:
+        file_path: Absolute path to the file to upload
+        object_name: Optional name for the file in storage (defaults to filename)
+
+    Returns:
+        JSON string with upload status and public URL if successful
+    """
+    try:
+        storage = S3StorageService()
+        if not storage.client:
+            return json.dumps({
+                "error": "Storage service not configured",
+                "message": "S3 environment variables are missing"
+            })
+
+        # Verify file exists
+        path_obj = Path(file_path).expanduser().resolve()
+        if not path_obj.exists():
+            return json.dumps({
+                "error": "File not found",
+                "path": str(path_obj)
+            })
+
+        # Upload (async wrapper to prevent blocking)
+        success = await storage.upload_file_async(str(path_obj), object_name)
+
+        if success:
+            final_name = object_name if object_name else path_obj.name
+            url = await storage.get_file_url_async(final_name)
+            return json.dumps({
+                "status": "success",
+                "file": final_name,
+                "url": url,
+                "size_bytes": path_obj.stat().st_size
+            }, indent=2)
+        else:
+            return json.dumps({"error": "Upload failed (unknown reason)"})
+
+    except Exception as e:
+        return json.dumps({
+            "error": str(e),
+            "type": type(e).__name__
+        }, indent=2)
+
+@mcp.tool()
+async def list_storage_files(
+    prefix: Optional[str] = None
+) -> str:
+    """
+    List files in the configured S3 storage bucket.
+
+    Args:
+        prefix: Optional prefix to filter files (e.g. "folder/")
+
+    Returns:
+        JSON string with list of files
+    """
+    try:
+        storage = S3StorageService()
+        if not storage.client:
+            return json.dumps({
+                "error": "Storage service not configured",
+                "message": "S3 environment variables are missing"
+            })
+
+        files = await storage.list_files_async(prefix)
+        return json.dumps({
+            "count": len(files),
+            "files": files
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({
+            "error": str(e),
+            "type": type(e).__name__
+        }, indent=2)
+
+
+async def _store_file_semantic_data(conn, session_id: str, file_path: str, metadata: dict, scan_time_ms: int):
+    """Store or update file metadata in database (Async/PostgreSQL)"""
+    import json
+    import time
+
+    await conn.execute_update("""
+        INSERT INTO file_semantic_model (
+            session_id, file_path, file_size, content_hash, modified_time, hash_method,
+            file_type, language, purpose, imports, exports, dependencies, used_by, contains,
+            is_standard, standard_type, warnings, cluster_name, related_files,
+            last_scanned, scan_duration_ms, semantic_tags, quality_score
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+        ON CONFLICT (session_id, file_path)
+        DO UPDATE SET
+            file_size = EXCLUDED.file_size,
+            content_hash = EXCLUDED.content_hash,
+            modified_time = EXCLUDED.modified_time,
+            hash_method = EXCLUDED.hash_method,
+            file_type = EXCLUDED.file_type,
+            language = EXCLUDED.language,
+            purpose = EXCLUDED.purpose,
+            imports = EXCLUDED.imports,
+            exports = EXCLUDED.exports,
+            dependencies = EXCLUDED.dependencies,
+            used_by = EXCLUDED.used_by,
+            contains = EXCLUDED.contains,
+            is_standard = EXCLUDED.is_standard,
+            standard_type = EXCLUDED.standard_type,
+            warnings = EXCLUDED.warnings,
+            cluster_name = EXCLUDED.cluster_name,
+            related_files = EXCLUDED.related_files,
+            last_scanned = EXCLUDED.last_scanned,
+            scan_duration_ms = EXCLUDED.scan_duration_ms,
+            semantic_tags = EXCLUDED.semantic_tags,
+            quality_score = EXCLUDED.quality_score
+    """, [
+        session_id,
+        file_path,
+        metadata.get('size_bytes', 0),
+        metadata.get('content_hash'),
+        metadata.get('modified_time', time.time()),
+        'sha256', # Default hash method
+        metadata.get('extension', 'unknown'),
+        metadata.get('language', 'unknown'),
+        metadata.get('purpose', ''),
+        json.dumps(metadata.get('imports', [])),
+        json.dumps(metadata.get('exports', [])),
+        json.dumps(metadata.get('dependencies', [])),
+        json.dumps(metadata.get('used_by', [])),
+        json.dumps({
+            'classes': metadata.get('classes', []),
+            'functions': metadata.get('functions', [])
+        }),
+        False, # is_standard
+        None, # standard_type
+        json.dumps([]), # warnings
+        None, # cluster_name
+        json.dumps([]), # related_files
+        time.time(),
+        scan_time_ms,
+        json.dumps(metadata.get('semantic_tags', [])),
+        metadata.get('quality_score', 0)
+    ])
+
+@mcp.tool()
+async def ingest_document(
+    file_path: str,
+    label: Optional[str] = None,
+    project: Optional[str] = None,
+    priority: str = "reference",
+    tags: Optional[str] = None
+) -> str:
+    """
+    Ingest a document into dementia with S3 storage and VoyageAI embeddings.
+
+    Complete pipeline:
+    1. Extract text from file (supports txt, md, py, pdf, docx, xlsx, etc.)
+    2. Upload original file to S3 storage
+    3. Generate embedding via VoyageAI
+    4. Store embedding vector in NeonDB
+    5. Create searchable context with file metadata
+
+    Args:
+        file_path: Absolute path to the file to ingest
+        label: Context label (defaults to filename)
+        project: Project name (defaults to current project)
+        priority: Context priority - "critical", "active", "reference" (default: "reference")
+        tags: Comma-separated tags for categorization
+
+    Returns:
+        JSON with ingestion status, context label, S3 URL, and embedding info
+
+    Example:
+        User: "Add this PDF to my knowledge base"
+        LLM: ingest_document(file_path="/path/to/document.pdf")
+    """
+    import traceback
+    from pathlib import Path
+
+    try:
+        # Check project selection
+        project_check = await _check_project_selection_required(project)
+        if project_check:
+            return project_check
+
+        project_name = await _get_project_for_context(project)
+
+        # Validate file
+        path_obj = Path(file_path).expanduser().resolve()
+        if not path_obj.exists():
+            return json.dumps({
+                "error": "File not found",
+                "path": str(path_obj)
+            }, indent=2)
+
+        # Check file size (10MB limit)
+        file_size = path_obj.stat().st_size
+        if file_size > 10 * 1024 * 1024:
+            return json.dumps({
+                "error": "File too large",
+                "size_mb": round(file_size / (1024 * 1024), 2),
+                "max_mb": 10,
+                "suggestion": "Split the file or compress it"
+            }, indent=2)
+
+        # Initialize services
+        storage = S3StorageService()
+        voyage = VoyageEmbeddingService()
+        processor = DocumentProcessor()
+        semantic_model = FileSemanticModel()
+
+        # Check services are configured
+        if not storage.client:
+            return json.dumps({
+                "error": "S3 storage not configured",
+                "message": "Set S3_* environment variables"
+            }, indent=2)
+
+        if not voyage.client:
+            return json.dumps({
+                "error": "VoyageAI not configured",
+                "message": "Set VOYAGEAI_API_KEY environment variable"
+            }, indent=2)
+
+        # Step 1: Extract text from file (async wrapper to prevent blocking)
+        logger.info(f"Extracting text from {path_obj.name}...")
+        try:
+            text_content, file_type = await processor.extract_text_from_file_async(str(path_obj))
+        except Exception as e:
+            return json.dumps({
+                "error": "Text extraction failed",
+                "message": str(e),
+                "file": path_obj.name
+            }, indent=2)
+
+        # Step 1.5: Semantic Analysis
+        logger.info(f"Analyzing semantics for {path_obj.name}...")
+        try:
+            analysis_start = time.time()
+            semantic_data = semantic_model.analyze_file(str(path_obj), text_content)
+            scan_time_ms = int((time.time() - analysis_start) * 1000)
+        except Exception as e:
+            logger.warning(f"Semantic analysis failed: {e}")
+            semantic_data = {}
+            scan_time_ms = 0
+
+        # Step 2: Prepare text for embedding (truncate if needed)
+        embedding_text, was_truncated = await processor.chunk_text_if_needed_async(text_content)
+
+        # Step 3: Upload file to S3 (async wrapper to prevent blocking)
+        logger.info(f"Uploading {path_obj.name} to S3...")
+        try:
+            object_name = f"{project_name}/{path_obj.name}"
+            await storage.upload_file_async(str(path_obj), object_name)
+            s3_url = await storage.get_file_url_async(object_name)
+        except Exception as e:
+            return json.dumps({
+                "error": "S3 upload failed",
+                "message": str(e)
+            }, indent=2)
+
+        # Step 4: Generate embedding (async wrapper to prevent blocking)
+        logger.info(f"Generating embedding for {path_obj.name}...")
+        try:
+            embedding_vector = await voyage.generate_embedding_async(embedding_text, model="voyage-3-lite")
+        except Exception as e:
+            # If embedding fails, we can still create context without it
+            logger.warning(f"Embedding generation failed: {e}")
+            embedding_vector = None
+
+        # Step 5: Create context with all metadata
+        context_label = label or path_obj.stem
+
+        # Prepare metadata
+        file_metadata = await processor.get_file_metadata_async(str(path_obj))
+        file_metadata["s3_url"] = s3_url
+        file_metadata["s3_object_name"] = object_name
+        file_metadata["was_truncated_for_embedding"] = was_truncated
+
+        # Generate preview and key concepts
+        preview = generate_preview(text_content)
+        key_concepts = extract_key_concepts(text_content)
+
+        # Store in database
+        db = get_db()
+        async with AsyncAutoClosingConnection(db.pool, db.schema) as conn:
+            await conn.execute("""
+                INSERT INTO context_locks
+                (project_name, label, version, content, preview, key_concepts,
+                 priority, tags, metadata, embedding_vector, size_bytes)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                ON CONFLICT (project_name, label, version)
+                DO UPDATE SET
+                    content = EXCLUDED.content,
+                    preview = EXCLUDED.preview,
+                    key_concepts = EXCLUDED.key_concepts,
+                    priority = EXCLUDED.priority,
+                    tags = EXCLUDED.tags,
+                    metadata = EXCLUDED.metadata,
+                    embedding_vector = EXCLUDED.embedding_vector,
+                    size_bytes = EXCLUDED.size_bytes,
+                    last_accessed = CURRENT_TIMESTAMP
+            """, [
+                project_name,
+                context_label,
+                "1.0",
+                text_content,
+                preview,
+                key_concepts,
+                priority,
+                tags,
+                json.dumps(file_metadata),
+                embedding_vector,
+                len(text_content.encode('utf-8'))
+            ])
+
+            # Store semantic data
+            try:
+                session_id = await _get_session_id_for_project(conn, project_name)
+                # Merge basic metadata with semantic data
+                full_metadata = {**file_metadata, **semantic_data}
+                await _store_file_semantic_data(conn, session_id, str(path_obj), full_metadata, scan_time_ms)
+                logger.info(f"Stored semantic metadata for {path_obj.name}")
+            except Exception as e:
+                logger.warning(f"Failed to store semantic metadata: {e}")
+
+        logger.info(f"Successfully ingested {path_obj.name} as context '{context_label}'")
+
+        return json.dumps({
+            "status": "success",
+            "context_label": context_label,
+            "project": project_name,
+            "file": {
+                "name": path_obj.name,
+                "type": file_type,
+                "size_bytes": file_size,
+                "s3_url": s3_url
+            },
+            "embedding": {
+                "generated": embedding_vector is not None,
+                "model": "voyage-3-lite" if embedding_vector else None,
+                "dimensions": len(embedding_vector) if embedding_vector else 0,
+                "text_truncated": was_truncated
+            },
+            "content": {
+                "extracted_chars": len(text_content),
+                "preview_chars": len(preview)
+            }
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Document ingestion failed: {e}", exc_info=True)
+        return json.dumps({
+            "error": "Ingestion failed",
+            "message": str(e),
+            "type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        }, indent=2)
 
 if __name__ == "__main__":
     # DO NOT print anything to stdout - MCP requires clean JSON communication
